@@ -20,10 +20,13 @@ probs_model:
   max_tokens: 1
   prompt_logprobs: 0
   temperature: 1.0
+  top_p: 1
   get_response: False
 save_path: ${user.save_path}/results
 data_path: ${user.data_path}
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 load_model: True
+lm_api_calls_per_second: 8
+extract_save_freq: 100
 
 filter_by_date: False

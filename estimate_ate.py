@@ -122,10 +122,14 @@ async def extract_covariates(
     async with out_dicts_lock:  # save any remaining results
         if out_dicts:
             final_save_task = asyncio.create_task(
-                _save_results_to_csv(out_dicts, save_path)
+                _save_results_to_csv(
+                    out_dicts, save_path, experiment, extract_type, input_df
+                )
             )
             await final_save_task
-            print(f"Final results saved to {save_path}")
+            logging.info(
+                f"Final save task completed: {final_save_task.result()} new rows saved."
+            )
 
     progress_bar.close()
 
@@ -166,7 +170,8 @@ async def _extract_covariates_from_report(
             )
 
         parsed_response: list[dict] = [
-            response_format.model_validate_json(text).model_dump() for text in response
+            response_format.model_validate_json(text).model_dump(mode="json")
+            for text in response
         ]
 
         save_needed = False
@@ -226,14 +231,14 @@ async def _save_results_to_csv(
                 # append only unique new rows
                 final_df = pd.concat([existing_df, unique_new_rows], ignore_index=True)
 
-                final_df.to_csv(save_path)
+                final_df.to_csv(save_path, index=False)
                 return len(unique_new_rows)
             except Exception as e:
                 logger.error(f"Error reading existing file: {e}. Saving new file.")
-                new_df.to_csv(save_path)
+                new_df.to_csv(save_path, index=False)
                 return len(new_df)
 
-        new_df.to_csv(save_path)
+        new_df.to_csv(save_path, index=False)
         return len(new_df)
 
     with ThreadPoolExecutor() as pool:  # to avoid blocking the event loop
@@ -390,7 +395,7 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
 
     data_flow = {}
 
-    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0)  # .head(10)
+    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0)
     data_flow["curated"] = len(curated_df)
     logger.info(f"Initial number of curated reports: {len(curated_df)} reports.")
 
@@ -407,6 +412,7 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
             save_freq=cfg.extract_save_freq,
         )
     )
+    print(len(ty_samples))
     ty_filtered_df = experiment.hard_filter_ty(ty_samples)
     data_flow["ty_filtered"] = len(ty_filtered_df)
     logger.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")

@@ -5,4 +5,5 @@ temperature: 0.7
 top_p: 1
 max_tokens: 256
 seed: ${..seed}
+cache_requests: True
 get_response: False

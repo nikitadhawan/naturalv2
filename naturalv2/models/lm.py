@@ -19,6 +19,8 @@ class LM:
         temperature: float = 0.5,
         max_tokens: int = 64,
         num_retries: int = 2,
+        cache_requests: bool = True,
+        cache_dir: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.model = model
@@ -27,6 +29,13 @@ class LM:
         self._cost = 0.0
 
         self.kwargs = dict(temperature=temperature, max_tokens=max_tokens, **kwargs)
+
+        if cache_requests:
+            litellm.enable_cache(
+                type="disk", disk_cache_dir=os.getenv("LITELLM_CACHE_DIR") or cache_dir
+            )
+        else:
+            litellm.disable_cache()
 
     def predict(
         self, prompt: Optional[str] = None, messages: Optional[list] = None, **kwargs

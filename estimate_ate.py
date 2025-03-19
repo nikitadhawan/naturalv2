@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import hydra
 import nest_asyncio
@@ -156,8 +156,8 @@ def filter_by_inclusion(samples_df: pd.DataFrame, experiment: SvT) -> pd.DataFra
 
 
 def prepare_conditional_inputs(
-    input_df: pd.DataFrame, experiment: SvT, extract_type: str, reports: List[str]
-) -> List[str]:
+    input_df: pd.DataFrame, experiment: SvT, extract_type: str, reports: list[str]
+) -> list[str]:
     """Prepare inputs for conditional extraction."""
     if extract_type == "inclusion":
         return reports
@@ -180,8 +180,8 @@ def prepare_conditional_inputs(
 
 
 def process_local_model(
-    model: VLLM, reports: List[str], interleaved_options: List[str]
-) -> Tuple[np.ndarray, List[int]]:
+    model: VLLM, reports: list[str], interleaved_options: list[str]
+) -> tuple[np.ndarray, list[int]]:
     """Process inputs with local VLLM model."""
     probs, sample_indices, _ = model.compute_input_probs(reports, interleaved_options)
     return probs, sample_indices
@@ -190,11 +190,11 @@ def process_local_model(
 def process_remote_model(
     model: LM,
     system_prompt: str,
-    llm_inputs: List[str],
+    llm_inputs: list[str],
     num_reports: int,
     num_options: int,
     length_norm: bool,
-) -> Tuple[np.ndarray, List[int]]:
+) -> tuple[np.ndarray, list[int]]:
     """Process inputs with remote LM model."""
     lm_responses = [
         model.predict(prompt=system_prompt + "\n\n" + llm_input)
@@ -218,8 +218,8 @@ def process_remote_model(
 
 
 def prepare_for_conditional_extraction(
-    experiment: SvT, to_enum: List[str]
-) -> Tuple[List[str], List[str], List[Dict]]:
+    experiment: SvT, to_enum: list[str]
+) -> tuple[list[str], list[str], list[dict]]:
     """Prepare data structures for conditional extraction."""
     options = enumerate_strings(experiment.get_options(to_enum))
     interleaved_options = qa_interleaved_enum(
@@ -386,8 +386,8 @@ def calculate_treatment_effects(
     estimator,
     conditionals: pd.DataFrame,
     inclusion_probs: pd.DataFrame,
-    data_flow: Dict[str, int],
-) -> List[Dict]:
+    data_flow: dict[str, int],
+) -> list[dict]:
     """Calculate treatment effects for all outcome-treatment pairs."""
     result_dicts = []
 
@@ -423,7 +423,7 @@ def calculate_treatment_effects(
     return result_dicts
 
 
-def save_results(results: List[Dict], save_path: str, nct_id: str) -> None:
+def save_results(results: list[dict], save_path: str, nct_id: str) -> None:
     """Save results to CSV file."""
     result_df = pd.DataFrame(results)
     results_path = os.path.join(save_path, f"{nct_id}/ate_results.csv")

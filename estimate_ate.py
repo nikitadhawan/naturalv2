@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 import hydra
 import nest_asyncio
@@ -36,6 +36,20 @@ logger = logging.getLogger()
 load_dotenv(".env")
 
 
+def get_save_path(
+    base_path: str,
+    nct_id: str,
+    model_name: str,
+    extract_type: str,
+) -> str:
+    """Generate save path for extracted data."""
+    return os.path.join(
+        base_path,
+        f"{nct_id}",
+        f"{model_name.replace('/', '-')}_{extract_type}.csv",
+    )
+
+
 async def extract_covariates(
     input_df: pd.DataFrame,
     experiment: SvT,
@@ -44,31 +58,38 @@ async def extract_covariates(
     extract_type: Literal["ty_filter", "knowns", "imputations"],
     batch_size: int = 1,
     response_format: Optional[type[BaseModel]] = None,
-):
-    if extract_type == "ty_filter":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}",
-            f"{model_cfg.model.replace('/', '-')}_ty_samples.csv",
-        )
-    elif extract_type == "knowns":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}/{model_cfg.model.replace('/', '-')}_samples_knowns.csv",
-        )
-    elif extract_type == "imputations":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}/{model_cfg.model.replace('/', '-')}_samples_imputed.csv",
-        )
-    else:
-        raise ValueError(
-            f"Invalid extract_type. Expected one of ['ty_filter', 'knowns', 'imputations'], "
-            f"but got {extract_type}."
-        )
+) -> pd.DataFrame:
+    """Extract covariates from input data using LLM.
 
-    if os.path.exists(save_path):
-        return pd.read_csv(save_path, index_col=0)
+    Parameters
+    ----------
+    input_df: pd.DataFrame
+        Input dataframe with reports
+    experiment: SvT
+        SvT experiment object
+    model_cfg: DictConfig
+        Model configuration
+    save_path: str
+        Base path to save results
+    extract_type: Literal["ty_filter", "knowns", "imputations"]
+        Type of extraction to perform
+    batch_size: int
+        Number of samples to process in each batch
+    response_format: Optional[type[BaseModel]]
+        Pydantic model for response format validation
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with extracted covariates
+
+    """
+    file_path = get_save_path(
+        save_path, experiment.nct_id, model_cfg.model, extract_type
+    )
+
+    if os.path.exists(file_path):
+        return pd.read_csv(file_path, index_col=0)
 
     model = LM(**model_cfg)
 
@@ -108,9 +129,8 @@ async def extract_covariates(
         )
 
     llm_samples_df = pd.DataFrame.from_dict(out_dicts)
-    if (
-        extract_type == "imputations"
-    ):  # TODO later: Remove to use only new extractions - shouldn't change results much.
+    # TODO later: Remove to use only new extractions - shouldn't change results much.
+    if extract_type == "imputations":
         input_df.update(llm_samples_df, overwrite=False)
         llm_samples_df = input_df.copy()
 
@@ -119,66 +139,88 @@ async def extract_covariates(
             llm_samples_df, hard_filter=False, inf=False
         )
 
-    llm_samples_df.to_csv(save_path)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    llm_samples_df.to_csv(file_path)
     return llm_samples_df
 
 
-def filter_by_ty(samples_df, experiment):
+def filter_by_ty(samples_df: pd.DataFrame, experiment: SvT) -> pd.DataFrame:
+    """Filter samples by treatment and outcome."""
     return experiment.hard_filter_ty(samples_df)
 
 
-def filter_by_inclusion(samples_df, experiment):
-    return experiment.discretize(samples_df, hard_filter=True, inf=False)
+def filter_by_inclusion(samples_df: pd.DataFrame, experiment: SvT) -> pd.DataFrame:
+    """Filter samples by inclusion criteria."""
     # samples_df = samples_df.map(lambda x: np.nan if x in ["Unknown", "unknown"] else x)
+    return experiment.discretize(samples_df, hard_filter=True, inf=False)
 
 
-def extract_conditionals(
-    input_df: pd.DataFrame,
-    experiment: SvT,
-    model_cfg: DictConfig,
-    save_path: str,
-    extract_type: Literal["ty_given_x", "y_given_tx", "inclusion", None],
-    length_norm: bool = False,
-    batch_size: int = 1,
-):
-    if extract_type == "ty_given_x":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}",
-            f"{model_cfg.model.replace('/', '-')}_ty_given_x.csv",
+def prepare_conditional_inputs(
+    input_df: pd.DataFrame, experiment: SvT, extract_type: str, reports: List[str]
+) -> List[str]:
+    """Prepare inputs for conditional extraction."""
+    if extract_type == "inclusion":
+        return reports
+
+    for idx, report in enumerate(reports):
+        row = input_df.loc[input_df["report"] == report]
+        if len(row) == 0:
+            continue
+
+        to_sample = (
+            experiment.covariate_names
+            if extract_type == "ty_given_x"
+            else experiment.covariate_names + ["treatment"]
         )
-        to_enum = ["treatment"] + experiment.outcome_names
-    elif extract_type == "y_given_tx":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}",
-            f"{model_cfg.model.replace('/', '-')}_y_given_tx.csv",
-        )
-        to_enum = experiment.outcome_names
-    elif extract_type == "inclusion":
-        save_path = os.path.join(
-            save_path,
-            f"{experiment.nct_id}",
-            f"{model_cfg.model.replace('/', '-')}_inclusion_probs.csv",
-        )
-        to_enum = ["inclusion"]
-    else:
-        return input_df
+        row = row[to_sample].to_dict("records")[0]
+        sample_text = get_sample_text(row, experiment)
+        reports[idx] += sample_text
 
-    if os.path.exists(save_path):
-        return pd.read_csv(save_path, index_col=0)
+    return reports
 
-    # validate model_cfg
-    assert model_cfg.get("model_type") == "text", "Model type must be 'text'."
-    assert model_cfg.get("prompt_logprobs") == 0, "Prompt logprobs must be 0."
-    local = model_cfg.get("local", None)
 
-    model = VLLM(**model_cfg) if local else LM(**model_cfg)
+def process_local_model(
+    model: VLLM, reports: List[str], interleaved_options: List[str]
+) -> Tuple[np.ndarray, List[int]]:
+    """Process inputs with local VLLM model."""
+    probs, sample_indices, _ = model.compute_input_probs(reports, interleaved_options)
+    return probs, sample_indices
 
-    input_df = experiment.discretize(input_df, hard_filter=False, inf=True)
 
-    system_prompt = experiment.get_prompt("conditionals")
+def process_remote_model(
+    model: LM,
+    system_prompt: str,
+    llm_inputs: List[str],
+    num_reports: int,
+    num_options: int,
+    length_norm: bool,
+) -> Tuple[np.ndarray, List[int]]:
+    """Process inputs with remote LM model."""
+    lm_responses = [
+        model.predict(prompt=system_prompt + "\n\n" + llm_input)
+        for llm_input in llm_inputs
+    ]
 
+    logprobs = []
+    for lm_response in lm_responses:
+        logprob = sum(lm_response[0]["prompt_logprobs"])
+        if length_norm:
+            logprob = logprob / len(lm_response[0]["prompt_tokens"])
+        logprobs.append(logprob)
+
+    probs = softmax(
+        np.array(logprobs).reshape((num_reports, num_options)),
+        axis=1,
+    )
+    sample_indices = [np.random.choice(len(prob), p=prob) for prob in probs]
+
+    return probs, sample_indices
+
+
+def prepare_for_conditional_extraction(
+    experiment: SvT, to_enum: List[str]
+) -> Tuple[List[str], List[str], List[Dict]]:
+    """Prepare data structures for conditional extraction."""
     options = enumerate_strings(experiment.get_options(to_enum))
     interleaved_options = qa_interleaved_enum(
         experiment.get_question_prompt(to_enum),
@@ -189,26 +231,95 @@ def extract_conditionals(
     idx_to_feat = enum_to_dcts(options, to_enum)
     idx_to_feat = [experiment.transform_samples(dct) for dct in idx_to_feat]
 
+    return options, interleaved_options, idx_to_feat
+
+
+def extract_conditionals(
+    input_df: pd.DataFrame,
+    experiment: SvT,
+    model_cfg: DictConfig,
+    save_path: str,
+    extract_type: Literal["ty_given_x", "y_given_tx", "inclusion", None],
+    length_norm: bool = False,
+    batch_size: int = 1,
+) -> pd.DataFrame:
+    """Extract conditional probabilities from input data.
+
+    Parameters
+    ----------
+    input_df: pd.DataFrame
+        Input dataframe with reports
+    experiment: SvT
+        SvT experiment object
+    model_cfg: DictConfig
+        Model configuration
+    save_path: str
+        Base path to save results
+    extract_type: Literal["ty_given_x", "y_given_tx", "inclusion", None]
+        Type of conditional to extract
+    length_norm: bool
+        Whether to normalize logprobs by length
+    batch_size: int
+        Number of samples to process in each batch
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with extracted conditional probabilities
+
+    """
+    # Return input if no extraction needed
+    if extract_type is None:
+        return input_df
+
+    # Define features to enumerate based on extraction type
+    to_enum_map = {
+        "ty_given_x": ["treatment"] + experiment.outcome_names,
+        "y_given_tx": experiment.outcome_names,
+        "inclusion": ["inclusion"],
+    }
+    to_enum = to_enum_map[extract_type]
+
+    # Generate save path
+    file_path = get_save_path(
+        save_path,
+        experiment.nct_id,
+        model_cfg.model,
+        f"{extract_type}_probs" if extract_type == "inclusion" else f"{extract_type}",
+    )
+
+    if os.path.exists(file_path):
+        return pd.read_csv(file_path, index_col=0)
+
+    # Validate model configuration
+    assert model_cfg.get("model_type") == "text", "Model type must be 'text'."
+    assert model_cfg.get("prompt_logprobs") == 0, "Prompt logprobs must be 0."
+    local = model_cfg.get("local", None)
+
+    # Initialize model
+    model = VLLM(**model_cfg) if local else LM(**model_cfg)
+
+    # Discretize input dataframe
+    input_df = experiment.discretize(input_df, hard_filter=False, inf=True)
+
+    # Get system prompt and prepare options
+    system_prompt = experiment.get_prompt("conditionals")
+    _, interleaved_options, idx_to_feat = prepare_for_conditional_extraction(
+        experiment, to_enum
+    )
+
     llm_probs_df = pd.DataFrame()
 
     for start in tqdm(range(0, len(input_df), batch_size)):
         batch_df = input_df.iloc[start : start + batch_size].reset_index(drop=True)
 
+        # Prepare input reports
         reports = batch_df["report"].tolist()
-        if extract_type != "inclusion":
-            for idx, report in enumerate(reports):
-                row = input_df.loc[input_df["report"] == report]
-                if len(row) == 0:
-                    continue
-                to_sample = (
-                    experiment.covariate_names
-                    if extract_type == "ty_given_x"
-                    else experiment.covariate_names + ["treatment"]
-                )
-                row = row[to_sample].to_dict("records")[0]
-                sample_text = get_sample_text(row, experiment)
-                reports[idx] += sample_text
+        reports = prepare_conditional_inputs(
+            input_df, experiment, extract_type, reports
+        )
 
+        # Repeat reports and options for all combinations
         reports_repeated = [
             report for report in reports for _ in range(len(interleaved_options))
         ]
@@ -218,6 +329,7 @@ def extract_conditionals(
             for report, option in zip(reports_repeated, options_repeated)
         ]
 
+        # Select columns to include in output
         cols = (
             experiment.covariate_names
             + experiment.outcome_names
@@ -225,31 +337,22 @@ def extract_conditionals(
         )
         rows = batch_df[cols]
 
+        # Process inputs based on model type
         if local:
-            probs, sample_indices, _ = model.compute_input_probs(
-                reports, 
-                interleaved_options
+            probs, sample_indices = process_local_model(
+                model, reports, interleaved_options
             )
-
         else:
-            lm_responses = [
-                model.predict(prompt=system_prompt + "\n\n" + llm_input)
-                for llm_input in llm_inputs
-            ]
-
-            logprobs = []
-            for lm_response in lm_responses:
-                logprob = sum(lm_response[0]["prompt_logprobs"])
-                if length_norm:
-                    logprob = logprob / len(lm_response[0]["prompt_tokens"])
-                logprobs.append(logprob)
-
-            probs = softmax(
-                np.array(logprobs).reshape((len(reports), len(interleaved_options))),
-                axis=1,
+            probs, sample_indices = process_remote_model(
+                model,
+                system_prompt,
+                llm_inputs,
+                len(reports),
+                len(interleaved_options),
+                length_norm,
             )
-            sample_indices = [np.random.choice(len(prob), p=prob) for prob in probs]
 
+        # Prepare results for saving
         dict_to_save = [
             {
                 **rows.iloc[j].to_dict(),
@@ -260,16 +363,17 @@ def extract_conditionals(
         ]
 
         # TODO [fcogidi]: avoid saving to disk at every iteration?
+        # Append to output dataframe
         df_to_save = pd.DataFrame.from_dict(dict_to_save)
         llm_probs_df = pd.concat([llm_probs_df, df_to_save], ignore_index=True)
-        llm_probs_df.to_csv(save_path)
-        llm_inputs, rows = [], []
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        llm_probs_df.to_csv(file_path)
 
-    llm_probs_df.to_csv(save_path)
-    return pd.read_csv(save_path, index_col=0)
+    return pd.read_csv(file_path, index_col=0)
 
 
-def weight_by_inclusion(ites, inclusion_probs):
+def weight_by_inclusion(ites: np.ndarray, inclusion_probs: pd.DataFrame) -> np.ndarray:
+    """Weight ITEs by inclusion probabilities."""
     # ites has shape [num_treatments, num_datapoints]
     probs = inclusion_probs.apply(
         lambda row: [float(prob) for prob in row["probs"][1:-1].split()][1], axis=1
@@ -277,96 +381,16 @@ def weight_by_inclusion(ites, inclusion_probs):
     return np.average(ites, axis=1, weights=probs)
 
 
-@hydra.main(config_path="conf/", config_name="config.yaml", version_base="1.2")
-def main(cfg: DictConfig) -> None:  # noqa: PLR0915
-    experiment = SvT(path_to_main=cfg.user.path_to_main)
-    os.makedirs(os.path.join(cfg.save_path, f"{experiment.nct_id}"), exist_ok=True)
-
-    nest_asyncio.apply()
-
-    data_flow = {}
-
-    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0)  # .head(10)
-    data_flow["curated"] = len(curated_df)
-    logger.info(f"Initial number of curated reports: {len(curated_df)} reports.")
-
-    # filter reports that do not contain t,y info
-    ty_samples = asyncio.run(
-        extract_covariates(
-            curated_df,
-            experiment,
-            cfg.cheap_model,
-            cfg.save_path,
-            "ty_filter",
-            response_format=TYFilterResponse,
-        )
-    )
-    ty_filtered_df = filter_by_ty(ty_samples, experiment)
-    data_flow["ty_filtered"] = len(ty_filtered_df)
-    logger.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")
-
-    # extract samples from reports, allowing LLM to output "unknown" for missing info
-    samples_with_unknown = asyncio.run(
-        extract_covariates(
-            ty_filtered_df,
-            experiment,
-            cfg.sample_model,
-            cfg.save_path,
-            "knowns",
-            response_format=KnownsResponse,
-        )
-    )
-
-    # filter reports known to violate inclusion criteria
-    inclusion_filtered = filter_by_inclusion(samples_with_unknown, experiment)
-    data_flow["inclusion_filtered"] = len(inclusion_filtered)
-    logger.info(f"After inclusion filter: {len(inclusion_filtered)} reports.")
-
-    # impute samples from reports, imputing missing info
-    imputed_samples = asyncio.run(
-        extract_covariates(
-            inclusion_filtered,
-            experiment,
-            cfg.sample_model,
-            cfg.save_path,
-            "imputations",
-            response_format=ImputationsResponse,
-        )
-    )
-
-    # drop rows with missing covariates even after imputation
-    imputed_samples = imputed_samples.dropna(
-        subset=experiment.covariate_names
-    ).reset_index(drop=True)
-    data_flow["final"] = len(imputed_samples)
-    logger.info(f"Final: {len(imputed_samples)} reports.")
-
-    # extract conditionals depending on the estimator type
-    estimator_type = cfg.estimator._target_.split(".")[-1]
-    extract_type = {
-        "NaturalIPW": "ty_given_x",
-        "NaturalOI": "y_given_tx",
-        "NaturalMC": None,
-    }[estimator_type]
-    conditionals = extract_conditionals(
-        imputed_samples,
-        experiment,
-        cfg.probs_model,
-        cfg.save_path,
-        extract_type=extract_type,
-    )
-
-    # extract inclusion probabilities of the form P(X in I | R)
-    inclusion_probs = extract_conditionals(
-        imputed_samples,
-        experiment,
-        cfg.probs_model,
-        cfg.save_path,
-        extract_type="inclusion",
-    )
-
-    estimator = instantiate(cfg.estimator, experiment=experiment)
+def calculate_treatment_effects(
+    experiment: SvT,
+    estimator,
+    conditionals: pd.DataFrame,
+    inclusion_probs: pd.DataFrame,
+    data_flow: Dict[str, int],
+) -> List[Dict]:
+    """Calculate treatment effects for all outcome-treatment pairs."""
     result_dicts = []
+
     for outcome in experiment.outcome_names:
         all_ites = estimator.get_ites(conditionals, outcome)
         weighted_effects = weight_by_inclusion(
@@ -378,7 +402,7 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
                 if i < j:
                     pred_ate = weighted_effects[j] - weighted_effects[i]
                     results = {
-                        "estimator": cfg.estimator._target_.split(".")[-1],
+                        "estimator": estimator.__class__.__name__,
                         "outcome": outcome,
                         "treatments": f"{treat2}-{treat1}",
                         "pred_ate": pred_ate,
@@ -396,14 +420,120 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
                     results.update(data_flow)
                     result_dicts.append(results)
 
-    # TODO later: compute other evaluation metrics, e.g. sensitivity, balance
+    return result_dicts
 
-    result_df = pd.DataFrame(result_dicts)
-    results_path = os.path.join(cfg.save_path, f"{experiment.nct_id}/ate_results.csv")
+
+def save_results(results: List[Dict], save_path: str, nct_id: str) -> None:
+    """Save results to CSV file."""
+    result_df = pd.DataFrame(results)
+    results_path = os.path.join(save_path, f"{nct_id}/ate_results.csv")
+
     if os.path.exists(results_path):
         existing_df = pd.read_csv(results_path, index_col=0)
         result_df = pd.concat([existing_df, result_df], ignore_index=True)
+
     result_df.to_csv(results_path)
+
+
+@hydra.main(config_path="conf/", config_name="config.yaml", version_base="1.2")
+def main(cfg: DictConfig) -> None:
+    """Main function to estimate average treatment effects."""
+    experiment = SvT(path_to_main=cfg.user.path_to_main)
+    os.makedirs(os.path.join(cfg.save_path, f"{experiment.nct_id}"), exist_ok=True)
+
+    nest_asyncio.apply()
+
+    data_flow = {}
+
+    # Load curated data
+    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0)
+    data_flow["curated"] = len(curated_df)
+    logger.info(f"Initial number of curated reports: {len(curated_df)} reports.")
+
+    # Filter reports that do not contain t,y info
+    ty_samples = asyncio.run(
+        extract_covariates(
+            curated_df,
+            experiment,
+            cfg.cheap_model,
+            cfg.save_path,
+            "ty_filter",
+            response_format=TYFilterResponse,
+        )
+    )
+    ty_filtered_df = filter_by_ty(ty_samples, experiment)
+    data_flow["ty_filtered"] = len(ty_filtered_df)
+    logger.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")
+
+    # Extract samples from reports, allowing LLM to output "unknown" for missing info
+    samples_with_unknown = asyncio.run(
+        extract_covariates(
+            ty_filtered_df,
+            experiment,
+            cfg.sample_model,
+            cfg.save_path,
+            "knowns",
+            response_format=KnownsResponse,
+        )
+    )
+
+    # Filter reports known to violate inclusion criteria
+    inclusion_filtered = filter_by_inclusion(samples_with_unknown, experiment)
+    data_flow["inclusion_filtered"] = len(inclusion_filtered)
+    logger.info(f"After inclusion filter: {len(inclusion_filtered)} reports.")
+
+    # Impute samples from reports, imputing missing info
+    imputed_samples = asyncio.run(
+        extract_covariates(
+            inclusion_filtered,
+            experiment,
+            cfg.sample_model,
+            cfg.save_path,
+            "imputations",
+            response_format=ImputationsResponse,
+        )
+    )
+
+    # Drop rows with missing covariates even after imputation
+    imputed_samples = imputed_samples.dropna(
+        subset=experiment.covariate_names
+    ).reset_index(drop=True)
+    data_flow["final"] = len(imputed_samples)
+    logger.info(f"Final: {len(imputed_samples)} reports.")
+
+    # Extract conditionals depending on the estimator type
+    estimator_type = cfg.estimator._target_.split(".")[-1]
+    extract_type_map = {
+        "NaturalIPW": "ty_given_x",
+        "NaturalOI": "y_given_tx",
+        "NaturalMC": None,
+    }
+    extract_type = extract_type_map.get(estimator_type)
+
+    conditionals = extract_conditionals(
+        imputed_samples,
+        experiment,
+        cfg.probs_model,
+        cfg.save_path,
+        extract_type=extract_type,
+    )
+
+    # Extract inclusion probabilities of the form P(X in I | R)
+    inclusion_probs = extract_conditionals(
+        imputed_samples,
+        experiment,
+        cfg.probs_model,
+        cfg.save_path,
+        extract_type="inclusion",
+    )
+
+    # Calculate and save treatment effects
+    estimator = instantiate(cfg.estimator, experiment=experiment)
+    results = calculate_treatment_effects(
+        experiment, estimator, conditionals, inclusion_probs, data_flow
+    )
+
+    save_results(results, cfg.save_path, experiment.nct_id)
 
 
 if __name__ == "__main__":

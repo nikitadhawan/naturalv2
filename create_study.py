@@ -144,9 +144,7 @@ class Study:
         self.train_ratio: float = cfg.train_ratio
 
         train_exp = [
-            Experiment(
-                cfg.data_path, nct_id, split="train"
-            )
+            Experiment(cfg.data_path, nct_id, split="train")
             for (nct_id, _) in train_trials
         ]
         self.train_trials = [
@@ -159,8 +157,7 @@ class Study:
         )
 
         val_exp = [
-            Experiment(cfg.data_path, nct_id, split="val")
-            for (nct_id, _) in val_trials
+            Experiment(cfg.data_path, nct_id, split="val") for (nct_id, _) in val_trials
         ]
         self.val_trials = [
             {exp.nct_id: [exp.title, exp.date] + exp.references}
@@ -172,9 +169,7 @@ class Study:
         )
 
         test_exp = [
-            Experiment(
-                cfg.data_path, nct_id, split="test"
-            )
+            Experiment(cfg.data_path, nct_id, split="test")
             for (nct_id, _) in test_trials
         ]
         self.test_trials = [
@@ -209,7 +204,7 @@ class Study:
     def to_yaml(self, filename):
         with open(filename, "w") as file:
             yaml.safe_dump(self.__dict__, file)
-    
+
     @classmethod
     def from_yaml(cls, filename):
         with open(filename, "r") as file:

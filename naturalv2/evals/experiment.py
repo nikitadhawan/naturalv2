@@ -1,10 +1,10 @@
 import os
 from ast import literal_eval
 from typing import Any, Literal, Optional
-import yaml
 
-from omegaconf import DictConfig
 import pandas as pd
+import yaml
+from omegaconf import DictConfig
 from pydantic import BaseModel
 
 from naturalv2.evals.clinical_trial import (
@@ -82,10 +82,10 @@ class Experiment:
         )
 
         self._set_outcome_treatment_effects(trial)
-        self.treatment_common_names: dict[str, list[str]]= {}
-        self.outcome_common_names: dict[str, list[str]]= {}
+        self.treatment_common_names: dict[str, list[str]] = {}
+        self.outcome_common_names: dict[str, list[str]] = {}
 
-        self.source_paths: dict[str, str] = {} # paths to curated data, one per source
+        self.source_paths: dict[str, str] = {}  # paths to curated data, one per source
         self.curated_data_path = ""  # path to curated data -- probably unnecessary
         self.options: dict[str, Any] = {}
         self.question_prompts: dict[str, str] = {}
@@ -93,7 +93,7 @@ class Experiment:
     def to_yaml(self, filename):
         with open(filename, "w") as file:
             yaml.safe_dump(self.__dict__, file)
-    
+
     @classmethod
     def from_yaml(cls, filename):
         with open(filename, "r") as file:
@@ -103,7 +103,11 @@ class Experiment:
         return exp
 
     def set_common_names(
-        self, attr: Literal["treatment", "outcome"], source_name: str, lm_cfg: DictConfig, prompt_dct: dict
+        self,
+        attr: Literal["treatment", "outcome"],
+        source_name: str,
+        lm_cfg: DictConfig,
+        prompt_dct: dict,
     ) -> None:
         if attr not in ["treatment", "outcome"]:
             raise ValueError(f"Expected 'treatment' or 'outcome', got {attr}")
@@ -115,12 +119,14 @@ class Experiment:
         system_msg = {"role": "system", "content": prompt_dct["system"]}
         common_names = []
         for name in getattr(self, f"{attr}_names"):
-            prompt = prompt_dct[name].format(**{f"keyword": name})
+            prompt = prompt_dct[name].format(**{"keyword": name})
             messages = [system_msg, {"role": "user", "content": prompt}]
-            lm_response = lm.predict(messages=messages, response_format=ListResponse)
+            lm_response = lm.__call__(messages=messages, response_format=ListResponse)
             common_names.extend(self._parse_lm_response(lm_response[0]))
 
-        getattr(self, f"{attr}_common_names").update({source_name: list(set(common_names))})
+        getattr(self, f"{attr}_common_names").update(
+            {source_name: list(set(common_names))}
+        )
 
     def hard_filter_ty(self, extractions):
         for name in self.treatment_names + self.outcome_names:

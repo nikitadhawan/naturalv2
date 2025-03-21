@@ -1,6 +1,9 @@
 model: ???
 api_key: ${oc.env:OPENAI_API_KEY}
 temperature: 0.7
-top_p: 1
 max_tokens: 512
+num_retries: 3
 seed: ${..seed}
+cache: True
+disk_cache_dir: ${oc.env:LITELLM_CACHE_DIR}
+top_p: 1

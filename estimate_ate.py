@@ -1,9 +1,7 @@
 import asyncio
-import json
 import logging
 import os
-import sys
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import hydra
 import nest_asyncio
@@ -17,8 +15,7 @@ from scipy.special import softmax
 from tqdm import tqdm
 
 from naturalv2.evals.svt import SvT
-from naturalv2.models.lm import LM
-from naturalv2.models.vllm import VLLM
+from naturalv2.models.lm import LM, get_message_content, get_prompt_logprobs
 from naturalv2.utils import (
     ImputationsResponse,
     KnownsResponse,
@@ -30,8 +27,8 @@ from naturalv2.utils import (
 )
 
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-logger = logging.getLogger()
+if TYPE_CHECKING:  # so that script can run without installing vllm, unless required
+    from naturalv2.models.vllm import VLLM
 
 load_dotenv(".env")
 
@@ -48,6 +45,14 @@ def get_save_path(
         f"{nct_id}",
         f"{model_name.replace('/', '-')}_{extract_type}.csv",
     )
+
+
+async def _extract_covariates_from_report(
+    model: LM, messages: list[dict[str, str]], response_format: BaseModel
+) -> dict[str, Any]:
+    response = model(messages=messages, response_format=response_format)
+    response_text = get_message_content(response)[0]
+    return response_format.model_validate_json(response_text).model_dump(mode="json")
 
 
 async def extract_covariates(
@@ -93,39 +98,37 @@ async def extract_covariates(
 
     model = LM(**model_cfg)
 
-    system_msg = {"role": "system", "content": experiment.get_prompt(extract_type)}
-    human_template = "\n## Input \n>{report}"
+    system_message = {"role": "system", "content": experiment.get_prompt(extract_type)}
+    user_prompt_template = "\n## Input \n>{report}"
 
     out_dicts = []
+
+    def _get_messages(reports: list[str]) -> list[list[dict[str, str]]]:
+        return [
+            [
+                system_message,
+                {
+                    "role": "user",
+                    "content": user_prompt_template.format(report=report),
+                },
+            ]
+            for report in reports
+        ]
 
     for start in tqdm(range(0, len(input_df), batch_size)):
         batch_df = input_df.iloc[start : start + batch_size]
 
         reports = batch_df["report"].tolist()
-        lm_responses = await asyncio.gather(  # guaranteed to be in order
-            *(
-                model.apredict(
-                    messages=[
-                        system_msg,
-                        {
-                            "role": "user",
-                            "content": human_template.format(report=report),
-                        },
-                    ],
-                    response_format=response_format,
-                )
-                for report in reports
-            )
-        )
-        parsed_lm_responses: list[dict] = [
-            json.loads(text) for response in lm_responses for text in response
+        messages = _get_messages(reports)
+
+        tasks = [
+            _extract_covariates_from_report(model, message, response_format)
+            for message in messages
         ]
+        results = await asyncio.gather(*tasks)
 
         out_dicts.extend(
-            [
-                {**parsed_lm_responses[j], **{"report": reports[j]}}
-                for j in range(len(batch_df))
-            ]
+            [{**results[j], **{"report": reports[j]}} for j in range(len(batch_df))]
         )
 
     llm_samples_df = pd.DataFrame.from_dict(out_dicts)
@@ -169,7 +172,7 @@ def prepare_conditional_inputs(
 
 
 def process_local_model(
-    model: VLLM, reports: list[str], interleaved_options: list[str]
+    model: "VLLM", reports: list[str], interleaved_options: list[str]
 ) -> tuple[np.ndarray, list[int]]:
     """Process inputs with local VLLM model."""
     probs, sample_indices, _ = model.compute_input_probs(reports, interleaved_options)
@@ -185,16 +188,19 @@ def process_remote_model(
     length_norm: bool,
 ) -> tuple[np.ndarray, list[int]]:
     """Process inputs with remote LM model."""
-    lm_responses = [
-        model.predict(prompt=system_prompt + "\n\n" + llm_input)
-        for llm_input in llm_inputs
+    responses = [
+        model(prompt=system_prompt + "\n\n" + llm_input) for llm_input in llm_inputs
     ]
 
     logprobs = []
-    for lm_response in lm_responses:
-        logprob = sum(lm_response[0]["prompt_logprobs"])
+    for response in responses:
+        prompt_logprobs_obj = get_prompt_logprobs(response)
+        if prompt_logprobs_obj is None:
+            continue
+
+        logprob = sum(prompt_logprobs_obj.logprobs)
         if length_norm:
-            logprob = logprob / len(lm_response[0]["prompt_tokens"])
+            logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
         logprobs.append(logprob)
 
     probs = softmax(
@@ -257,6 +263,7 @@ def extract_conditionals(
         DataFrame with extracted conditional probabilities
 
     """
+
     # Return input if no extraction needed
     if extract_type is None:
         return input_df
@@ -286,7 +293,12 @@ def extract_conditionals(
     local = model_cfg.get("local", None)
 
     # Initialize model
-    model = VLLM(**model_cfg) if local else LM(**model_cfg)
+    if local:
+        from naturalv2.models.vllm import VLLM
+
+        model = VLLM(**model_cfg)
+    else:
+        model = LM(**model_cfg)
 
     # Discretize input dataframe
     input_df = experiment.discretize(input_df, hard_filter=False, inf=True)
@@ -399,7 +411,7 @@ def calculate_treatment_effects(
                         "treatments": f"{treat2}-{treat1}",
                         "pred_ate": pred_ate,
                     }
-                    logger.info(f"Predicted ATE: {pred_ate}")
+                    logging.info(f"Predicted ATE: {pred_ate}")
                     if experiment.split != "test":
                         effect_idx = experiment.outcome_treatment.index(
                             (outcome, (treat1, treat2))
@@ -407,8 +419,8 @@ def calculate_treatment_effects(
                         true_ate = experiment.effect_sizes[effect_idx]
                         error = abs(pred_ate - true_ate)
                         results.update({"true_ate": true_ate, "abs_error": error})
-                        logger.info(f"True ATE: {true_ate}")
-                        logger.info(f"Absolute Error: {error}")
+                        logging.info(f"True ATE: {true_ate}")
+                        logging.info(f"Absolute Error: {error}")
                     results.update(data_flow)
                     result_dicts.append(results)
 
@@ -438,9 +450,9 @@ def main(cfg: DictConfig) -> None:
     data_flow = {}
 
     # Load curated data
-    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0)
+    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0).head(1000)
     data_flow["curated"] = len(curated_df)
-    logger.info(f"Initial number of curated reports: {len(curated_df)} reports.")
+    logging.info(f"Initial number of curated reports: {len(curated_df)} reports.")
 
     # Filter reports that do not contain t,y info
     ty_samples = asyncio.run(
@@ -455,7 +467,7 @@ def main(cfg: DictConfig) -> None:
     )
     ty_filtered_df = experiment.hard_filter_ty(ty_samples)
     data_flow["ty_filtered"] = len(ty_filtered_df)
-    logger.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")
+    logging.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")
 
     # Extract samples from reports, allowing LLM to output "unknown" for missing info
     samples_with_unknown = asyncio.run(
@@ -474,7 +486,7 @@ def main(cfg: DictConfig) -> None:
         samples_with_unknown, hard_filter=True, inf=False
     )
     data_flow["inclusion_filtered"] = len(inclusion_filtered)
-    logger.info(f"After inclusion filter: {len(inclusion_filtered)} reports.")
+    logging.info(f"After inclusion filter: {len(inclusion_filtered)} reports.")
 
     # Impute samples from reports, imputing missing info
     imputed_samples = asyncio.run(
@@ -493,7 +505,7 @@ def main(cfg: DictConfig) -> None:
         subset=experiment.covariate_names
     ).reset_index(drop=True)
     data_flow["final"] = len(imputed_samples)
-    logger.info(f"Final: {len(imputed_samples)} reports.")
+    logging.info(f"Final: {len(imputed_samples)} reports.")
 
     # Extract conditionals depending on the estimator type
     estimator_type = cfg.estimator._target_.split(".")[-1]

@@ -4,13 +4,17 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "causallib>=0.9.7",
+    "diskcache>=5.6.3",
     "hydra-core>=1.3.2",
     "litellm>=1.61.9",
     "nest-asyncio>=1.6.0",
-    "numpy>=2.2.3",
+    "numpy<2.0.0",
     "pandas>=2.2.3",
     "scipy>=1.15.2",
+    "setuptools>=77.0.3",
+    "tenacity>=9.0.0",
     "tqdm>=4.67.1",
+    "wheel>=0.45.1",
 ]
 
 [dependency-groups]
@@ -19,7 +23,8 @@ dev = [
     "pip-audit>=2.8.0",
     "pre-commit>=4.1.0",
     "ruff>=0.9.6",
-    "vec-inf>=0.4.1",
+    "torch>=2.5.1",
+    "vec-inf",
 ]
 
 [tool.ruff]
@@ -69,3 +74,6 @@ ignore-names = ["X*", "setUp"]
 
 [tool.ruff.lint.isort]
 lines-after-imports = 2
+
+[tool.uv.sources]
+vec-inf = { git = "https://github.com/VectorInstitute/vector-inference", branch = "develop" }

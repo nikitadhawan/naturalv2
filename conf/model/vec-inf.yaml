@@ -1,8 +1,9 @@
 model: ???
-api_base: ???
-api_key: EMPTY
+completion_type: chat
+api_base: ??? # e.g. http://gpu001:8080/v1 (run vec-inf status $SLURM_JOB_ID to get this)
 temperature: 0.7
-top_p: 1
-max_tokens: 256
+max_tokens: 512
+num_retries: 3
 seed: ${..seed}
-get_response: False
+cache: True
+disk_cache_dir: ${oc.env:LITELLM_CACHE_DIR}

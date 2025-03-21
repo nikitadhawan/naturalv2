@@ -232,7 +232,10 @@ def main(cfg: DictConfig) -> None:
     )
 
     study = Study(retro_trials, test_trials, cfg)
-    study.to_yaml(os.path.join(cfg.save_path, cfg.conditions[0] + "_study.yaml"))
+    os.makedirs(os.path.join(cfg.save_path, "studies"), exist_ok=True)
+    study.to_yaml(
+        os.path.join(cfg.save_path, "studies", cfg.conditions[0] + "_study.yaml")
+    )
 
 
 if __name__ == "__main__":

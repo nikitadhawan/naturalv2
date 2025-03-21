@@ -81,24 +81,24 @@ def download_sub_data(subreddit, data_type, data_path):
         reader.close()
 
     file_path = data_path + "{}_{}.zst".format(subreddit, data_type)
-    file_size = os.stat(file_path).st_size
+    # file_size = os.stat(file_path).st_size
     file_lines = 0
-    file_bytes_processed = 0
-    created = None
+    # file_bytes_processed = 0
+    # created = None
     bad_lines = 0
     data = []
 
-    for line, file_bytes_processed in read_lines_zst(file_path):
+    for line, _ in read_lines_zst(file_path):
         try:
             obj = json.loads(line)
             data += [obj]
         except (KeyError, json.JSONDecodeError):
             bad_lines += 1
         file_lines += 1
-        if file_lines % 100000 == 0:
-            log.info(
-                f"{created.strftime('%Y-%m-%d %H:%M:%S')} : {file_lines:,} : {bad_lines:,} : {file_bytes_processed:,}:{(file_bytes_processed / file_size) * 100:.0f}%"
-            )
+        # if file_lines % 100000 == 0:
+        #     log.info(
+        #         f"{created.strftime('%Y-%m-%d %H:%M:%S')} : {file_lines:,} : {bad_lines:,} : {file_bytes_processed:,}:{(file_bytes_processed / file_size) * 100:.0f}%"
+        #     )
 
     save_path = data_path + "{}_{}.csv".format(subreddit, data_type)
     data_csv = pd.DataFrame(data)
@@ -131,7 +131,10 @@ def download_from_url(url_str, max_retries=5, retry_delay=120):
     return {"error": "Failed to fetch data after maximum retries"}
 
 
-def download_sub_about_info(data_path):
+def get_sub_about_info(data_path):
+    if os.path.exists(os.path.join(data_path, "subs_about.csv")):
+        return pd.read_csv(data_path + "subs_about.csv", index_col=0)
+
     if not os.path.exists(os.path.join(data_path, "subs_list.txt")):
         download_subs_list(data_path)
 
@@ -175,8 +178,10 @@ def get_comment_permalink(permalink):
     return "/" + permalink.split("/")[-3] + "/"
 
 
-def filter_by_date(df, utc_date_cutoff):
-    idx = df["created_utc"].apply(lambda x: int(x) <= utc_date_cutoff)
+def date_filter(df, date_str):
+    date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    utc_date_cutoff = int(date_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
+    idx = df["date_created"].apply(lambda x: int(x) <= utc_date_cutoff)
     return df[idx]
 
 
@@ -224,37 +229,37 @@ def rule_based_filter(post_df, text_field):
     return post_df
 
 
-def check_treatment_mention(lst, treatment_names):
-    filtered_lst = []
-    for elem in lst:
-        matches = [x for x in treatment_names if x in elem["subreddit"].lower()]
-        matches += [x for x in treatment_names if x in elem["title"].lower()]
-        matches += [x for x in treatment_names if x in elem["post"].lower()]
-        if "initial_post" in list(elem.keys()):
-            matches += [x for x in treatment_names if x in elem["initial_post"].lower()]
-        matches = set(matches)
-        if len(matches) > 0:
-            elem["treatments"] = list(matches)
-            filtered_lst.append(elem)
-    return filtered_lst
+# def check_treatment_mention(lst, treatment_names):
+#     filtered_lst = []
+#     for elem in lst:
+#         matches = [x for x in treatment_names if x in elem["subreddit"].lower()]
+#         matches += [x for x in treatment_names if x in elem["title"].lower()]
+#         matches += [x for x in treatment_names if x in elem["post"].lower()]
+#         if "initial_post" in list(elem.keys()):
+#             matches += [x for x in treatment_names if x in elem["initial_post"].lower()]
+#         matches = set(matches)
+#         if len(matches) > 0:
+#             elem["treatments"] = list(matches)
+#             filtered_lst.append(elem)
+#     return filtered_lst
 
 
-def check_outcome_mention(lst, outcome_words):
-    filtered_lst = []
-    for elem in lst:
-        matches = [x for x in outcome_words if x in elem["subreddit"].lower()]
-        matches += [x for x in outcome_words if x in elem["title"].lower()]
-        matches += [x for x in outcome_words if x in elem["post"].lower()]
-        if "initial_post" in list(elem.keys()):
-            matches += [x for x in outcome_words if x in elem["initial_post"].lower()]
-        matches = set(matches)
-        if len(matches) > 0:
-            elem["outcome_words"] = list(matches)
-            filtered_lst.append(elem)
-    return filtered_lst
+# def check_outcome_mention(lst, outcome_words):
+#     filtered_lst = []
+#     for elem in lst:
+#         matches = [x for x in outcome_words if x in elem["subreddit"].lower()]
+#         matches += [x for x in outcome_words if x in elem["title"].lower()]
+#         matches += [x for x in outcome_words if x in elem["post"].lower()]
+#         if "initial_post" in list(elem.keys()):
+#             matches += [x for x in outcome_words if x in elem["initial_post"].lower()]
+#         matches = set(matches)
+#         if len(matches) > 0:
+#             elem["outcome_words"] = list(matches)
+#             filtered_lst.append(elem)
+#     return filtered_lst
 
 
-def get_context_post_df(submissions, comments, treatment_names, outcome_words):
+def get_context_post_df(submissions, comments):
     merged_df = pd.DataFrame(
         columns=[
             "subreddit",
@@ -320,8 +325,8 @@ def get_context_post_df(submissions, comments, treatment_names, outcome_words):
             }
             for j in range(len(submission_comments))
         ]
-        to_append = check_treatment_mention(to_append, treatment_names)
-        to_append = check_outcome_mention(to_append, outcome_words)
+        # to_append = check_treatment_mention(to_append, treatment_names)
+        # to_append = check_outcome_mention(to_append, outcome_words)
         if len(to_append) > 0:
             df_to_append = pd.DataFrame.from_dict(to_append)
             merged_df = pd.concat([merged_df, df_to_append], ignore_index=True)
@@ -356,20 +361,18 @@ def get_reddit_synonyms(keywords, llm):
     return [k.lower() for k in all_keywords]
 
 
-def subreddit_relevance_llm(desc, keywords, llm):
-    system_prompt = "You are an expert in analyzing online forums for relevant discussions about clinical trials. "
-    system_prompt += "Your task is to determine if a subreddit is likely to contain personal experiences related to a specific clinical trial based on the trial’s details and the subreddit description."
+def subreddit_relevance_llm(desc, keywords, lm):
+    system_prompt = "You are an expert in analyzing online forums for relevant discussions about clinical conditions."
+    system_prompt += "Your task is to determine if a subreddit is likely to contain personal experiences related to a set of related conditions based on the subreddit description."
 
-    user_prompt = f"""Evaluate the subreddit relevance to the clinical trial information provided. Consider if the subreddit likely contains personal experiences about the trial's focus. Answer "Yes" if relevant, "No" if not.
+    user_prompt = "Evaluate the subreddit relevance to the conditions listed. Consider if the subreddit likely contains personal experiences with the condition. Answer Yes if relevant, No if not."
+    user_prompt += (
+        f"\n\n**Conditions:** {keywords}\n\n**Subreddit Description:** {desc}"
+    )
+    user_prompt += "Is the subreddit likely to contain personal experiences relevant to the listed conditions? Answer with Yes or No."
 
-**Clinical Trial Details:**
-- Keywords: {keywords[0]}
-- Interventions: {keywords[1]}
-- Primary Endpoint(s): {keywords[2]}
-
-**Subreddit Description:**
-{desc}
-
-Is the subreddit likely to contain personal experiences relevant to the effects measured in this trial? Answer with "Yes" or "No".
-    """
-    return llm.get_outputs(system_prompt, [user_prompt])[0]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    return lm.predict(messages=messages)[0]

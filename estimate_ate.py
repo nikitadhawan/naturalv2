@@ -42,6 +42,7 @@ def get_save_path(
     """Generate save path for extracted data."""
     return os.path.join(
         base_path,
+        "results",
         f"{nct_id}",
         f"{model_name.replace('/', '-')}_{extract_type}.csv",
     )
@@ -60,7 +61,7 @@ async def extract_covariates(
     experiment: SvT,
     model_cfg: DictConfig,
     save_path: str,
-    extract_type: Literal["ty_filter", "knowns", "imputations"],
+    extract_type: Literal["relevance", "ty_filter", "knowns", "imputations"],
     batch_size: int = 1,
     response_format: Optional[type[BaseModel]] = None,
 ) -> pd.DataFrame:
@@ -76,7 +77,7 @@ async def extract_covariates(
         Model configuration
     save_path: str
         Base path to save results
-    extract_type: Literal["ty_filter", "knowns", "imputations"]
+    extract_type: Literal["relevance", "ty_filter", "knowns", "imputations"]
         Type of extraction to perform
     batch_size: int
         Number of samples to process in each batch
@@ -430,7 +431,7 @@ def calculate_treatment_effects(
 def save_results(results: list[dict], save_path: str, nct_id: str) -> None:
     """Save results to CSV file."""
     result_df = pd.DataFrame(results)
-    results_path = os.path.join(save_path, f"{nct_id}/ate_results.csv")
+    results_path = os.path.join(save_path, "results", f"{nct_id}/ate_results.csv")
 
     if os.path.exists(results_path):
         existing_df = pd.read_csv(results_path, index_col=0)
@@ -443,7 +444,9 @@ def save_results(results: list[dict], save_path: str, nct_id: str) -> None:
 def main(cfg: DictConfig) -> None:
     """Main function to estimate average treatment effects."""
     experiment = SvT(path_to_main=cfg.user.path_to_main)
-    os.makedirs(os.path.join(cfg.save_path, f"{experiment.nct_id}"), exist_ok=True)
+    os.makedirs(
+        os.path.join(cfg.save_path, "results", f"{experiment.nct_id}"), exist_ok=True
+    )
 
     nest_asyncio.apply()
 
@@ -453,6 +456,20 @@ def main(cfg: DictConfig) -> None:
     curated_df = pd.read_csv(experiment.curated_data_path, index_col=0).head(1000)
     data_flow["curated"] = len(curated_df)
     logging.info(f"Initial number of curated reports: {len(curated_df)} reports.")
+
+    # # Find reports relevant to the problem setting (uncomment for automated pipeline)
+    # curated_df = asyncio.run(
+    #     extract_covariates(
+    #         curated_df,
+    #         experiment,
+    #         cfg.cheap_model,
+    #         cfg.save_path,
+    #         "relevance",
+    #         response_format=RelevanceResponse,
+    #     )
+    # )
+    # data_flow["relevant"] = len(curated_df)
+    # logger.info(f"After relevance filter: {len(curated_df)} reports.")
 
     # Filter reports that do not contain t,y info
     ty_samples = asyncio.run(

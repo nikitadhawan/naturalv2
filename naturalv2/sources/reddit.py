@@ -1,121 +1,141 @@
-import datetime
 import os
 
 import pandas as pd
 
+from naturalv2.models.lm import LM
 from naturalv2.sources.reddit_utils import (
+    date_filter,
     download_sub_data,
-    filter_by_date,
     get_context_post_df,
-    get_reddit_synonyms,
+    get_sub_about_info,
     rule_based_filter,
     subreddit_relevance_llm,
 )
 
 
-class RedditSet:
-    def __init__(self, data_path, trial, match_method, llm, download=False):
+class RedditSource:
+    def __init__(self, data_path, match_method, lm_cfg):
         self.data_path = data_path
-        self.subs_about = pd.read_csv(self.data_path + "subs_about.csv", index_col=0)
-        self.trial = trial
-        self.llm = llm
+        self.match_method = match_method
+        self.lm_cfg = lm_cfg
 
-        self.log_path = os.path.join(
-            self.data_path, f"{trial.nctid}_{match_method}_{llm.model_name}_reddit.log"
-        )
-        if os.path.exists(self.log_path):
-            with open(self.log_path, "r") as f:
-                lines = f.readlines()
-                for line in lines:
-                    if line.startswith("treatment_names:"):
-                        self.treatment_names = eval(line.split(": ")[1])
-                    elif line.startswith("outcome_words:"):
-                        self.outcome_words = eval(line.split(": ")[1])
-                    elif line.startswith("keywords:"):
-                        self.trial_keywords = eval(line.split(": ")[1])
-        else:
-            self.treatment_names = get_reddit_synonyms(
-                [i.title for i in trial.interventions], llm
-            )
-            self.outcome_words = get_reddit_synonyms(
-                [o.title for o in trial.primary_endpoints], llm
-            )
-            self.trial_keywords = get_reddit_synonyms(
-                trial.keywords + trial.conditions, llm
-            )
-            with open(self.log_path, "w") as f:
-                f.write(f"treatment_names: {self.treatment_names}\n")
-                f.write(f"outcome_words: {self.outcome_words}\n")
-                f.write(f"keywords: {self.trial_keywords}\n")
+        self.subs_about = get_sub_about_info(self.data_path)
 
-        if download:
-            self.subreddits = self.get_subreddits(match_method, trial)
-            self.download_data()
-
-    def get_subreddits(self, method, trial):
-        relevant_subs = []
-        trial_keywords = [self.trial_keywords, self.treatment_names, self.outcome_words]
+    def condition_filter(self, keywords):
+        self.relevant_subs = []
         for row in self.subs_about.iterrows():
             sub_name, desc, public_desc = row[1].to_list()
             desc = f"Subreddit: r/{sub_name}.\nDescription: {desc}\nPublic description: {public_desc}"
-            if method == "string_match":
-                if any(
-                    keyword.lower() in desc.lower() for keyword in self.treatment_names
-                ) or any(
-                    keyword.lower() in desc.lower() for keyword in self.trial_keywords
-                ):
-                    relevant_subs.append(sub_name)
-            elif method == "llm":
-                answer = subreddit_relevance_llm(desc, trial_keywords, self.llm)
+            if self.match_method == "string_match":
+                if any(keyword.lower() in desc.lower() for keyword in keywords):
+                    self.relevant_subs.append(sub_name)
+                    print(f"{sub_name} is relevant.")
+            elif self.match_method == "llm":
+                lm = LM(**self.lm_cfg)
+                answer = subreddit_relevance_llm(desc, keywords, lm)
                 if answer.lower().startswith("yes"):
-                    with open(self.log_path, "a") as f:
-                        f.write(f"subreddit {sub_name} relevance: {answer}\n")
-                    relevant_subs.append(sub_name)
-        print(len(relevant_subs), "relevant subreddits found!")
-        return relevant_subs
+                    self.relevant_subs.append(sub_name)
+                    print(f"{sub_name} is relevant.")
+        print(len(self.relevant_subs), "relevant subreddits found!")
 
-    def download_data(self):
-        self.data_files = {}
-        for sub in self.subreddits:
-            submissions_path = self.data_path + f"{sub}_submissions.csv"
-            comments_path = self.data_path + f"{sub}_comments.csv"
+        condition_data_paths = []
+        for sub in self.relevant_subs:
+            submissions_path = os.path.join(self.data_path, f"{sub}_submissions.csv")
+            comments_path = os.path.join(self.data_path, f"{sub}_comments.csv")
             if not os.path.exists(submissions_path):
                 download_sub_data(sub, "submissions", self.data_path)
             if not os.path.exists(comments_path):
                 download_sub_data(sub, "comments", self.data_path)
-            self.data_files[f"{sub}_submissions"] = submissions_path
-            self.data_files[f"{sub}_comments"] = comments_path
+            condition_data_paths.extend([submissions_path, comments_path])
 
-    def curate_data(self, date_filter=False):
+        return condition_data_paths
+
+    def clean_data(self, study_name):
+        os.makedirs(os.path.join(self.data_path, study_name), exist_ok=True)
+        save_path = os.path.join(self.data_path, f"{study_name}/reddit_cleaned.csv")
+        if os.path.exists(save_path):
+            cleaned_data = pd.read_csv(save_path, index_col=0)
+            return save_path, len(cleaned_data)
+
         rule_filtered_df = pd.DataFrame()
-        save_path = self.data_path + f"{self.trial.nctid}_reddit_rule_based.csv"
-        # treatment_names = get_reddit_synonyms([i.title for i in self.trial.interventions], self.llm)
-        # outcome_words = get_reddit_synonyms([o.title for o in self.trial.primary_endpoints], self.llm)
-        if not os.path.exists(save_path):
-            for sub in self.subreddits:
-                submissions = pd.read_csv(self.data_files[f"{sub}_submissions"])
-                comments = pd.read_csv(self.data_files[f"{sub}_comments"])
-                if date_filter:
-                    trial_date = datetime.datetime.strptime(
-                        self.trial.results_first_posted, "%Y-%m-%d"
-                    )
-                    trial_date_utc = int(
-                        trial_date.replace(tzinfo=datetime.timezone.utc).timestamp()
-                    )
-                    submissions = filter_by_date(submissions, trial_date_utc)
-                    comments = filter_by_date(comments, trial_date_utc)
-                submissions = rule_based_filter(submissions, "selftext")
-                comments = rule_based_filter(comments, "body")
-                merged_df = get_context_post_df(
-                    submissions, comments, self.treatment_names, self.outcome_words
-                )
-                rule_filtered_df = pd.concat(
-                    [rule_filtered_df, merged_df], ignore_index=True
-                )
-                rule_filtered_df.to_csv(save_path)
-            rule_filtered_df = rule_filtered_df.drop_duplicates("post")
+        for sub in self.relevant_subs:
+            submissions = pd.read_csv(
+                os.path.join(self.data_path, f"{sub}_submissions.csv"), index_col=0
+            )
+            comments = pd.read_csv(
+                os.path.join(self.data_path, f"{sub}_comments.csv"), index_col=0
+            )
+            submissions = rule_based_filter(submissions, "selftext")
+            comments = rule_based_filter(comments, "body")
+            merged_df = get_context_post_df(submissions, comments)
+            rule_filtered_df = pd.concat(
+                [rule_filtered_df, merged_df], ignore_index=True
+            )
             rule_filtered_df.to_csv(save_path)
-        else:
-            rule_filtered_df = pd.read_csv(save_path, index_col=0)
-        self.curated_data = rule_filtered_df
-        return self.curated_data
+        rule_filtered_df = rule_filtered_df.drop_duplicates("post")
+        rule_filtered_df.to_csv(save_path)
+        return save_path, len(rule_filtered_df)
+
+    def experiment_data(self, exp, study_name, filter_by_date, clean_data_path):
+        # check treatment/outcome mention, filter by date
+        save_path = os.path.join(
+            self.data_path, f"{study_name}/reddit_{exp.nct_id}.csv"
+        )
+        if os.path.exists(save_path):
+            exp_df = pd.read_csv(save_path, index_col=0)
+            return save_path, len(exp_df)
+
+        clean_data = pd.read_csv(clean_data_path, index_col=0)
+        exp_df = pd.DataFrame(columns=clean_data.columns)
+        treatment_names = exp.treatment_common_names["reddit"]
+        outcome_names = exp.outcome_common_names["reddit"]
+
+        for _, row in clean_data.iterrows():
+            t_matches = [
+                x
+                for x in treatment_names
+                if x in row["subreddit"].lower()
+                or x in row["title"].lower()
+                or x in row["post"].lower()
+            ]
+            if isinstance(row["initial_post"], str) and not pd.isna(
+                row["initial_post"]
+            ):
+                t_matches += [
+                    x for x in treatment_names if x in row["initial_post"].lower()
+                ]
+            t_matches = set(t_matches)
+            o_matches = [
+                x
+                for x in outcome_names
+                if x in row["subreddit"].lower()
+                or x in row["title"].lower()
+                or x in row["post"].lower()
+            ]
+            if isinstance(row["initial_post"], str) and not pd.isna(
+                row["initial_post"]
+            ):
+                o_matches += [
+                    x for x in outcome_names if x in row["initial_post"].lower()
+                ]
+            o_matches = set(o_matches)
+            if len(t_matches) > 0 and len(o_matches) > 0:
+                row["treatments"] = list(t_matches)
+                row["outcomes"] = list(o_matches)
+                exp_df = pd.concat([exp_df, pd.DataFrame([row])], ignore_index=True)
+
+        if filter_by_date:
+            exp_df = date_filter(exp_df, exp.date)
+        exp_df.to_csv(save_path)
+        return save_path, len(exp_df)
+
+    def get_common_name_prompts(self):
+        system_prompt = "You are a helpful medical assistant who can translate medical terminology into common terms."
+        t_prompt = "\n\nWhat are common brand names or terms that people use when discussing the treatment, {keyword}, specifically when posting on Reddit?"
+        o_prompt = "\n\nWhat are key common terms that people must use when discussing the outcome, {keyword}, specifically when posting on Reddit?"
+        final_prompt = "\n\nReturn only a Python list of at most 5 individual words, without any other text or formatting."
+        return {
+            "system": system_prompt,
+            "treatment": t_prompt + final_prompt,
+            "outcome": o_prompt + final_prompt,
+        }

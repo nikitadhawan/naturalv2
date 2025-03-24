@@ -121,7 +121,7 @@ class Experiment:
         for name in getattr(self, f"{attr}_names"):
             prompt = prompt_dct[attr].format(**{"keyword": name})
             messages = [system_msg, {"role": "user", "content": prompt}]
-            lm_response = lm.__call__(messages=messages, response_format=ListResponse)
+            lm_response = lm(messages=messages, response_format=ListResponse)
             common_names.extend(self._parse_lm_response(lm_response[0]))
 
         getattr(self, f"{attr}_common_names").update(

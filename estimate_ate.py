@@ -453,7 +453,10 @@ def main(cfg: DictConfig) -> None:
     data_flow = {}
 
     # Load curated data
-    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0).head(1000)
+    # TODO: remove subsampling after testing
+    curated_df = pd.read_csv(experiment.curated_data_path, index_col=0).sample(
+        frac=0.05, random_state=cfg.seed, ignore_index=True
+    )
     data_flow["curated"] = len(curated_df)
     logging.info(f"Initial number of curated reports: {len(curated_df)} reports.")
 

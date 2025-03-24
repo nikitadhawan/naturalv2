@@ -375,4 +375,4 @@ def subreddit_relevance_llm(desc, keywords, lm):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    return lm.predict(messages=messages)[0]
+    return lm(messages=messages)[0]

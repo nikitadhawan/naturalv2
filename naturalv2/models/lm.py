@@ -37,7 +37,7 @@ class LM:
         **kwargs,
     ) -> None:
         assert completion_type in ["chat", "text"], (
-            f"Expected `completion_type to be one of ['chat', 'text] but got {completion_type}"
+            f"Expected ``completion_type`` to be one of ['chat', 'text] but got {completion_type}"
         )
 
         self.model = model
@@ -93,7 +93,6 @@ class LM:
             prompt = "\n\n".join([x["content"] for x in messages])
             if add_text_completion_prefix:
                 prompt += "\n\nBEGIN RESPONSE:"
-            print(prompt)
 
             response = text_completion(
                 model=f"text-completion-openai/{model}",

@@ -15,13 +15,22 @@ repos:
     - id: check-toml
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 'v0.9.8'
+    rev: 'v0.11.2'
     hooks:
     - id: ruff
       args: [--fix, --exit-non-zero-on-fix]
       types_or: [python, jupyter]
     - id: ruff-format
       types_or: [python, jupyter]
+
+  - repo: local
+    hooks:
+    - id: pytest
+      name: pytest
+      language: system
+      entry: python3 -m pytest -m "not integration_test"
+      pass_filenames: false
+      always_run: true
 
 ci:
     autofix_commit_msg: |

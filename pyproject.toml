@@ -22,6 +22,8 @@ dev = [
     "ipykernel>=6.29.5",
     "pip-audit>=2.8.0",
     "pre-commit>=4.1.0",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
     "ruff>=0.9.6",
     "torch>=2.5.1",
     "vec-inf",
@@ -77,3 +79,7 @@ lines-after-imports = 2
 
 [tool.uv.sources]
 vec-inf = { git = "https://github.com/VectorInstitute/vector-inference", branch = "develop" }
+
+[tool.pytest.ini_options]
+markers = ["integration_test: marks tests as integration tests"]
+asyncio_default_fixture_loop_scope = "function"

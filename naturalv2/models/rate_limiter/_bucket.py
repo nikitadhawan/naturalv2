@@ -4,15 +4,10 @@ import time
 from typing import Optional
 
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-
 class Bucket:
     """A fixed-capacity bucket that refills at a constant rate.
 
-    This class implements a token bucket algorithm, which is a rate limiting
+    This class implements a token bucket algorithm [1], which is a rate limiting
     algorithm that allows for bursts of traffic up to a certain limit. The
     bucket has a fixed capacity and refills at a constant rate. Tokens can be
     consumed from the bucket, and the bucket will refill over time.
@@ -39,6 +34,10 @@ class Bucket:
     owm. If the bucket is being accessed by multiple threads or processes, the
     caller should ensure that the bucket is locked before calling any of the public
     methods.
+
+    References
+    ----------
+    [1] https://en.wikipedia.org/wiki/Token_bucket
 
     """
 

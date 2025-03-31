@@ -8,23 +8,18 @@ from naturalv2.models.rate_limiter.rate_limiter import RateLimiter
 async def wait_for_n_done(tasks, n):
     """Wait for n (or more) tasks to have completed"""
     iteration = 0
-    print("iteration: ", iteration)
     remainder = len(tasks) - n
-    print("remainder: ", remainder)
     pending_count = len(tasks)
-    print("pending_count: ", pending_count)
     while iteration <= 5:
         iteration += 1
         _, pending = await asyncio.wait(
             tasks, timeout=0, return_when=asyncio.FIRST_COMPLETED
         )
-        print("number of pending tasks: ", len(pending))
         if len(pending) <= remainder:
             break
         if len(pending) < pending_count:
             iteration = 0
             pending_count = len(pending)
-            print("pending_count: ", pending_count)
     assert len(pending) <= remainder
     return pending
 

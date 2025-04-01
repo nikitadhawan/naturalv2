@@ -296,11 +296,9 @@ class Experiment:
         self.numerical_repr = {
             "treatment": {name: i for (i, name) in enumerate(self.treatment_names)}
         }
+        self.numerical_repr.update(dict.fromkeys(self.outcome_names, binary_map_num))
         self.numerical_repr.update(
-            {outcome: binary_map_num for outcome in self.outcome_names}
-        )
-        self.numerical_repr.update(
-            {cov: binary_map_num for cov in self.extended_covariate_names}
+            dict.fromkeys(self.extended_covariate_names, binary_map_num)
         )
         self.numerical_repr.update(
             {
@@ -310,11 +308,9 @@ class Experiment:
         )
 
         self.language_repr = dict(enumerate(self.treatment_names))
+        self.language_repr.update(dict.fromkeys(self.outcome_names, binary_map_lang))
         self.language_repr.update(
-            {outcome: binary_map_lang for outcome in self.outcome_names}
-        )
-        self.language_repr.update(
-            {cov: binary_map_lang for cov in self.extended_covariate_names}
+            dict.fromkeys(self.extended_covariate_names, binary_map_lang)
         )
         self.numerical_repr.update(
             {cov: dict(enumerate(self.options[cov])) for cov in self.covariate_names}

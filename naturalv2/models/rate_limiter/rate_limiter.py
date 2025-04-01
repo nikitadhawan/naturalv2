@@ -470,7 +470,7 @@ def _parse_rate_limit_info_from_response_headers(
     }
 
 
-def _parse_reset_time(header_value: str, current_time: float) -> Optional[float]:
+def _parse_reset_time(header_value: str, current_time: float) -> Optional[float]:  # noqa: PLR0911, PLR0912
     """Parse x-ratelimit-reset-* header value into a future monotonic timestamp.
 
     Handles:
@@ -484,6 +484,13 @@ def _parse_reset_time(header_value: str, current_time: float) -> Optional[float]
     float:
         Absolute monotonic timestamp for reset, or ``None`` if unparseable.
     """
+    if not isinstance(header_value, str):
+        return None
+
+    header_value = header_value.strip()
+    if not header_value:  # whitespace or empty string
+        return None
+
     try:  # direct float conversion (seconds delta or Unix timestamp)
         value = float(header_value)
         if value > time.time() - (5 * 365 * 86400):
@@ -493,35 +500,58 @@ def _parse_reset_time(header_value: str, current_time: float) -> Optional[float]
             return current_time + delay  # monotonic time
 
         return current_time + max(0.0, value)
-    except ValueError:  # try parsing duration strings like '8.64s', '23h45m44.756s'
-        total_seconds = 0.0
+    except ValueError:  # not a simple float, continue parsing
+        pass
+
+    # try parsing duration strings like '8.64s', '23h45m44.756s'
+    total_seconds = 0.0
+
+    pattern = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)", re.IGNORECASE)
+    last_match_end = 0
+    found_match = False
+
+    for match in pattern.finditer(header_value):
+        start, end = match.span()
+        num_str, unit = match.groups()
+        found_match = True
+
+        # Ensure no non-whitespace characters exist *between* valid matches
+        if start != last_match_end:
+            logging.debug(
+                f"Invalid duration format: Unexpected characters "
+                f"'{header_value[last_match_end:start]}' before '{match.group()}'"
+            )
+            return None
+
         try:
-            # expects numbers followed by h/m/s/ms
-            parts = re.findall(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)?", header_value.lower())
-            if not parts:
-                return None  # no parseable parts
+            val = float(num_str)
+        except ValueError:
+            # Should not happen with the regex, but safeguard
+            logging.debug(f"Invalid number '{num_str}' in duration string.")
+            return None
 
-            has_unit = any(unit for _, unit in parts)
+        unit_lower = unit.lower()
+        if unit_lower == "h":
+            total_seconds += val * 3600
+        elif unit_lower == "m":
+            total_seconds += val * 60
+        elif unit_lower == "ms":
+            total_seconds += val / 1000.0
+        elif unit_lower == "s":
+            total_seconds += val
+        # No 'else' needed as regex only matches valid units
 
-            if has_unit:
-                for val_str, unit in parts:
-                    val = float(val_str)
-                    if unit == "h":
-                        total_seconds += val * 3600
-                    elif unit == "m":
-                        total_seconds += val * 60
-                    elif unit == "ms":
-                        total_seconds += val / 1000.0
-                    else:
-                        # assume seconds if unit is 's' or None/empty
-                        total_seconds += val
-            elif len(parts) == 1 and parts[0][1] is None:
-                # treat number without unit as seconds
-                total_seconds = float(parts[0][0])
-            else:  # ambiguous format without units
-                return None
+        last_match_end = end
 
-            return current_time + max(0.0, total_seconds)
+    # Ensure the entire string was consumed by the matches.
+    # If last_match_end doesn't reach the end of the string, there's trailing text.
+    if not found_match or last_match_end != len(header_value):
+        if found_match:  # Only log trailing chars if we found at least one match
+            logging.debug(
+                f"Invalid duration format: Trailing characters "
+                f"'{header_value[last_match_end:]}'"
+            )
+        return None  # No matches found or trailing characters exist
 
-        except (ValueError, TypeError):
-            return None  # unparseable duration format
+    # If we reach here, the entire string was parsed successfully as duration components
+    return current_time + max(0.0, total_seconds)

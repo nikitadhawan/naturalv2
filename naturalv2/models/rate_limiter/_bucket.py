@@ -7,7 +7,7 @@ from typing import Optional
 class Bucket:
     """A fixed-capacity bucket that refills at a constant rate.
 
-    This class implements a token bucket algorithm [1], which is a rate limiting
+    This class implements the token bucket algorithm [1], which is a rate limiting
     algorithm that allows for bursts of traffic up to a certain limit. The
     bucket has a fixed capacity and refills at a constant rate. Tokens can be
     consumed from the bucket, and the bucket will refill over time.
@@ -31,7 +31,7 @@ class Bucket:
     Warning
     -------
     This class is not thread-safe and is therefore not intended to be used on its
-    owm. If the bucket is being accessed by multiple threads or processes, the
+    own. If the bucket is being accessed by multiple threads or processes, the
     caller should ensure that the bucket is locked before calling any of the public
     methods.
 
@@ -273,7 +273,7 @@ class Bucket:
         server_reset_time: float,
         server_token_limit: Optional[int],
         current_time: Optional[float] = None,
-    ):
+    ) -> None:
         """Directly sets token count and resets refill timer.
 
         This method uses information from the server response headers to directly

@@ -24,7 +24,7 @@ dev = [
     "pre-commit>=4.1.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.26.0",
-    "ruff>=0.9.6",
+    "ruff>=0.11.2",
     "torch>=2.5.1",
     "vec-inf",
 ]

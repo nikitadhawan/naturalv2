@@ -146,24 +146,27 @@ def test_estimate_next_refill_time(simple_bucket: Bucket):
 
     simple_bucket.consume_tokens(10, now)
     assert simple_bucket._last_refill_time == now
-    assert (
-        simple_bucket.estimate_next_refill_time(5, now)
-        == (5 / simple_bucket._rate_per_second) + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(
+        (5 / simple_bucket._rate_per_second) + 1e-9
     )
 
     # set effective refill rate to 1.0 (emulate info from server response headers)
     simple_bucket._last_sync_time = now - 10
     simple_bucket._last_sync_rate = 1.0
     simple_bucket._server_reset_time = None
-    assert simple_bucket.estimate_next_refill_time(5, now) == (5 / 1.0) + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(
+        (5 / 1.0) + 1e-9
+    )
 
     # server reset time is in the future: use it for refill time estimation
     simple_bucket._server_reset_time = now + 10
-    assert simple_bucket.estimate_next_refill_time(5, now) == 10 + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(10 + 1e-9)
 
     # server reset time is in the future, but less than refill time: use refill time
     simple_bucket._server_reset_time = now + 1
-    assert simple_bucket.estimate_next_refill_time(5, now) == (5 / 1.0) + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(
+        (5 / 1.0) + 1e-9
+    )
 
     # set effective rate to 0 and server reset time to None: infinite refill time
     simple_bucket._last_sync_rate = 0
@@ -172,14 +175,13 @@ def test_estimate_next_refill_time(simple_bucket: Bucket):
 
     # set effective rate to 0 and server reset time to the future: use server reset time
     simple_bucket._server_reset_time = now + 10
-    assert simple_bucket.estimate_next_refill_time(5, now) == 10 + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(10 + 1e-9)
 
     # last_sync_rate is past valid duration: use default rate
     simple_bucket._last_sync_time = now - 61
     simple_bucket._server_reset_time = None
-    assert (
-        simple_bucket.estimate_next_refill_time(5, now)
-        == (5 / simple_bucket._rate_per_second) + 1e-9
+    assert simple_bucket.estimate_next_refill_time(5, now) == pytest.approx(
+        (5 / simple_bucket._rate_per_second) + 1e-9
     )
 
 

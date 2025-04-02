@@ -51,6 +51,19 @@ class RateLimiter:
         If ``requests_per_minute``, tokens_per_minute``, ``tokens_per_day`` or
         ``requests_per_day`` are non-positive.
 
+    Examples
+    --------
+    >>> rate_limiter = RateLimiter(requests_per_minute=60, tokens_per_minute=120)
+    >>> estimated_tokens = ...  # estimate the number of tokens needed (input + output)
+    >>> handle = await rate_limiter.acquire(
+    ...     estimated_tokens
+    ... )  # block until tokens are available
+    >>> response = ...  # make the request
+    >>> actual_tokens = ...  # get the actual number of tokens consumed
+    >>> await rate_limiter.adjust(
+    ...     handle, actual_tokens, response_headers=response._response_headers
+    ... )  # adjust the rate limiter state based on the actual tokens consumed
+
     """
 
     def __init__(

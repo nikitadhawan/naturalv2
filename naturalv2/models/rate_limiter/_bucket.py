@@ -28,8 +28,8 @@ class Bucket:
     ValueError
         If ``tokens_per_period``, ``capacity``, or ``time_period`` are non-positive.
 
-    Warning
-    -------
+    Warnings
+    --------
     This class is not thread-safe and is therefore not intended to be used on its
     own. If the bucket is being accessed by multiple threads or processes, the
     caller should ensure that the bucket is locked before calling any of the public
@@ -104,8 +104,8 @@ class Bucket:
         int
             The current number of tokens in the bucket.
 
-        Warning
-        -------
+        Warnings
+        --------
         This method assumes that the caller has acquired the global lock on the
         bucket. If the bucket is being accessed by multiple threads or processes,
         the caller should ensure that the bucket is locked before calling this
@@ -134,8 +134,8 @@ class Bucket:
             ``True`` if the tokens were successfully consumed from the bucket,
             otherwise ``False``.
 
-        Warning
-        -------
+        Warnings
+        --------
         This method assumes that the caller has acquired the global lock on the
         bucket. If the bucket is being accessed by multiple threads or processes,
         the caller should ensure that the bucket is locked before calling this
@@ -171,8 +171,8 @@ class Bucket:
             The current time in seconds since the epoch. If not provided, the
             current time will be determined using ``time.monotonic()``.
 
-        Warning
-        -------
+        Warnings
+        --------
         This method assumes that the caller has acquired the global lock on the
         bucket. If the bucket is being accessed by multiple threads or processes,
         the caller should ensure that the bucket is locked before calling this
@@ -212,8 +212,8 @@ class Bucket:
         float
             The estimated time in seconds until the bucket has enough tokens.
 
-        Warning
-        -------
+        Warnings
+        --------
         This method assumes that the caller has acquired the global lock on the
         bucket. If the bucket is being accessed by multiple threads or processes,
         the caller should ensure that the bucket is locked before calling this

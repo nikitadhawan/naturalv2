@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import hydra
 import nest_asyncio
@@ -15,7 +15,8 @@ from scipy.special import softmax
 from tqdm import tqdm
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM, get_message_content, get_prompt_logprobs
+from naturalv2.models import lm
+from naturalv2.models.lm import LM
 from naturalv2.utils import (
     ImputationsResponse,
     KnownsResponse,
@@ -53,7 +54,7 @@ async def _extract_covariates_from_report(
     model: LM, messages: list[dict[str, str]], response_format: BaseModel
 ) -> dict[str, Any]:
     response = model(messages=messages, response_format=response_format)
-    response_text = get_message_content(response)[0]
+    response_text = lm.get_message_content(response)[0]
     return response_format.model_validate_json(response_text).model_dump(mode="json")
 
 
@@ -179,46 +180,21 @@ def prepare_conditional_inputs(
     return reports
 
 
-def process_local_model(
-    model: "VLLM", reports: list[str], interleaved_options: list[str]
-) -> tuple[np.ndarray, list[int]]:
-    """Process inputs with local VLLM model."""
-    probs, sample_indices, _ = model.compute_input_probs(reports, interleaved_options)
-    return probs, sample_indices
-
-
-def process_remote_model(
-    model: LM,
-    system_prompt: str,
-    llm_inputs: list[str],
-    num_reports: int,
-    num_options: int,
-    length_norm: bool,
-) -> tuple[np.ndarray, list[int]]:
-    """Process inputs with remote LM model."""
-    responses = [
-        model(prompt=system_prompt + "\n\nText Report\n" + llm_input)
-        for llm_input in llm_inputs
-    ]
-
-    logprobs = []
-    for response in responses:
-        prompt_logprobs_obj = get_prompt_logprobs(response)
-        if prompt_logprobs_obj is None:
-            continue
-
-        logprob = sum(prompt_logprobs_obj.logprobs)
-        if length_norm:
-            logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
-        logprobs.append(logprob)
-
-    probs = softmax(
-        np.array(logprobs).reshape((num_reports, num_options)),
-        axis=1,
-    )
-    sample_indices = [np.random.choice(len(prob), p=prob) for prob in probs]
-
-    return probs, sample_indices
+def get_prompt_logprobs(
+    model: Union[LM, "VLLM"], system_prompt: str, prompts: list[str], local: bool
+) -> list[list[float]]:
+    input_prompts = [system_prompt + "\n" + prompt for prompt in prompts]
+    if local:
+        responses = model.get_completions(prompt=input_prompts, prompt_logprobs=1)
+        prompt_logprobs = model.get_prompt_logprobs(responses)
+    else:
+        responses = [
+            model(prompt=prompt, prompt_logprobs=1) for prompt in input_prompts
+        ]
+        prompt_logprobs = [
+            lm.get_prompt_logprobs(response).logprobs for response in responses
+        ]
+    return prompt_logprobs
 
 
 def prepare_for_conditional_extraction(
@@ -301,11 +277,14 @@ def extract_conditionals(
     # Validate model configuration
     assert model_cfg.get("completion_type") == "text", "Model type must be 'text'."
     assert model_cfg.get("prompt_logprobs") == 0, "Prompt logprobs must be 0."
-    local = model_cfg.get("local", None)
+    local = model_cfg.pop("local", None)
 
     # Initialize model
     if local:
         from naturalv2.models.vllm import VLLM
+
+        model_cfg.pop("completion_type", None)
+        model_cfg.pop("get_response", None)
 
         model = VLLM(**model_cfg)
     else:
@@ -319,9 +298,6 @@ def extract_conditionals(
     _, interleaved_options, idx_to_feat = prepare_for_conditional_extraction(
         experiment, to_enum
     )
-
-    if local:
-        model.system_prompt = system_prompt
 
     llm_probs_df = pd.DataFrame()
 
@@ -344,30 +320,32 @@ def extract_conditionals(
             for report, option in zip(reports_repeated, options_repeated)
         ]
 
-        # Select columns to include in output
-        cols = (
+        # Get log probabilities from LLM
+        prompt_logprobs: list[list[float]] = get_prompt_logprobs(
+            model, system_prompt, llm_inputs, local
+        )
+        sum_logprobs = [sum(logprobs) for logprobs in prompt_logprobs]
+        if length_norm:
+            sum_logprobs = [
+                logprob / len(prompt_logprobs[i])
+                for i, logprob in enumerate(sum_logprobs)
+            ]
+
+        # Reshape and normalize log probabilities
+        probs = softmax(
+            np.array(sum_logprobs).reshape((len(reports), len(interleaved_options))),
+            axis=1,
+        )
+        sample_indices = [np.random.choice(len(prob), p=prob) for prob in probs]
+
+        # Prepare results for saving
+        cols = (  # Select columns to include in output
             experiment.covariate_names
             + experiment.outcome_names
             + ["treatment", "report"]
         )
         rows = batch_df[cols]
 
-        # Process inputs based on model type
-        if local:
-            probs, sample_indices = process_local_model(
-                model, reports, interleaved_options
-            )
-        else:
-            probs, sample_indices = process_remote_model(
-                model,
-                system_prompt,
-                llm_inputs,
-                len(reports),
-                len(interleaved_options),
-                length_norm,
-            )
-
-        # Prepare results for saving
         dict_to_save = [
             {
                 **rows.iloc[j].to_dict(),

@@ -1,7 +1,7 @@
 import re
-from typing import Any, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Type, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from naturalv2.evals.clinical_trial import (
     ArmGroup,
@@ -14,6 +14,15 @@ from naturalv2.evals.clinical_trial import (
 
 class ListResponse(BaseModel):
     output: Optional[list[str]]
+
+
+def create_response_format(
+    name: str, keys: List[str], types: Optional[Dict[str, Type]] = None
+) -> BaseModel:
+    "Generate a Pydantic model with fields specified by the given keys."
+
+    fields = {key: (types.get(key, Any), ...) for key in keys}
+    return create_model(name, **fields)
 
 
 class TYFilterResponse(BaseModel):

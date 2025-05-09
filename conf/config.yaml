@@ -29,5 +29,5 @@ save_path: ${user.save_path}
 data_path: ${user.data_path}
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 load_model: True
-
 filter_by_date: True
+outcome:

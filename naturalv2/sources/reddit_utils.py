@@ -181,13 +181,21 @@ def get_comment_permalink(permalink):
 def date_filter(df, date_str):
     date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
     utc_date_cutoff = int(date_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
-    idx = df["date_created"].apply(lambda x: int(x) <= utc_date_cutoff)
+    # breakpoint() # for debugging, pre-commit check will fail if uncommented
+
+    idx = df["date_created"].apply(lambda x: get_utc_timestamp(x) <= utc_date_cutoff)
     return df[idx]
 
 
 def get_date(utc_timestamp):
     dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
     return dt.strftime("%B %d, %Y")
+
+
+def get_utc_timestamp(date_str):
+    dt = datetime.datetime.strptime(date_str, "%B %d, %Y")
+    dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return int(dt.timestamp())
 
 
 def rule_based_filter(post_df, text_field):

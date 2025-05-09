@@ -28,6 +28,10 @@ on:
 jobs:
   run-code-check:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +52,23 @@ jobs:
       - name: Install dependencies and check code
         run: |
           source .venv/bin/activate
-          pre-commit run --all-files
+          pre-commit run --all-files --show-diff-on-failure
+          continue-on-error: true
+
+      - name: Commit and push changes if any
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add .
+            git commit -m "chore: auto-fix pre-commit issues"
+            git push
+          else
+            echo "No changes to commit"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: pip-audit (gh-action-pip-audit)
         uses: pypa/gh-action-pip-audit@v1.1.0

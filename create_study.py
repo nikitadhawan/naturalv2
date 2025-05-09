@@ -69,20 +69,31 @@ def _process_condition_trial(
 ) -> tuple[Optional[str], Optional[str]]:
     nct_id, trial_path, conditions_set, test = args
     trial = ClinicalTrial.from_json_file(os.path.join(trial_path, f"{nct_id}.json"))
-    trial_conditions: Optional[list[str]] = get_nested_value(
-        trial, "protocolSection.conditionsModule.conditions"
+    # trial_conditions: Optional[list[str]] = get_nested_value(
+    #     trial, "protocolSection.conditionsModule.conditions"
+    # )
+    # trial_keywords: Optional[list[str]] = get_nested_value(
+    #     trial, "protocolSection.conditionsModule.keywords"
+    # )
+    # trial_conditions_set = {
+    #     word.lower() for word in (trial_conditions or []) + (trial_keywords or [])
+    # }
+    trial_disease_mesh: Optional[list[str]] = get_nested_value(
+        trial, "derivedSection.conditionBrowseModule.ancestors"
     )
-    trial_keywords: Optional[list[str]] = get_nested_value(
-        trial, "protocolSection.conditionsModule.keywords"
-    )
-    trial_conditions_set = {
-        word.lower() for word in (trial_conditions or []) + (trial_keywords or [])
+    if trial_disease_mesh is None:
+        trial_disease_mesh = []
+    trial_mesh_set = {mesh.term.lower() for mesh in trial_disease_mesh}
+    # Remove "disease" or "diseases" from the set
+    trial_mesh_set = {
+        term for term in trial_mesh_set if term not in {"disease", "diseases"}
     }
 
     matching_conditions = [
-        trial_condition
-        for trial_condition in trial_conditions_set
-        if any(condition in trial_condition for condition in conditions_set)
+        trial_mesh
+        for trial_mesh in trial_mesh_set
+        if any(condition in trial_mesh for condition in conditions_set)
+        or any(trial_mesh in condition for condition in conditions_set)
     ]
     if matching_conditions:
         result_date: Optional[str] = (
@@ -124,6 +135,14 @@ def find_condition_ncts(
                 condition_trials.append((nct_id, result_date))
                 with open(condition_nct_path, "a") as condition_file:
                     condition_file.write(f"{nct_id}\n")
+
+    # For debugging:
+    # for nct_id in tqdm(nct_ids, desc="Finding condition trials" + (" (test)" if test else "")):
+    #     result_nct_id, result_date = _process_condition_trial((nct_id, trial_path, conditions_set, test))
+    #     if result_nct_id:
+    #         condition_trials.append((result_nct_id, result_date))
+    #         with open(condition_nct_path, "a") as condition_file:
+    #             condition_file.write(f"{result_nct_id}\n")
 
     return condition_trials
 
@@ -234,7 +253,11 @@ def main(cfg: DictConfig) -> None:
     study = Study(retro_trials, test_trials, cfg)
     os.makedirs(os.path.join(cfg.save_path, "studies"), exist_ok=True)
     study.to_yaml(
-        os.path.join(cfg.save_path, "studies", cfg.conditions[0] + "_study.yaml")
+        os.path.join(
+            cfg.save_path,
+            "studies",
+            cfg.conditions[0].lower().replace(" ", "_") + "_study.yaml",
+        )
     )
 
 

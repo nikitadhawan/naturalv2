@@ -72,6 +72,7 @@ def main(cfg: DictConfig) -> None:
             clean_path, data_size = source_dataset.clean_data(study.conditions[0])
             study_dataset.data_paths.update({f"{source_name}_cleaned": clean_path})
             study_dataset.data_sizes.update({f"{source_name}_cleaned": data_size})
+        clean_path = study_dataset.data_paths[f"{source_name}_cleaned"]
 
         # search for treatment and outcome to curate data for each experiment
         os.makedirs(os.path.join(cfg.save_path, "experiments"), exist_ok=True)

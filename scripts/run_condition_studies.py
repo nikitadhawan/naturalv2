@@ -4,9 +4,11 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 
 logging.basicConfig(
@@ -15,127 +17,152 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# CONDITION_LISTS = [
+#     ["diabetes", "t2dm", "obesity", "weight"],
+#     [
+#         "copd",
+#         "pulmonary",
+#         "asthma",
+#         "respiratory",
+#         "lung",
+#         "pneumonia",
+#         "rhinitis",
+#         "fibrosis",
+#     ],
+#     [
+#         "cancer",
+#         "leukemia",
+#         "lymphoma",
+#         "myeloma",
+#         "carcinoma",
+#         "sarcoma",
+#         "malignant",
+#         "tumor",
+#         "melanoma",
+#     ],
+#     ["heart", "cardiac", "coronary", "cardio", "myocardial", "atrial"],
+#     ["stroke", "cerebrovascular", "brain", "infarction", "ischemic", "cerebral"],
+#     ["psoriasis", "psoriatic"],
+#     ["hepatitis", "hep", "hbv", "hcv"],
+#     ["hiv", "aids"],
+#     ["tuberculosis", "tb", "mycobacterium"],
+#     ["covid", "sars-cov-2", "coronavirus"],
+#     ["hypertension", "blood pressure"],
+#     ["acne", "derma", "eczema", "skin", "rosacea"],
+#     [
+#         "alzheimer",
+#         "dementia",
+#         "cognitive",
+#         "parkinson",
+#         "epilepsy",
+#         "seizure",
+#         "neuro",
+#         "huntington",
+#     ],
+#     ["lupus", "sclerosis", "ms", "autoimmune", "immune disorder"],
+#     ["migraine", "headache"],
+#     [
+#         "stomach",
+#         "digest",
+#         "gastro",
+#         "intestin",
+#         "bowel",
+#         "gastric",
+#         "peptic",
+#         "duodenal",
+#         "ulcer",
+#         "crohn",
+#     ],
+#     ["liver", "hepatic", "cirrhosis"],
+#     ["kidney", "renal", "ckd", "esrd", "dialysis"],
+#     ["urinary", "bladder", "incontinence", "cystitis", "uti"],
+#     ["depress", "schizo", "psycho", "anxiety", "panic", "sleep", "insomnia", "bipolar"],
+#     [
+#         "substance",
+#         "opioid",
+#         "alcohol",
+#         "smoking",
+#         "tobacco",
+#         "addiction",
+#         "abuse",
+#         "nicotine",
+#     ],
+#     [
+#         "gout",
+#         "arthritis",
+#         "arthritic",
+#         "spondyl",
+#         "osteo",
+#         "bone",
+#         "spine",
+#         "spinal",
+#         "disc",
+#         "orthotic",
+#         "carpal",
+#     ],
+#     ["anemia", "iron", "hemo", "thrombo", "coagulation", "platelet", "purpura", "clot"],
+#     [
+#         "eye",
+#         "ocular",
+#         "retina",
+#         "retinopathy",
+#         "macular",
+#         "glaucoma",
+#         "ophthalmic",
+#         "cataract",
+#         "uveitis",
+#         "conjunctivitis",
+#         "myopia",
+#     ],
+#     [
+#         "uterine",
+#         "ovarian",
+#         "cervical",
+#         "menstrual",
+#         "endometriosis",
+#         "fibroids",
+#         "menopause",
+#         "postmenopausal",
+#     ],
+#     ["allergy", "allergic", "hypersensitivity"],
+#     ["pain", "nociceptive", "neuropathic"],
+#     ["transplant", "graft", "allograft", "rejection"],
+#     ["genetic", "congenital", "inherited"],
+#     ["pregnancy", "pregnant", "prenatal", "maternal", "pediatric", "child", "infant"],
+#     ["vaccine", "vaccination", "immunization"],
+#     ["surgical", "postoperative", "complication"],
+# ]
+
 CONDITION_LISTS = [
-    ["diabetes", "t2dm", "obesity", "weight"],
-    [
-        "copd",
-        "pulmonary",
-        "asthma",
-        "respiratory",
-        "lung",
-        "pneumonia",
-        "rhinitis",
-        "fibrosis",
-    ],
-    [
-        "cancer",
-        "leukemia",
-        "lymphoma",
-        "myeloma",
-        "carcinoma",
-        "sarcoma",
-        "malignant",
-        "tumor",
-        "melanoma",
-    ],
-    ["heart", "cardiac", "coronary", "cardio", "myocardial", "atrial"],
-    ["stroke", "cerebrovascular", "brain", "infarction", "ischemic", "cerebral"],
-    ["psoriasis", "psoriatic"],
-    ["hepatitis", "hep", "hbv", "hcv"],
-    ["hiv", "aids"],
-    ["tuberculosis", "tb", "mycobacterium"],
-    ["covid", "sars-cov-2", "coronavirus"],
-    ["hypertension", "blood pressure"],
-    ["acne", "derma", "eczema", "skin", "rosacea"],
-    [
-        "alzheimer",
-        "dementia",
-        "cognitive",
-        "parkinson",
-        "epilepsy",
-        "seizure",
-        "neuro",
-        "huntington",
-    ],
-    ["lupus", "sclerosis", "ms", "autoimmune", "immune disorder"],
-    ["migraine", "headache"],
-    [
-        "stomach",
-        "digest",
-        "gastro",
-        "intestin",
-        "bowel",
-        "gastric",
-        "peptic",
-        "duodenal",
-        "ulcer",
-        "crohn",
-    ],
-    ["liver", "hepatic", "cirrhosis"],
-    ["kidney", "renal", "ckd", "esrd", "dialysis"],
-    ["urinary", "bladder", "incontinence", "cystitis", "uti"],
-    ["depress", "schizo", "psycho", "anxiety", "panic", "sleep", "insomnia", "bipolar"],
-    [
-        "substance",
-        "opioid",
-        "alcohol",
-        "smoking",
-        "tobacco",
-        "addiction",
-        "abuse",
-        "nicotine",
-    ],
-    [
-        "gout",
-        "arthritis",
-        "arthritic",
-        "spondyl",
-        "osteo",
-        "bone",
-        "spine",
-        "spinal",
-        "disc",
-        "orthotic",
-        "carpal",
-    ],
-    ["anemia", "iron", "hemo", "thrombo", "coagulation", "platelet", "purpura", "clot"],
-    [
-        "eye",
-        "ocular",
-        "retina",
-        "retinopathy",
-        "macular",
-        "glaucoma",
-        "ophthalmic",
-        "cataract",
-        "uveitis",
-        "conjunctivitis",
-        "myopia",
-    ],
-    [
-        "uterine",
-        "ovarian",
-        "cervical",
-        "menstrual",
-        "endometriosis",
-        "fibroids",
-        "menopause",
-        "postmenopausal",
-    ],
-    ["allergy", "allergic", "hypersensitivity"],
-    ["pain", "nociceptive", "neuropathic"],
-    ["transplant", "graft", "allograft", "rejection"],
-    ["genetic", "congenital", "inherited"],
-    ["pregnancy", "pregnant", "prenatal", "maternal", "pediatric", "child", "infant"],
-    ["vaccine", "vaccination", "immunization"],
-    ["surgical", "postoperative", "complication"],
+    ["Animal Diseases"],
+    ["Cardiovascular Diseases"],
+    ["Congenital, Hereditary, and Neonatal Diseases and Abnormalities"],
+    ["Digestive System Diseases"],
+    ["Disorders of Environmental Origin"],
+    ["Endocrine System Diseases"],
+    ["Eye Diseases"],
+    ["Hemic and Lymphatic Diseases"],
+    ["Immune System Diseases"],
+    ["Infections"],
+    ["Musculoskeletal Diseases"],
+    ["Neoplasms"],
+    ["Nervous System Diseases"],
+    ["Nutritional and Metabolic Diseases"],
+    ["Occupational Diseases"],
+    ["Otorhinolaryngologic Diseases"],
+    ["Pathological Conditions, Signs and Symptoms"],
+    ["Respiratory Tract Diseases"],
+    ["Skin and Connective Tissue Diseases"],
+    ["Stomatognathic Diseases"],
+    ["Urogenital Diseases"],
+    ["Wounds and Injuries"],
 ]
 
 
 # Function to run the study script and extract the results
 def run_study(conditions: list[str], args: argparse.Namespace) -> dict[str, Any]:
     # Convert the list to a string for the command
-    conditions_str = str(conditions).replace(" ", "")
+    conditions_str = str(conditions)
 
     # Run the command using the provided path
     cmd = f"python {args.script_path} conditions={conditions_str} save_path={args.output_dir}"
@@ -201,6 +228,26 @@ def run_study(conditions: list[str], args: argparse.Namespace) -> dict[str, Any]
     }
 
 
+def count_unique_ncts(studies_dir: str) -> int:
+    unique_ncts = set()
+
+    for yaml_file in Path(studies_dir).glob("**/*.yaml"):
+        with open(yaml_file, "r") as f:
+            study_data = yaml.safe_load(f)
+
+            # Extract NCT IDs from train, val, and test trials
+            for trial_list in [
+                study_data["train_trials"],
+                study_data["val_trials"],
+                study_data["test_trials"],
+            ]:
+                for trial in trial_list:
+                    # Each trial is a dict with one key (the NCT ID)
+                    unique_ncts.update(trial.keys())
+
+    return len(unique_ncts)
+
+
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(
@@ -232,3 +279,4 @@ if __name__ == "__main__":
     csv_path = os.path.join(args.output_dir, "create_study_results.csv")
     df.to_csv(csv_path, index=False)
     logger.info(f"Results saved to {csv_path}")
+    logger.info(f"{count_unique_ncts(args.output_dir)} unique trials covered.")

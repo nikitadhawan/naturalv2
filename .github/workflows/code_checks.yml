@@ -53,7 +53,7 @@ jobs:
         run: |
           source .venv/bin/activate
           pre-commit run --all-files --show-diff-on-failure
-          continue-on-error: true
+        continue-on-error: true
 
       - name: Commit and push changes if any
         if: always()

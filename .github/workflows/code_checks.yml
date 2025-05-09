@@ -34,6 +34,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        fetch-depth: 0          # fetch full history to allow pushes
+        ref: ${{ github.ref }}  # checkout the branch that triggered the workflow
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

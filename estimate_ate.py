@@ -18,10 +18,7 @@ from naturalv2.evals.experiment import Experiment
 from naturalv2.models import lm
 from naturalv2.models.lm import LM
 from naturalv2.utils import (
-    ImputationsResponse,
-    KnownsResponse,
-    RelevanceResponse,
-    TYFilterResponse,
+    create_response_format,
     enum_to_dcts,
     enumerate_strings,
     get_sample_text,
@@ -40,13 +37,14 @@ def get_save_path(
     nct_id: str,
     model_name: str,
     extract_type: str,
+    outcome: str,
 ) -> str:
     """Generate save path for extracted data."""
     return os.path.join(
         base_path,
         "results",
         f"{nct_id}",
-        f"{model_name.replace('/', '-')}_{extract_type}.csv",
+        f"{model_name.replace('/', '-')}_{extract_type}_{outcome}.csv",
     )
 
 
@@ -61,6 +59,8 @@ async def _extract_covariates_from_report(
 async def extract_covariates(
     input_df: pd.DataFrame,
     experiment: Experiment,
+    source_name: str,
+    outcome: str,
     model_cfg: DictConfig,
     save_path: str,
     extract_type: Literal["relevance", "ty_filter", "knowns", "imputations"],
@@ -75,6 +75,10 @@ async def extract_covariates(
         Input dataframe with reports
     experiment: Experiment
         Experiment object
+    source_name: str
+        Source of data, according to which prompts will be constructed
+    outcome: str
+        The outcome of interest
     model_cfg: DictConfig
         Model configuration
     save_path: str
@@ -93,7 +97,7 @@ async def extract_covariates(
 
     """
     file_path = get_save_path(
-        save_path, experiment.nct_id, model_cfg.model, extract_type
+        save_path, experiment.nct_id, model_cfg.model, extract_type, outcome
     )
 
     if os.path.exists(file_path):
@@ -103,7 +107,7 @@ async def extract_covariates(
 
     system_message = {
         "role": "system",
-        "content": experiment.get_system_prompt(extract_type),
+        "content": experiment.get_system_prompt(extract_type, outcome, source_name),
     }
     user_prompt_template = "\nText Report\n>{report}"
 
@@ -219,6 +223,8 @@ def prepare_for_conditional_extraction(
 def extract_conditionals(
     input_df: pd.DataFrame,
     experiment: Experiment,
+    source_name: str,
+    outcome: str,
     model_cfg: DictConfig,
     save_path: str,
     extract_type: Literal["ty_given_x", "y_given_tx", "inclusion", None],
@@ -233,6 +239,10 @@ def extract_conditionals(
         Input dataframe with reports
     experiment: Experiment
         Experiment object
+    outcome: str
+        Outcome of interest
+    source_name: str
+        Source of data, according to which prompts will be constructed
     model_cfg: DictConfig
         Model configuration
     save_path: str
@@ -257,8 +267,8 @@ def extract_conditionals(
 
     # Define features to enumerate based on extraction type
     to_enum_map = {
-        "ty_given_x": ["treatment"] + experiment.outcome_names,
-        "y_given_tx": experiment.outcome_names,
+        "ty_given_x": ["treatment", outcome],
+        "y_given_tx": outcome,
         "inclusion": ["inclusion"],
     }
     to_enum = to_enum_map[extract_type]
@@ -268,7 +278,9 @@ def extract_conditionals(
         save_path,
         experiment.nct_id,
         model_cfg.model,
-        f"{extract_type}_probs" if extract_type == "inclusion" else f"{extract_type}",
+        f"{extract_type}_{outcome}_probs"
+        if extract_type == "inclusion"
+        else f"{extract_type}",
     )
 
     if os.path.exists(file_path):
@@ -294,7 +306,7 @@ def extract_conditionals(
     input_df = experiment.discretize(input_df)
 
     # Get system prompt and prepare options
-    system_prompt = experiment.get_system_prompt("conditionals")
+    system_prompt = experiment.get_system_prompt("conditionals", outcome, source_name)
     _, interleaved_options, idx_to_feat = prepare_for_conditional_extraction(
         experiment, to_enum
     )
@@ -376,6 +388,7 @@ def weight_by_inclusion(ites: np.ndarray, inclusion_probs: pd.DataFrame) -> np.n
 
 def calculate_treatment_effects(
     experiment: Experiment,
+    outcome: str,
     estimator,
     conditionals: pd.DataFrame,
     inclusion_probs: pd.DataFrame,
@@ -384,34 +397,36 @@ def calculate_treatment_effects(
     """Calculate treatment effects for all outcome-treatment pairs."""
     result_dicts = []
 
-    for outcome in experiment.outcome_names:
+    if hasattr(estimator, "estimator_type"):
         all_ites = estimator.get_ites(conditionals, outcome)
-        weighted_effects = weight_by_inclusion(
-            all_ites, inclusion_probs
-        )  # len: num_treatments
+    else:
+        all_ites = estimator.get_ites(conditionals)
+    weighted_effects = weight_by_inclusion(
+        all_ites, inclusion_probs
+    )  # len: num_treatments
 
-        for i, treat1 in enumerate(experiment.treatment_names):
-            for j, treat2 in enumerate(experiment.treatment_names):
-                if i < j:
-                    pred_ate = weighted_effects[j] - weighted_effects[i]
-                    results = {
-                        "estimator": estimator.__class__.__name__,
-                        "outcome": outcome,
-                        "treatments": f"{treat2}-{treat1}",
-                        "pred_ate": pred_ate,
-                    }
-                    logging.info(f"Predicted ATE: {pred_ate}")
-                    if experiment.split != "test":
-                        effect_idx = experiment.outcome_treatment.index(
-                            (outcome, (treat1, treat2))
-                        )
-                        true_ate = experiment.effect_sizes[effect_idx]
-                        error = abs(pred_ate - true_ate)
-                        results.update({"true_ate": true_ate, "abs_error": error})
-                        logging.info(f"True ATE: {true_ate}")
-                        logging.info(f"Absolute Error: {error}")
-                    results.update(data_flow)
-                    result_dicts.append(results)
+    for i, treat1 in enumerate(experiment.treatment_names):
+        for j, treat2 in enumerate(experiment.treatment_names):
+            if i < j:
+                pred_ate = weighted_effects[j] - weighted_effects[i]
+                results = {
+                    "estimator": estimator.__class__.__name__,
+                    "outcome": outcome,
+                    "treatments": f"{treat2}-{treat1}",
+                    "pred_ate": pred_ate,
+                }
+                logging.info(f"Predicted ATE: {pred_ate}")
+                if experiment.split != "test":
+                    effect_idx = experiment.outcome_treatment.index(
+                        (outcome, (treat1, treat2))
+                    )
+                    true_ate = experiment.effect_sizes[effect_idx]
+                    error = abs(pred_ate - true_ate)
+                    results.update({"true_ate": true_ate, "abs_error": error})
+                    logging.info(f"True ATE: {true_ate}")
+                    logging.info(f"Absolute Error: {error}")
+                results.update(data_flow)
+                result_dicts.append(results)
 
     return result_dicts
 
@@ -436,6 +451,10 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(
         os.path.join(cfg.save_path, "results", f"{experiment.nct_id}"), exist_ok=True
     )
+    outcome = cfg.outcome if cfg.outcome is not None else experiment.outcome_names[0]
+    assert outcome in experiment.outcome_names, (
+        f"This experiment didn't measure {outcome}."
+    )
 
     nest_asyncio.apply()
 
@@ -443,35 +462,47 @@ def main(cfg: DictConfig) -> None:
 
     # Load curated data for the first source in {cfg.sources}
     # TODO: remove subsampling after testing
-    curated_df = pd.read_csv(
-        experiment.source_paths[cfg.sources[0]], index_col=0
-    ).sample(frac=0.05, random_state=cfg.seed, ignore_index=True)
+    source_name = cfg.sources[0]
+    curated_df = pd.read_csv(experiment.source_paths[source_name], index_col=0).sample(
+        frac=0.05, random_state=cfg.seed, ignore_index=True
+    )
     data_flow["curated"] = len(curated_df)
     logging.info(f"Initial number of curated reports: {len(curated_df)} reports.")
 
     # Find reports relevant to the problem setting (uncomment for automated pipeline)
+    relevance_response_format = create_response_format(
+        "RelevanceResponse", ["relevant"], {"relevant": Literal["Yes", "No"]}
+    )
     curated_df = asyncio.run(
         extract_covariates(
             curated_df,
             experiment,
+            source_name,
+            outcome,
             cfg.cheap_model,
             cfg.save_path,
             "relevance",
-            response_format=RelevanceResponse,
+            response_format=relevance_response_format,
         )
     )
+    curated_df = curated_df[curated_df["relevant"].lower() == "yes"]
     data_flow["relevant"] = len(curated_df)
     logging.info(f"After relevance filter: {len(curated_df)} reports.")
 
-    # Filter reports that do not contain t,y info
+    # Filter out reports that do not contain t,y info
+    ty_filter_response_format = create_response_format(
+        "TYFilterResponse", experiment.treatment_names + [outcome]
+    )
     ty_samples = asyncio.run(
         extract_covariates(
             curated_df,
             experiment,
+            source_name,
+            outcome,
             cfg.cheap_model,
             cfg.save_path,
             "ty_filter",
-            response_format=TYFilterResponse,
+            response_format=ty_filter_response_format,
         )
     )
     ty_filtered_df = experiment.hard_filter_ty(ty_samples)
@@ -479,14 +510,19 @@ def main(cfg: DictConfig) -> None:
     logging.info(f"After treatment-outcome filter: {len(ty_filtered_df)} reports.")
 
     # Extract samples from reports, allowing LLM to output "unknown" for missing info
+    knowns_response_format = create_response_format(
+        "KnownsResponse", experiment.covariate_names
+    )
     samples_with_unknown = asyncio.run(
         extract_covariates(
             ty_filtered_df,
             experiment,
+            source_name,
+            outcome,
             cfg.sample_model,
             cfg.save_path,
             "knowns",
-            response_format=KnownsResponse,
+            response_format=knowns_response_format,
         )
     )
 
@@ -496,14 +532,19 @@ def main(cfg: DictConfig) -> None:
     logging.info(f"After inclusion filter: {len(inclusion_filtered)} reports.")
 
     # Impute samples from reports, imputing missing info
+    imputations_response_format = create_response_format(
+        "ImputationsResponse", experiment.covariate_names
+    )
     imputed_samples = asyncio.run(
         extract_covariates(
             inclusion_filtered,
             experiment,
+            source_name,
+            outcome,
             cfg.sample_model,
             cfg.save_path,
             "imputations",
-            response_format=ImputationsResponse,
+            response_format=imputations_response_format,
         )
     )
 
@@ -526,6 +567,8 @@ def main(cfg: DictConfig) -> None:
     conditionals = extract_conditionals(
         imputed_samples,
         experiment,
+        source_name,
+        outcome,
         cfg.probs_model,
         cfg.save_path,
         extract_type=extract_type,
@@ -535,6 +578,8 @@ def main(cfg: DictConfig) -> None:
     inclusion_probs = extract_conditionals(
         imputed_samples,
         experiment,
+        source_name,
+        outcome,
         cfg.probs_model,
         cfg.save_path,
         extract_type="inclusion",
@@ -543,7 +588,7 @@ def main(cfg: DictConfig) -> None:
     # Calculate and save treatment effects
     estimator = instantiate(cfg.estimator, experiment=experiment)
     results = calculate_treatment_effects(
-        experiment, estimator, conditionals, inclusion_probs, data_flow
+        experiment, outcome, estimator, conditionals, inclusion_probs, data_flow
     )
 
     save_results(results, cfg.save_path, experiment.nct_id)

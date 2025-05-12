@@ -9,7 +9,7 @@ class NaturalMC:
         self.estimator_type = estimator_type
         self.covariate_names = experiment.covariate_names
         self.num_treat = len(experiment.treatment_names)
-        self.num_out = len(experiment.outcome_names)
+        # self.num_out = len(experiment.outcome_names)
 
         self.causal_models = {
             "naive": DifferenceInMeans,

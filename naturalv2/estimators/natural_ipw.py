@@ -8,8 +8,8 @@ class NaturalIPW:
         self.experiment = experiment
         self.covariate_names = experiment.covariate_names
         self.num_treat = len(experiment.treatment_names)
-        self.num_out = len(experiment.outcome_names)
-        self.conditional_shape = [self.num_treat, 2 * self.num_out]  # binary outcomes
+        # self.num_out = len(experiment.outcome_names)
+        self.conditional_shape = [self.num_treat, 2]  # binary outcomes
 
     def compute_prop_score(self, conditionals):
         options = enumerate_strings(self.experiment.get_options(self.covariate_names))
@@ -40,10 +40,10 @@ class NaturalIPW:
             prop_score_lst.append(prop_scores)
         return np.array(prop_score_lst)
 
-    def get_ites(self, conditionals, outcome):
+    def get_ites(self, conditionals):
         # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
         conditionals = conditionals.copy()
-        outcome_idx = self.experiment.outcome_names.index(outcome)
+        # outcome_idx = self.experiment.outcome_names.index(outcome)
         options = enumerate_strings(self.experiment.get_options(self.covariate_names))
         idx_to_feat = enum_to_dcts(options, self.covariate_names)
         feat_dicts = [self.experiment.transform_samples(dct) for dct in idx_to_feat]
@@ -55,9 +55,9 @@ class NaturalIPW:
             axis=1,
         )
         # choose probs corresponding to {outcome}
-        conditionals.loc[:, "probs"] = conditionals.apply(
-            lambda row: row["probs"][:, 2 * outcome_idx : 2 * (outcome_idx + 1)], axis=1
-        )
+        # conditionals.loc[:, "probs"] = conditionals.apply(
+        #     lambda row: row["probs"][:, 2 * outcome_idx : 2 * (outcome_idx + 1)], axis=1
+        # )
 
         self.prop_score_lst = self.compute_prop_score(conditionals)
         all_ites = np.zeros((self.num_treat, len(conditionals)))

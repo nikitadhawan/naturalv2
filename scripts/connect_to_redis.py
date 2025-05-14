@@ -135,7 +135,7 @@ def cli_main(
                 "It should continue running after this script exits."
             )
         except Exception as e:
-            print(f"Failed to start local SSH process: {e}")
+            click.echo(f"Failed to start local SSH process: {e}", err=True)
     else:
         print("Submitting SLURM job...")
         executor = submitit.AutoExecutor(folder="outputs/%j")

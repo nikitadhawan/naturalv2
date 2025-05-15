@@ -15,6 +15,8 @@ ResponseType = Union[ModelResponse, TextCompletionResponse]
 
 
 class LLMParams(TypedDict, total=False):
+    """Parameters for the LLM deployment."""
+
     #: The model name to use for the LLM. This is the model name used by the LLM provider.
     model: Optional[str]
 
@@ -67,11 +69,84 @@ class LLMParams(TypedDict, total=False):
 
 
 class LM:
-    """A class for interacting with OpenAI-compatible LLM models.
+    """An interface for OpenAI-compatible LLM providers.
+
+    This class supports routing requests to multiple deployments of the same model
+    and provides caching and retrying capabilities.
+
+    Parameters
+    ----------
+    model_name : str
+        The name of the model to use. This should be a valid model name for the LLM provider.
+    deployment_params : list[LLMParams]
+        A list of dictionaries containing the deployment parameters for the LLM.
+        Each dictionary should contain the following keys:
+            - model: The model name to use for the LLM. This is the model name used by the LLM provider.
+            - custom_llm_provider: The provider name to use for the LLM.
+            - api_key: The API key for accessing the LLM.
+            - api_base: The API base URL for the LLM.
+            - api_version: The API version for the LLM.
+            - organization: The organization ID for the LLM, if applicable (typically for OpenAI orgs).
+            - tpm: The tokens per minute limit for the LLM requests.
+            - rpm: The requests per minute limit for the LLM requests.
+            - max_parallel_requests: The maximum number of concurrent requests to the LLM.
+            - order: The order of the LLM in the routing process.
+            - weight: The weight of the LLM in the routing process. This sets how often the LLM is used.
+            - timeout: The number of seconds to timeout the LLM request if it takes too long.
+            - max_retries: The maximum number of times to retry the LLM request if it fails.
+            - num_retries: The maximum number of times to retry the LLM request if it fails.
+            - max_budget: The maximum budget for LLM requests. This only works for LLMs with known costs.
+            - mock_response: A mock response to return instead of making a real request.
+    completion_type : Literal["chat", "text"], default="chat"
+        The type of completion to use. This should be either "chat" or "text".
+    routing_strategy : Literal[
+        "simple-shuffle",
+        "least-busy",
+        "cost-based-routing",
+        "usage-based-routing-v2"
+    ], default="simple-shuffle"
+        The routing strategy to use for the LLM. This should be one of the following:
+            - simple-shuffle: randomly picks a deployment unless TPM, RPM or weight is set.
+            - least-busy: picks the deployment with the least number of ongoing requests.
+            - cost-based-routing: Picks deployment based on the lowest cost.
+            - usage-based-routing-v2: routes to deployment with lowest TPM usage.
+    cache_responses : Optional[bool], default=None
+        Whether to cache the responses from the LLM. This should be either True or False.
+    redis_host : Optional[str], default=None
+        The host name of the Redis server to use for caching.
+    redis_port : Optional[int], default=None
+        The port number of the Redis server to use for caching.
+    redis_password : Optional[str], default=None
+        The password for the Redis server to use for caching.
+    redis_client_kwargs : Optional[dict[str, Any]], default=None
+        Additional keyword arguments to pass to the Redis client.
+    cache_ttl : int, default=3600
+        The time-to-live (TTL) for the cached responses, in seconds. Cache TTL is the
+        duration for which the cached responses will be stored in the cache.
+    allowed_failures : Optional[int], default=None
+        The maximum number of allowed failures for the LLM requests.
+    allowed_failures_policy : Optional[AllowedFailsPolicy], default=None
+        The policy to use for allowed failures.
+    cooldown_time : Optional[float], default=None
+        The cooldown time to use for the LLM requests, in seconds.
+    retry_after : int, default=2
+        The number of seconds to wait before retrying the request if it fails.
+    num_retries : int, default=4
+        The maximum number of times to retry the request if it fails.
+    retry_policy : Optional[RetryPolicy], default=None
+        The policy to use for retries.
+    seed : Optional[int], default=None
+        The random seed to use for the LLM requests.
+    extra_headers : Optional[dict[str, str]], default=None
+        Additional headers to include in the LLM requests.
+    default_request_level_params : dict[str, Any], default={}
+        Additional request-level parameters to include in the LLM requests.
+        This should be a dictionary of key-value pairs, where the keys are the parameter names
+        and the values are the parameter values.
 
     Examples
     --------
-    >>> from naturalv2.models.lm2 import LM
+    >>> from naturalv2.models.lm import LM
 
     >>> lm = LM(
     ...     model_name="Llama-3.3-70B-Instruct",
@@ -112,7 +187,7 @@ class LM:
         redis_port: Optional[int] = None,
         redis_password: Optional[str] = None,
         redis_client_kwargs: Optional[dict[str, Any]] = None,
-        cache_ttl: int = 600,
+        cache_ttl: int = 3600,
         # Reliability
         allowed_failures: Optional[int] = None,
         allowed_failures_policy: Optional[AllowedFailsPolicy] = None,
@@ -125,6 +200,7 @@ class LM:
         extra_headers: Optional[dict[str, str]] = None,
         **default_request_level_params: dict[str, Any],
     ) -> None:
+        """Initialize the LM class."""
         if completion_type not in ["chat", "text"]:
             raise ValueError(
                 "Expected ``completion_type`` to be one of ['chat', 'text'] but "
@@ -171,6 +247,28 @@ class LM:
     async def __call__(  # noqa: PLR0912, PLR0915
         self, prompt: Optional[str] = None, messages: Optional[list] = None, **kwargs
     ) -> ResponseType:
+        """Make a request to the LLM.
+
+        Parameters
+        ----------
+        prompt : Optional[str], default=None
+            The prompt to use for the LLM request.
+        messages : Optional[list], default=None
+            The messages to use for the LLM request. This should be a list of dictionaries
+            containing the role and content of each message. This is typically used for
+            chat-based models.
+        **kwargs : dict[str, Any]
+            Additional keyword arguments to pass to the LLM request.
+
+        Returns
+        -------
+        ResponseType
+            The response from the LLM. This will be an instance of ``ModelResponse``
+            if the completion type is "chat", or an instance of ``TextCompletionResponse``
+            if the completion type is "text". The response will contain the generated
+            text, the token usage, and other relevant information. The type of response will
+
+        """
         request_params = self._prepare_request_params(
             prompt=prompt, messages=messages, **kwargs
         )
@@ -202,6 +300,7 @@ class LM:
     def _prepare_request_params(
         self, prompt: str, messages: Optional[list] = None, **kwargs
     ) -> dict[str, Union[str, list]]:
+        """Prepare the request parameters for the LLM request."""
         cache = kwargs.pop("cache", self.cache_responses)
         messages = messages or [{"role": "user", "content": prompt}]
         request_params = {**self._request_params, **kwargs}
@@ -224,6 +323,7 @@ class LM:
         return request_params
 
     def _update_cost(self, response: ResponseType) -> None:
+        """Update the running cost of the LLM requests."""
         if self._model_name in model_cost:
             try:
                 self._cost += completion_cost(completion_response=response)
@@ -236,10 +336,6 @@ class LM:
 # ---------------------------------------------------------------------------- #
 # Helpers
 # ---------------------------------------------------------------------------- #
-class RateLimitAcquisitionError(Exception):
-    """Raised when rate limit acquisition fails."""
-
-
 @dataclass
 class LogprobsOutput:
     tokens: list[str]

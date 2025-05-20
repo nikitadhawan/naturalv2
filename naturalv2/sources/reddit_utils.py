@@ -1,22 +1,27 @@
+import asyncio
 import datetime
 import json
-import logging.handlers
+import logging
 import os
 import urllib
 import warnings
 from time import time
+from typing import Generator, Literal, Optional
 from urllib import request
 
 import pandas as pd
 import wget
 import zstandard
 
+from naturalv2.models.lm import LM, get_message_content
+from naturalv2.sources.anonymizer import Anonymizer
+
 
 warnings.simplefilter("ignore", UserWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
 
-def download_subs_list(data_path):
+def download_subs_list(data_path: str) -> None:
     if not os.path.exists(data_path + "subs_list.txt"):
         url = "https://the-eye.eu/redarcs/"
         response = request.urlopen(url)
@@ -35,79 +40,131 @@ def download_subs_list(data_path):
         print(len(subs), " subreddits listed.")
 
 
-def download_sub_data(subreddit, data_type, data_path):
+def _read_and_decode(
+    reader: zstandard.ZstdDecompressionReader,
+    chunk_size: int,
+    max_window_size: int,
+    previous_chunk: Optional[bytes] = None,
+    bytes_read: int = 0,
+) -> str:
+    chunk = reader.read(chunk_size)
+    bytes_read += chunk_size
+    if previous_chunk is not None:
+        chunk = previous_chunk + chunk
+    try:
+        return chunk.decode()
+    except UnicodeDecodeError as err:
+        if bytes_read > max_window_size:
+            raise UnicodeError(
+                f"Unable to decode frame after reading {bytes_read:,} bytes"
+            ) from err
+        logging.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
+        return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
+
+
+def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
+    with open(file_name, "rb") as file_handle:
+        buffer = ""
+        reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
+            file_handle
+        )
+        while True:
+            chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
+            if not chunk:
+                break
+            lines = (buffer + chunk).split("\n")
+        for line in lines[:-1]:
+            yield line, file_handle.tell()
+        buffer = lines[-1]
+    reader.close()
+
+
+def download_sub_data(
+    subreddit: str,
+    data_type: Literal["submissions", "comments"],
+    data_path: str,
+    anonymizer_instance: Optional[Anonymizer] = None,
+) -> None:
+    if data_type not in ["submissions", "comments"]:
+        raise ValueError(
+            "Expected data_type to be 'submissions' or 'comments', but got {}".format(
+                data_type
+            )
+        )
+
+    os.makedirs(data_path, exist_ok=True)
+
     _ = wget.download(
         "https://the-eye.eu/redarcs/files/{}_{}.zst".format(subreddit, data_type),
         out=data_path,
     )
 
-    log = logging.getLogger("bot")
-    log.setLevel(logging.DEBUG)
-    log.addHandler(logging.StreamHandler())
+    bot_loggger = logging.getLogger("bot")
+    bot_loggger.setLevel(logging.DEBUG)
+    bot_loggger.addHandler(logging.StreamHandler())
 
-    def read_and_decode(
-        reader, chunk_size, max_window_size, previous_chunk=None, bytes_read=0
-    ):
-        chunk = reader.read(chunk_size)
-        bytes_read += chunk_size
-        if previous_chunk is not None:
-            chunk = previous_chunk + chunk
-        try:
-            return chunk.decode()
-        except UnicodeDecodeError as err:
-            if bytes_read > max_window_size:
-                raise UnicodeError(
-                    f"Unable to decode frame after reading {bytes_read:,} bytes"
-                ) from err
-            log.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
-            return read_and_decode(
-                reader, chunk_size, max_window_size, chunk, bytes_read
-            )
-
-    def read_lines_zst(file_name):
-        with open(file_name, "rb") as file_handle:
-            buffer = ""
-            reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
-                file_handle
-            )
-            while True:
-                chunk = read_and_decode(reader, 2**27, (2**29) * 2)
-                if not chunk:
-                    break
-                lines = (buffer + chunk).split("\n")
-            for line in lines[:-1]:
-                yield line, file_handle.tell()
-            buffer = lines[-1]
-        reader.close()
-
-    file_path = data_path + "{}_{}.zst".format(subreddit, data_type)
-    # file_size = os.stat(file_path).st_size
+    file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
     file_lines = 0
-    # file_bytes_processed = 0
-    # created = None
     bad_lines = 0
     data = []
 
-    for line, _ in read_lines_zst(file_path):
+    for line, _ in _read_lines_zst(file_path):
         try:
             obj = json.loads(line)
+            print(obj)
             data += [obj]
         except (KeyError, json.JSONDecodeError):
             bad_lines += 1
         file_lines += 1
-        # if file_lines % 100000 == 0:
-        #     log.info(
-        #         f"{created.strftime('%Y-%m-%d %H:%M:%S')} : {file_lines:,} : {bad_lines:,} : {file_bytes_processed:,}:{(file_bytes_processed / file_size) * 100:.0f}%"
-        #     )
 
-    save_path = data_path + "{}_{}.csv".format(subreddit, data_type)
-    data_csv = pd.DataFrame(data)
-    data_csv.to_csv(save_path)
+    save_path = os.path.join(data_path, "{}_{}.csv".format(subreddit, data_type))
+    df = pd.DataFrame(data)
+
+    # remove deleted posts or comments
+    df = (
+        df[df["selftext"] != "[deleted]"]
+        if data_type == "submissions"
+        else df[df["body"] != "[deleted]"]
+    )
+
+    # anonymize dataframe
+    if anonymizer_instance is not None:
+        df = anonymizer_instance.anonymize_dataframe(
+            df,
+            cols=[
+                "author_flair_text",
+                "author_flair_richtext",
+                "author_fullname",
+                "author_patreon_flair",
+                "awarders",
+                "banned_by",
+                "crosspost_parent",
+                "crosspost_parent_list",
+                "link_flair_text",
+                "link_flair_richtext",
+                "removal_reason",
+                "removed_by",
+                "selftext",
+                "title",
+            ]
+            if data_type == "submissions"
+            else [
+                "author_flair_text",
+                "author_flair_richtext",
+                "author_fullname",
+                "author_patreon_flair",
+                "body",
+            ],
+        )
+
+    df.to_csv(save_path)
     os.remove(file_path)
-    log.info(f" Complete : {file_lines:,} : {bad_lines:,}")
+    bot_loggger.info(f" Complete : {file_lines:,} : {bad_lines:,}")
 
 
-def download_from_url(url_str, max_retries=5, retry_delay=120):
+def download_from_url(
+    url_str: str, max_retries: int = 5, retry_delay: int = 120
+) -> dict[str, str]:
     for attempt in range(max_retries):
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -131,7 +188,7 @@ def download_from_url(url_str, max_retries=5, retry_delay=120):
     return {"error": "Failed to fetch data after maximum retries"}
 
 
-def get_sub_about_info(data_path):
+def get_sub_about_info(data_path: str) -> pd.DataFrame:
     if os.path.exists(os.path.join(data_path, "subs_about.csv")):
         return pd.read_csv(data_path + "subs_about.csv", index_col=0)
 
@@ -170,15 +227,15 @@ def get_sub_about_info(data_path):
     return about_df
 
 
-def get_submission_permalink(permalink):
+def get_submission_permalink(permalink: str) -> str:
     return "/" + permalink.split("/")[-2] + "/"
 
 
-def get_comment_permalink(permalink):
+def get_comment_permalink(permalink: str) -> str:
     return "/" + permalink.split("/")[-3] + "/"
 
 
-def date_filter(df, date_str):
+def date_filter(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
     date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
     utc_date_cutoff = int(date_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
 
@@ -186,18 +243,18 @@ def date_filter(df, date_str):
     return df[idx]
 
 
-def get_date(utc_timestamp):
+def get_date(utc_timestamp: float) -> str:
     dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
     return dt.strftime("%B %d, %Y")
 
 
-def get_utc_timestamp(date_str):
+def get_utc_timestamp(date_str: str) -> int:
     dt = datetime.datetime.strptime(date_str, "%B %d, %Y")
     dt = dt.replace(tzinfo=datetime.timezone.utc)
     return int(dt.timestamp())
 
 
-def rule_based_filter(post_df, text_field):
+def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
     # remove rows where the text field is not of type str
     idx = post_df[text_field].apply(lambda x: isinstance(x, str))
     post_df = post_df.loc[idx]
@@ -266,7 +323,9 @@ def rule_based_filter(post_df, text_field):
 #     return filtered_lst
 
 
-def get_context_post_df(submissions, comments):
+def get_context_post_df(
+    submissions: pd.DataFrame, comments: pd.DataFrame
+) -> pd.DataFrame:
     merged_df = pd.DataFrame(
         columns=[
             "subreddit",
@@ -340,18 +399,24 @@ def get_context_post_df(submissions, comments):
     return merged_df
 
 
-def get_reddit_synonyms(keywords, llm):
-    system_prompt = "You are a helpful medical assistant who can translate medical terminology into common terms."
-    user_prompts = [
-        f"What are common brand names or terms that people specifically use when discussing any of {str(keywords)}, especially on platforms like Reddit?"
+def get_reddit_synonyms(keywords: str, lm: LM) -> list[str]:
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful medical assistant who can translate medical terminology into common terms.",
+        },
+        {
+            "role": "user",
+            "content": f"""
+            What are common brand names or terms that people specifically use when discussing any of {str(keywords)}, 
+            especially on platforms like Reddit? Return only a Python list of at most 10 individual words, without any other text or formatting.
+            """,
+        },
     ]
-    user_prompts = [
-        prompt
-        + " Return only a Python list of at most 10 individual words, without any other text or formatting."
-        for prompt in user_prompts
-    ]
-    llm_keywords = llm.get_outputs(system_prompt, user_prompts)
+    response = asyncio.run(lm(messages=messages))
+    llm_keywords = get_message_content(response)
     all_keywords = []
+
     # process outputs into a list of individual words
     for keyword in llm_keywords:
         processed_keyword = (
@@ -368,7 +433,7 @@ def get_reddit_synonyms(keywords, llm):
     return [k.lower() for k in all_keywords]
 
 
-def subreddit_relevance_llm(desc, keywords, lm):
+def subreddit_relevance_llm(desc: str, keywords: str, lm: LM) -> str:
     system_prompt = "You are an expert in analyzing online forums for relevant discussions about clinical conditions."
     system_prompt += "Your task is to determine if a subreddit is likely to contain personal experiences related to a set of related conditions based on the subreddit description."
 
@@ -382,4 +447,5 @@ def subreddit_relevance_llm(desc, keywords, lm):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    return lm(messages=messages)[0]
+    response = asyncio.run(lm(messages=messages))
+    return get_message_content(response)[0]

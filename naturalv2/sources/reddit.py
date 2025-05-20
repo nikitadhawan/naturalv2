@@ -3,6 +3,8 @@ import os
 import pandas as pd
 
 from naturalv2.models.lm import LM
+from naturalv2.sources import anonymizer
+from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     date_filter,
     download_sub_data,
@@ -21,6 +23,7 @@ class RedditSource:
         self.lm_cfg = lm_cfg
 
         self.subs_about = get_sub_about_info(self.data_path)
+        self._anonymizer = Anonymizer()
 
     def condition_filter(self, keywords):
         self.relevant_subs = []
@@ -44,9 +47,19 @@ class RedditSource:
             submissions_path = os.path.join(self.data_path, f"{sub}_submissions.csv")
             comments_path = os.path.join(self.data_path, f"{sub}_comments.csv")
             if not os.path.exists(submissions_path):
-                download_sub_data(sub, "submissions", self.data_path)
+                download_sub_data(
+                    sub,
+                    "submissions",
+                    self.data_path,
+                    anonymizer_instance=self._anonymizer,
+                )
             if not os.path.exists(comments_path):
-                download_sub_data(sub, "comments", self.data_path)
+                download_sub_data(
+                    sub,
+                    "comments",
+                    self.data_path,
+                    anonymizer_instance=self._anonymizer,
+                )
             condition_data_paths.extend([submissions_path, comments_path])
 
         return condition_data_paths

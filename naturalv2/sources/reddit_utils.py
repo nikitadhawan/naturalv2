@@ -408,7 +408,7 @@ def get_reddit_synonyms(keywords: str, lm: LM) -> list[str]:
         {
             "role": "user",
             "content": f"""
-            What are common brand names or terms that people specifically use when discussing any of {str(keywords)}, 
+            What are common brand names or terms that people specifically use when discussing any of {str(keywords)},
             especially on platforms like Reddit? Return only a Python list of at most 10 individual words, without any other text or formatting.
             """,
         },

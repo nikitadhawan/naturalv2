@@ -37,7 +37,7 @@ ______________________________________________________________________
 To convert a curated set of Reddit data to the NATURAL-IPW ATE for the trial with NCT ID: NCT03987919, run:
 
 ```bash
-python estimate_ate.py cheap_model.model=gpt-4o-mini sample_model.model=gpt-4o probs_model=meta-llama/Llama-2-70b-hf estimator=natural_ipw
+python estimate_ate.py cheap_model.model_name=gpt-4.1-nano cheap_model.deployment_params.model_1=openai/natural-gpt-4.1-nano sample_model.model_name=gpt-4.1-mini sample_model.deployment_params.model_1=openai/natural-gpt-4.1-mini probs_model.model_name=gemma-3-27b-it probs_model.deployment_params.model_1=hosted_vllm/gemma-3-27b-it estimator=natural_ipw
 ```
 
 Model choices can be changed based on budget. The above are the models used in the NATURAL paper. The only exception is that the LLAMA2-70B model above is the HF version, while NATURAL used Meta's official release (which hopefully doesn't matter too much).

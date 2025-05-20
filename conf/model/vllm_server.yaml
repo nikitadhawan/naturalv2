@@ -1,9 +1,17 @@
-model: ???
+# @package _global_
+
+model_name: ???
 completion_type: chat
-api_base: ??? # e.g. http://gpu001:8080/v1
+routing_strategy: least-busy
+redis_host: ${oc.env:REDIS_HOST}
+redis_port: ${oc.env:REDIS_PORT}
+redis_client_kwargs:
+  ssl: True
+  ssl_check_hostname: False
+allowed_failures: 10
+cooldown_time: 120
+retry_after: 5
+num_retries: 4
+seed: ${..seed}
 temperature: 0.7
 max_tokens: 512
-num_retries: 3
-seed: ${..seed}
-cache: True
-disk_cache_dir: ${oc.env:LITELLM_CACHE_DIR}

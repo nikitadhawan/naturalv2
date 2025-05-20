@@ -1,9 +1,12 @@
 defaults:
   - pipeline: natural
   - user: ${oc.env:USER}
-  - model@cheap_model: openai
-  - model@sample_model: openai
+  - model@cheap_model: vllm_server
+  - /model/providers@cheap_model.deployment_params.model_1: litellm_proxy
+  - model@sample_model: vllm_server
+  - /model/providers@sample_model.deployment_params.model_1: litellm_proxy
   - model@probs_model: vllm_server
+  - /model/providers@probs_model.deployment_params.model_1: hosted_vllm
   - eval: experiment
   - source@reddit: reddit
   - source@pubmed: pubmed

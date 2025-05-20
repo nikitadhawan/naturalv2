@@ -1,85 +1,64 @@
 import warnings
+from typing import Optional, Union
 
-import numpy as np
 import torch
-from scipy.special import softmax
 from vllm import LLM, SamplingParams
+from vllm.outputs import RequestOutput
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class VLLM:
     def __init__(
         self,
         model: str,
-        download_dir: str = ".",
-        llm_path: str = "",
-        tokenizer_path: str = "",
+        tokenizer_path: Optional[str] = None,
+        trust_remote_code: bool = False,
+        num_gpus: Optional[int] = None,
+        dtype: str = "auto",
+        seed: Optional[int] = None,
+        gpu_mem_util: float = 0.9,
+        enforce_eager: Optional[bool] = None,
+        download_dir: Optional[str] = None,
+        max_seq_len: Optional[int] = None,
+        max_num_seqs: Optional[int] = None,
+        add_bos: bool = False,
+        # sampling params
         temperature: float = 1.0,
         top_p: float = 1.0,
-        max_seq_len: int = 8000,
-        max_gen_len: int = 1,
-        batch_size: int = 16,
-        gpu_mem_util: float = 0.9,
-        seed: int = None,
-        system_prompt: str = "",
-        add_bos: bool = False,
-        length_norm: bool = False,
-        num_gpus: int = None,
+        prompt_logprobs: Optional[int] = None,
+        max_tokens: Optional[int] = 16,
         **kwargs,
     ):
-        self.model_name = model
-        self.download_dir = download_dir
-        self.llm_path = llm_path
-        self.tokenizer_path = tokenizer_path
-        self.temperature = temperature
-        self.top_p = top_p
-        self.max_seq_len = max_seq_len
-        self.max_gen_len = max_gen_len
-        self.batch_size = batch_size
-        self.gpu_mem_util = gpu_mem_util
         self.add_bos = add_bos
-        self.length_norm = length_norm
-        self.seed = seed
-        self.system_prompt = system_prompt
-        self.num_gpus = num_gpus
 
-        self.load_model()
+        if not num_gpus:
+            num_gpus = torch.cuda.device_count()
 
-    def load_model(self):
-        print(f"Initializing vLLM with {self.model_name}...")
+        self.llm = LLM(
+            model=model,
+            tokenizer=tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            tensor_parallel_size=num_gpus,
+            dtype=dtype,
+            seed=seed,
+            gpu_memory_utilization=gpu_mem_util,
+            enforce_eager=enforce_eager,
+            max_model_len=max_seq_len,
+            max_num_seqs=max_num_seqs,
+            download_dir=download_dir,
+            **kwargs,
+        )
 
-        if not self.num_gpus:
-            self.num_gpus = torch.cuda.device_count()
-
-        if not self.llm_path or not self.tokenizer_path:
-            print(f"Downloading model {self.model_name}...")
-            print(f"Download directory: {self.download_dir}")
-            self.llm = LLM(
-                model=self.model_name,
-                download_dir=self.download_dir,
-                gpu_memory_utilization=self.gpu_mem_util,
-                tensor_parallel_size=self.num_gpus,
-            )
-        else:
-            self.llm = LLM(
-                model=self.llm_path,
-                tokenizer=self.tokenizer_path,
-                download_dir=self.download_dir,
-                gpu_memory_utilization=self.gpu_mem_util,
-                tensor_parallel_size=self.num_gpus,
-            )
-
-        print("LLM initialized!")
-
-        self.tokenizer = self.llm.get_tokenizer()
+        self.tokenizer: AnyTokenizer = self.llm.get_tokenizer()
         self.check_bos()
 
-        self.sampling_params = SamplingParams(
-            n=1,
-            temperature=self.temperature,
-            max_tokens=self.max_gen_len,
-            prompt_logprobs=0,
-        )
-        print("Sampling params initialized!")
+        self._sampling_params = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "prompt_logprobs": prompt_logprobs,
+            "seed": seed,
+        }
 
     def check_bos(self):
         # Check if tokenizer automatically adds BOS token; set add_bos to True if BOS token to be added manually
@@ -93,48 +72,27 @@ class VLLM:
             )
             self.add_bos = True
 
-    def input_logprob(self, prompts, length_norm=False):
+    def get_completions(
+        self, prompt: Union[str, list[str]], **sampling_params
+    ) -> list[RequestOutput]:
+        sampling_params = SamplingParams(**{**self._sampling_params, **sampling_params})
+        if isinstance(prompt, str):
+            prompt = [prompt]
+
         if self.add_bos:
-            prompts = [self.tokenizer.bos_token + p for p in prompts]
-        prompts = [self.system_prompt + "\n\n" + p for p in prompts]
+            prompt = [self.tokenizer.bos_token + p for p in prompt]
 
-        inputs, outputs = [], []
-        for p in prompts:
-            inputs += [p]
-            if len(inputs) == self.batch_size or len(outputs) + len(inputs) == len(
-                prompts
-            ):
-                outputs += self.llm.generate(inputs, self.sampling_params)
-                inputs = []
+        return self.llm.generate(prompt, sampling_params)
 
-        # Process outputs and compute log probabilities
+    def get_prompt_logprobs(self, outputs: list[RequestOutput]) -> list[list[float]]:
         logprobs = []
         for output in outputs:
             input_tokens = self.tokenizer.encode(output.prompt, add_special_tokens=True)
-            logprob = sum(
+            logprobs.append(
                 [
                     i[j].logprob
                     for i, j in zip(output.prompt_logprobs[1:], input_tokens[1:])
                 ]
             )
 
-            # Optionally normalize by sequence length
-            if length_norm:
-                logprob = logprob / len(input_tokens)
-
-            logprobs.append(logprob)
-
         return logprobs
-
-    def compute_input_probs(self, X, options):
-        X_repeat = [x for x in X for _ in range(len(options))]
-        options_repeat = options * len(X)
-        inp = []
-        for x, y in zip(X_repeat, options_repeat):
-            inp += [x + y]
-        logprobs = self.input_logprob(inp)
-        logprobs = np.array(logprobs).reshape((len(X), len(options)))
-        probs = softmax(logprobs, axis=1)
-        sample_idx = [np.random.choice(len(prob), p=prob) for prob in probs]
-        max_idx = np.argmax(probs, axis=1)
-        return probs, sample_idx, max_idx

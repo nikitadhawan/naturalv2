@@ -1,5 +1,0 @@
-name: franklin
-save_path: ${user.path_to_main}/outputs
-data_path: /projects/natural
-path_to_main: /h/fogidi/naturalv2
-vllm_model_cache: /projects/natural/.cache/vllm

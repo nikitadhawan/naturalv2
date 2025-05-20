@@ -1,8 +1,11 @@
 defaults:
   - user: ${oc.env:USER}
-  - model@cheap_model: openai
-  - model@sample_model: openai
-  - model@probs_model: vllm_server
+  - model@cheap_model: vllm_server
+  - /model/providers@cheap_model.deployment_params.model_1: hosted_vllm
+  # - model@sample_model: vllm_server
+  # - /model/providers@sample_model.deployment_params.model_1: litellm_proxy
+  # - model@probs_model: vllm_server
+  # - /model/providers@probs_model.deployment_params.model_1: hosted_vllm
   - eval: experiment
   - source@reddit: reddit
   - source@pubmed: pubmed
@@ -18,13 +21,13 @@ sources:
   - reddit
   - pubmed
 experiment_name: test
-probs_model:
-  completion_type: text
-  temperature: 1.0
-  max_tokens: 1
-  prompt_logprobs: 0
-  get_response: False
-  local: False
+# probs_model:
+#   completion_type: text
+#   temperature: 1.0
+#   max_tokens: 1
+#   prompt_logprobs: 0
+#   get_response: False
+#   local: False
 save_path: ${user.save_path}
 data_path: ${user.data_path}
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}

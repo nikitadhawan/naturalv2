@@ -1,0 +1,5 @@
+model: ???
+api_key: ${oc.env:ANTHROPIC_API_KEY}
+tpm: null
+rpm: null
+max_budget: null

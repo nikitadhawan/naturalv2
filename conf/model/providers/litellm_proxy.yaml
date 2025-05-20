@@ -1,0 +1,6 @@
+model: ???
+api_key: ${oc.env:LITELLM_PROXY_API_KEY}
+api_base: ${oc.env:LITELLM_PROXY_API_BASE}
+tpm: 480_000
+rpm: 4_000
+max_budget: null

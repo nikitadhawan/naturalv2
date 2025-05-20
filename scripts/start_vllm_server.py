@@ -63,6 +63,7 @@ def _display_slurm_job_details(
     qos: Optional[str],
     time: str,
     constraint: Optional[str],
+    exclude: Optional[str],
     setup: Optional[list[str]],
     env_vars: dict[str, str],
     args: list[str],
@@ -81,7 +82,10 @@ def _display_slurm_job_details(
     table.add_row("Partition", partition or "N/A")
     table.add_row("Time Limit", time)
     table.add_row("QOS", qos or "N/A")
-    table.add_row("Constraint", "\n".join(constraint) if constraint else "N/A")
+    table.add_row(
+        "Constraint", "\n".join(constraint.split(",")) if constraint else "N/A"
+    )
+    table.add_row("Excluded Nodes", "\n".join(exclude.split(",")) if exclude else "N/A")
     table.add_row("Setup Commands", "\n".join(list(setup)) if setup else "N/A")
     table.add_row("\nEnvironment Variables", style="magenta")
     for key, value in env_vars.items():
@@ -185,6 +189,7 @@ def launch_vllm_server(  # noqa: PLR0912, PLR0915
     qos: Optional[str] = None,
     time: str = "00:30:00",
     constraint: Optional[str] = None,
+    exclude: Optional[str] = None,
     log_folder: Optional[str] = None,
     job_name: str = "vllm_server",
     env_vars: Optional[dict[str, str]] = None,
@@ -220,6 +225,8 @@ def launch_vllm_server(  # noqa: PLR0912, PLR0915
         SLURM time limit in the format HH:MM:SS. Ignored if ``local=True``.
     constraint : str, optional, default=None
         List of constraints for SLURM job submission. Ignored if ``local=True``.
+    exclude : str, optional, default=None
+        Comma-separated list of nodes to exclude from the job. Ignored if ``local=True``.
     log_folder : str, optional, default=None
         Folder to store logs. If None, defaults to ``"outputs/%j"``, where %j is the
         job ID. If running locally, this is ignored.
@@ -280,6 +287,7 @@ def launch_vllm_server(  # noqa: PLR0912, PLR0915
             or qos is not None
             or time != "00:30:00"
             or constraint is not None
+            or exclude is not None
             or mem_per_cpu_gb != 1
             or gpus_per_node is not None
         ):
@@ -361,6 +369,8 @@ def launch_vllm_server(  # noqa: PLR0912, PLR0915
         slurm_params["slurm_gres"] = f"gpu:{gpus_per_node}"
     if constraint:
         slurm_params["slurm_constraint"] = constraint
+    if exclude:
+        slurm_params["slurm_exclude"] = exclude
 
     setup_cmds = setup or []
     if str_env_vars:
@@ -462,6 +472,11 @@ def launch_vllm_server(  # noqa: PLR0912, PLR0915
     help="Constraints for SLURM job submission; ignored if --local is set",
 )
 @click.option(
+    "--exclude",
+    type=str,
+    help="Comma-separated list of nodes to exclude from the job; ignored if --local is set",
+)
+@click.option(
     "--mem-per-cpu-gb",
     type=int,
     default=1,
@@ -498,6 +513,7 @@ def cli_main(
     qos: str,
     time: str,
     constraint: str,
+    exclude: str,
     mem_per_cpu_gb: int,
     gpus_per_node: int,
     env: list[str],
@@ -520,6 +536,7 @@ def cli_main(
             qos=qos,
             time=time,
             constraint=constraint,
+            exclude=exclude,
             mem_per_cpu_gb=mem_per_cpu_gb,
             gpus_per_node=gpus_per_node,
             env_vars=env_vars,
@@ -540,6 +557,7 @@ def cli_main(
                 qos,
                 time,
                 constraint,
+                exclude,
                 setup,
                 env_vars,
                 ctx.args,

@@ -4,6 +4,7 @@ from typing import Optional
 import dask.dataframe as dd
 import pandas as pd
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_anonymizer import AnonymizerEngine
 from tqdm.dask import TqdmCallback
 
@@ -47,8 +48,15 @@ class Anonymizer:
         "FI_PERSONAL_IDENTITY_CODE",
     ]
 
-    def __init__(self, score_threshold: float = 0.3) -> None:
-        self._analyzer = AnalyzerEngine(default_score_threshold=score_threshold)
+    def __init__(self, score_threshold: float = 0.4) -> None:
+        self._analyzer = AnalyzerEngine(
+            default_score_threshold=score_threshold,
+            # NOTE: the default model, en_core_web_lg, is around 382 MB, which
+            # makes the class large when pickled and increases the dask graph.
+            nlp_engine=SpacyNlpEngine(
+                [{"lang_code": "en", "model_name": "en_core_web_md"}]
+            ),
+        )
         self._anonymizer = AnonymizerEngine()
 
     def anonymize(self, text: str) -> str:
@@ -77,7 +85,7 @@ class Anonymizer:
             if col not in adf.columns:
                 raise ValueError(f"Column {col} not found in DataFrame")
 
-        n_cores = num_workers or mp.cpu_count() - 1 or 1
+        n_cores = num_workers or (mp.cpu_count() - 1 or 1)
         ddf: dd.DataFrame = dd.from_pandas(adf, npartitions=n_cores)
 
         for col in cols:

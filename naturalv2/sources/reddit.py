@@ -1,9 +1,11 @@
 import os
+from typing import Literal
 
 import pandas as pd
+from omegaconf import DictConfig
 
+from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM
-from naturalv2.sources import anonymizer
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     date_filter,
@@ -17,7 +19,12 @@ from naturalv2.utils import load_prompt
 
 
 class RedditSource:
-    def __init__(self, data_path, match_method, lm_cfg):
+    def __init__(
+        self,
+        data_path: str,
+        match_method: Literal["string_match", "llm"],
+        lm_cfg: DictConfig,
+    ):
         self.data_path = data_path
         self.match_method = match_method
         self.lm_cfg = lm_cfg
@@ -25,7 +32,7 @@ class RedditSource:
         self.subs_about = get_sub_about_info(self.data_path)
         self._anonymizer = Anonymizer()
 
-    def condition_filter(self, keywords):
+    def condition_filter(self, keywords: list[str]) -> list[str]:
         self.relevant_subs = []
         for row in self.subs_about.iterrows():
             sub_name, desc, public_desc = row[1].to_list()
@@ -64,7 +71,7 @@ class RedditSource:
 
         return condition_data_paths
 
-    def clean_data(self, study_name):
+    def clean_data(self, study_name: str) -> tuple[str, int]:
         os.makedirs(os.path.join(self.data_path, study_name), exist_ok=True)
         save_path = os.path.join(self.data_path, f"{study_name}/reddit_cleaned.csv")
         if os.path.exists(save_path):
@@ -90,7 +97,13 @@ class RedditSource:
         rule_filtered_df.to_csv(save_path)
         return save_path, len(rule_filtered_df)
 
-    def experiment_data(self, exp, study_name, filter_by_date, clean_data_path):
+    def experiment_data(
+        self,
+        exp: Experiment,
+        study_name: str,
+        filter_by_date: bool,
+        clean_data_path: str,
+    ) -> tuple[str, int]:
         # check treatment/outcome mention, filter by date
         save_path = os.path.join(
             self.data_path, f"{study_name}/reddit_{exp.nct_id}.csv"
@@ -143,7 +156,7 @@ class RedditSource:
         exp_df.to_csv(save_path)
         return save_path, len(exp_df)
 
-    def get_common_name_prompts(self):
+    def get_common_name_prompts(self) -> dict[str, str]:
         base_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
         )

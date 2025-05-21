@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
@@ -54,16 +55,32 @@ class Anonymizer:
         self._analyzer = AnalyzerEngine(default_score_threshold=score_threshold)
         self._anonymizer = AnonymizerEngine()
 
-    def anonymize_text(self, text: str) -> str:
+    def anonymize_text(self, text: str) -> tuple[str, dict[str, int]]:
         results = self._analyzer.analyze(
             text=text, language="en", entities=self.ENTITIES
         )
-        return self._anonymizer.anonymize(text=text, analyzer_results=results)
+        anon_result = self._anonymizer.anonymize(text=text, analyzer_results=results)
 
-    def _anonymize_column(self, col: pd.Series) -> pd.Series:
-        return col.apply(
-            lambda x: self.anonymize_text(x).text if isinstance(x, str) else x
-        )
+        entity_stats = Counter()
+
+        for item in anon_result.items:
+            entity = item.entity_type
+            entity_stats[entity] += 1
+
+        return anon_result.text, dict(entity_stats)
+
+    def _anonymize_column(self, col: pd.Series) -> tuple[pd.Series, dict[str, int]]:
+        col_stats_agg = Counter()
+
+        def apply_func(x):
+            if isinstance(x, str):
+                anonymized_text, text_item_stats = self.anonymize_text(x)
+                col_stats_agg.update(text_item_stats)
+                return anonymized_text
+            return x
+
+        processed_series = col.apply(apply_func)
+        return processed_series, dict(col_stats_agg)
 
     def anonymize_dataframe(
         self,
@@ -107,6 +124,7 @@ class Anonymizer:
             )
 
         progress_bar = tqdm(total=len(cols_to_anonymize), desc="Anonymizing columns")
+        df_entity_stats = Counter()
 
         with ProcessPoolExecutor(num_workers) as executor:
             futures = {
@@ -117,10 +135,19 @@ class Anonymizer:
             for future in as_completed(futures):
                 col = futures[future]
                 try:
-                    df.loc[:, col] = future.result()
+                    df.loc[:, col], col_entity_stats = future.result()
+                    df_entity_stats.update(col_entity_stats)
                     progress_bar.update(1)
                 except Exception as e:
                     logger.error(f"Error anonymizing column {col}: {e}")
                     continue
+
+        progress_bar.close()
+
+        # logging anonymization stats
+        logger.info("\nAnonymization stats:")
+        for entity, count in df_entity_stats.items():
+            logger.info(f"{entity}: {count}")
+        logger.info(f"\nTotal entities anonymized: {sum(df_entity_stats.values())}")
 
         return df

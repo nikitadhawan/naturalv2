@@ -51,7 +51,7 @@ class RedditSource:
                 if answer.lower().startswith("yes"):
                     self.relevant_subs.append(sub_name)
                     logger.info(f"{sub_name} is relevant.")
-        logger.info(len(self.relevant_subs), "relevant subreddits found!")
+        logger.info(f"{len(self.relevant_subs)} relevant subreddits found!")
 
         condition_data_paths = []
         for sub in self.relevant_subs:

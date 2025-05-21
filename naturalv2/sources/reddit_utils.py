@@ -39,7 +39,7 @@ def download_subs_list(data_path: str) -> None:
 
         with open(data_path + "subs_list.txt", "w") as f:
             f.write("\n".join(subs))
-        logger.info(len(subs), " subreddits listed.")
+        logger.info(f"{len(subs)} subreddits listed.")
 
 
 def _read_and_decode(

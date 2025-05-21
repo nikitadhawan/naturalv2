@@ -19,6 +19,7 @@ class Anonymizer:
     This class uses Presidio's AnalyzerEngine and AnonymizerEngine to detect and anonymize
     sensitive entities such as credit card numbers, email addresses, and personal identifiers.
     """
+
     ENTITIES = [
         "CREDIT_CARD",
         "CRYPTO",

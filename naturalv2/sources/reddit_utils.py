@@ -20,6 +20,8 @@ from naturalv2.sources.anonymizer import Anonymizer
 warnings.simplefilter("ignore", UserWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
+logger = logging.getLogger(__name__)
+
 
 def download_subs_list(data_path: str) -> None:
     if not os.path.exists(data_path + "subs_list.txt"):
@@ -37,7 +39,7 @@ def download_subs_list(data_path: str) -> None:
 
         with open(data_path + "subs_list.txt", "w") as f:
             f.write("\n".join(subs))
-        print(len(subs), " subreddits listed.")
+        logger.info(len(subs), " subreddits listed.")
 
 
 def _read_and_decode(
@@ -49,8 +51,10 @@ def _read_and_decode(
 ) -> str:
     chunk = reader.read(chunk_size)
     bytes_read += chunk_size
+
     if previous_chunk is not None:
         chunk = previous_chunk + chunk
+
     try:
         return chunk.decode()
     except UnicodeDecodeError as err:
@@ -58,7 +62,7 @@ def _read_and_decode(
             raise UnicodeError(
                 f"Unable to decode frame after reading {bytes_read:,} bytes"
             ) from err
-        logging.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
+        logger.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
         return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
 
 
@@ -68,13 +72,16 @@ def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
         reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
             file_handle
         )
+
         while True:
             chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
             if not chunk:
                 break
             lines = (buffer + chunk).split("\n")
+
         for line in lines[:-1]:
             yield line, file_handle.tell()
+
         buffer = lines[-1]
     reader.close()
 
@@ -83,7 +90,7 @@ def download_sub_data(
     subreddit: str,
     data_type: Literal["submissions", "comments"],
     data_path: str,
-    anonymizer_instance: Optional[Anonymizer] = None,
+    anonymizer_instance: Optional["Anonymizer"] = None,
 ) -> None:
     if data_type not in ["submissions", "comments"]:
         raise ValueError(
@@ -99,10 +106,6 @@ def download_sub_data(
         out=data_path,
     )
 
-    bot_loggger = logging.getLogger("bot")
-    bot_loggger.setLevel(logging.DEBUG)
-    bot_loggger.addHandler(logging.StreamHandler())
-
     file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
     file_lines = 0
     bad_lines = 0
@@ -111,14 +114,13 @@ def download_sub_data(
     for line, _ in _read_lines_zst(file_path):
         try:
             obj = json.loads(line)
-            print(obj)
             data += [obj]
         except (KeyError, json.JSONDecodeError):
             bad_lines += 1
         file_lines += 1
 
     save_path = os.path.join(data_path, "{}_{}.csv".format(subreddit, data_type))
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(data, copy=False).convert_dtypes(dtype_backend="pyarrow")
 
     # remove deleted posts or comments
     df = (
@@ -138,8 +140,6 @@ def download_sub_data(
                 "author_patreon_flair",
                 "awarders",
                 "banned_by",
-                "crosspost_parent",
-                "crosspost_parent_list",
                 "link_flair_text",
                 "link_flair_richtext",
                 "removal_reason",
@@ -159,7 +159,10 @@ def download_sub_data(
 
     df.to_csv(save_path)
     os.remove(file_path)
-    bot_loggger.info(f" Complete : {file_lines:,} : {bad_lines:,}")
+    logger.info(
+        f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
+        f"({bad_lines:,} bad lines)"
+    )
 
 
 def download_from_url(
@@ -174,16 +177,18 @@ def download_from_url(
             return data
         except urllib.error.HTTPError as e:
             if e.code != 429:
-                print(f"Error fetching data from {url_str}: {e}")
+                logger.error(f"Error fetching data from {url_str}: {e}")
                 return {"error": str(e)}
             if attempt < max_retries - 1:
-                print(f"Rate limited, waiting {retry_delay} seconds before retry...")
+                logger.warning(
+                    f"Rate limited, waiting {retry_delay} seconds before retry..."
+                )
                 time.sleep(retry_delay)
             else:
-                print(f"Max retries exceeded for {url_str}")
+                logger.error(f"Max retries exceeded for {url_str}")
                 return {"error": "Max retries exceeded"}
         except Exception as e:
-            print(f"Unexpected error fetching {url_str}: {e}")
+            logger.error(f"Unexpected error fetching {url_str}: {e}")
             return {"error": str(e)}
     return {"error": "Failed to fetch data after maximum retries"}
 
@@ -426,10 +431,8 @@ def get_reddit_synonyms(keywords: str, lm: LM) -> list[str]:
         )
         keyword_list = [k.strip() for k in processed_keyword.split(",")]
         all_keywords.extend(keyword_list)
-        # for k in keyword_list:
-        #     words = k.split()
-        #     all_keywords.extend(words)
-    print(all_keywords)
+
+    logger.info(f"Reddit keywords: {all_keywords}")
     return [k.lower() for k in all_keywords]
 
 

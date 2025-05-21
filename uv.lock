@@ -781,32 +781,6 @@ wheels = [
 ]
 
 [[package]]
-name = "dask"
-version = "2025.5.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "cloudpickle" },
-    { name = "fsspec" },
-    { name = "importlib-metadata", marker = "python_full_version < '3.12'" },
-    { name = "packaging" },
-    { name = "partd" },
-    { name = "pyyaml" },
-    { name = "toolz" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/df/44/ac66964138b026bc31d82c38c97ff260b1be7e13d8446c5c21e81b4c0991/dask-2025.5.0.tar.gz", hash = "sha256:3ec9175e53effe1c2b0086668352e0d5261c5ef6f71a410264eda83659d686ef", size = 10971343, upload-time = "2025-05-13T22:18:40.791Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/cb/a68c59dd229bae7c439631dba66b0286d551efae67e09e0bbf813635b0d3/dask-2025.5.0-py3-none-any.whl", hash = "sha256:77e9a64bb09098515bc579477b7051b0909474cd7b3e0005e3d0968a70c84015", size = 1473896, upload-time = "2025-05-13T22:18:30.514Z" },
-]
-
-[package.optional-dependencies]
-dataframe = [
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
-
-[[package]]
 name = "debugpy"
 version = "1.8.14"
 source = { registry = "https://pypi.org/simple" }
@@ -899,32 +873,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0d/dd/1bec4c5ddb504ca60fc29472f3d27e8d4da1257a854e1d96742f15c1d02d/distlib-0.3.9.tar.gz", hash = "sha256:a60f20dea646b8a33f3e7772f74dc0b2d0772d2837ee1342a00645c81edf9403", size = 613923, upload-time = "2024-10-09T18:35:47.551Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/91/a1/cf2472db20f7ce4a6be1253a81cfdf85ad9c7885ffbed7047fb72c24cf87/distlib-0.3.9-py2.py3-none-any.whl", hash = "sha256:47f8c22fd27c27e25a65601af709b38e4f0a45ea4fc2e710f65755fa8caaaf87", size = 468973, upload-time = "2024-10-09T18:35:44.272Z" },
-]
-
-[[package]]
-name = "distributed"
-version = "2025.5.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "cloudpickle" },
-    { name = "dask" },
-    { name = "jinja2" },
-    { name = "locket" },
-    { name = "msgpack" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "sortedcontainers" },
-    { name = "tblib" },
-    { name = "toolz" },
-    { name = "tornado" },
-    { name = "urllib3" },
-    { name = "zict" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/17/4d/a4eca3d263a4574c9721f4e5121083aaf113951e697f1c87eabbd7fc8a19/distributed-2025.5.0.tar.gz", hash = "sha256:49dc3395eb3b7169800160731064bbc7ee6f5235bbea49d9b85baa6358a2e37a", size = 1108873, upload-time = "2025-05-13T22:18:35.877Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/e4/a462ea00743788a5b006a3ddc3ea18656410ed97a7a5a8571ae44f0faef0/distributed-2025.5.0-py3-none-any.whl", hash = "sha256:374e3236b4945745b48cd821025f802095abb18fd6477123dd237905253bc60f", size = 1014792, upload-time = "2025-05-13T22:18:32.179Z" },
 ]
 
 [[package]]
@@ -1927,15 +1875,6 @@ wheels = [
 ]
 
 [[package]]
-name = "locket"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2f/83/97b29fe05cb6ae28d2dbd30b81e2e402a3eed5f460c26e9eaa5895ceacf5/locket-1.0.0.tar.gz", hash = "sha256:5c0d4c052a8bbbf750e056a8e65ccd309086f4f0f18a2eac306a8dfa4112a632", size = 4350, upload-time = "2022-04-20T22:04:44.312Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/bc/83e112abc66cd466c6b83f99118035867cecd41802f8d044638aa78a106e/locket-1.0.0-py2.py3-none-any.whl", hash = "sha256:b6c819a722f7b6bd955b80781788e4a66a55628b858d347536b7e81325a3a5e3", size = 4398, upload-time = "2022-04-20T22:04:42.23Z" },
-]
-
-[[package]]
 name = "marisa-trie"
 version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2393,14 +2332,11 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "causallib" },
-    { name = "dask", extra = ["dataframe"] },
-    { name = "distributed" },
     { name = "hydra-core" },
     { name = "litellm" },
     { name = "nest-asyncio" },
     { name = "numpy" },
-    { name = "pandarallel" },
-    { name = "pandas" },
+    { name = "pandas", extra = ["compression", "feather", "parquet"] },
     { name = "presidio-analyzer" },
     { name = "presidio-anonymizer" },
     { name = "scipy" },
@@ -2409,7 +2345,6 @@ dependencies = [
     { name = "tqdm" },
     { name = "wget" },
     { name = "wheel" },
-    { name = "zstandard" },
 ]
 
 [package.dev-dependencies]
@@ -2432,14 +2367,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "causallib", specifier = ">=0.10.0" },
-    { name = "dask", extras = ["dataframe"], specifier = ">=2025.5.0" },
-    { name = "distributed", specifier = ">=2025.5.0" },
     { name = "hydra-core", specifier = ">=1.3.2" },
     { name = "litellm", specifier = ">=1.70.0" },
     { name = "nest-asyncio", specifier = ">=1.6.0" },
     { name = "numpy", specifier = "<2.0.0" },
-    { name = "pandarallel", specifier = ">=1.6.5" },
-    { name = "pandas", specifier = ">=2.2.3" },
+    { name = "pandas", extras = ["parquet", "feather", "compression"], specifier = ">=2.2.3" },
     { name = "presidio-analyzer", specifier = ">=2.2.358" },
     { name = "presidio-anonymizer", specifier = ">=2.2.358" },
     { name = "scipy", specifier = ">=1.15.2" },
@@ -2448,7 +2380,6 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "wget", specifier = ">=3.2" },
     { name = "wheel", specifier = ">=0.45.1" },
-    { name = "zstandard", specifier = ">=0.23.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -2949,17 +2880,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pandarallel"
-version = "1.6.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "dill" },
-    { name = "pandas" },
-    { name = "psutil" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/c5/787365399cc7262e20d1d9f42ba202018c2191e6cd5b1a2a10f9161dae35/pandarallel-1.6.5.tar.gz", hash = "sha256:1c2df98ff6441e8ae13ff428ceebaa7ec42d731f7f972c41ce4fdef1d3adf640", size = 14201, upload-time = "2023-05-02T20:43:15.214Z" }
-
-[[package]]
 name = "pandas"
 version = "2.2.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3007,6 +2927,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/5f/b38085618b950b79d2d9164a711c52b10aefc0ae6833b96f626b7021b2ed/pandas-2.2.3-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:ad5b65698ab28ed8d7f18790a0dc58005c7629f227be9ecc1072aa74c0c1d43a", size = 13098436, upload-time = "2024-09-20T13:09:48.112Z" },
 ]
 
+[package.optional-dependencies]
+compression = [
+    { name = "zstandard" },
+]
+feather = [
+    { name = "pyarrow" },
+]
+parquet = [
+    { name = "pyarrow" },
+]
+
 [[package]]
 name = "parso"
 version = "0.8.4"
@@ -3014,19 +2945,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/66/94/68e2e17afaa9169cf6412ab0f28623903be73d1b32e208d9e8e541bb086d/parso-0.8.4.tar.gz", hash = "sha256:eb3a7b58240fb99099a345571deecc0f9540ea5f4dd2fe14c2a99d6b281ab92d", size = 400609, upload-time = "2024-04-05T09:43:55.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c6/ac/dac4a63f978e4dcb3c6d3a78c4d8e0192a113d288502a1216950c41b1027/parso-0.8.4-py2.py3-none-any.whl", hash = "sha256:a418670a20291dacd2dddc80c377c5c3791378ee1e8d12bffc35420643d43f18", size = 103650, upload-time = "2024-04-05T09:43:53.299Z" },
-]
-
-[[package]]
-name = "partd"
-version = "1.4.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "locket" },
-    { name = "toolz" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/3a/3f06f34820a31257ddcabdfafc2672c5816be79c7e353b02c1f318daa7d4/partd-1.4.2.tar.gz", hash = "sha256:d022c33afbdc8405c226621b015e8067888173d85f7f5ecebb3cafed9a20f02c", size = 21029, upload-time = "2024-05-06T19:51:41.945Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/e7/40fb618334dcdf7c5a316c0e7343c5cd82d3d866edc100d98e29bc945ecd/partd-1.4.2-py3-none-any.whl", hash = "sha256:978e4ac767ec4ba5b86c6eaa52e5a2a3bc748a2ca839e8cc798f1cc6ce6efb0f", size = 18905, upload-time = "2024-05-06T19:51:39.271Z" },
 ]
 
 [[package]]
@@ -4597,15 +4515,6 @@ wheels = [
 ]
 
 [[package]]
-name = "tblib"
-version = "3.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/54/95/4b3044ec4bf248186769629bbfb495a458deb6e4c1f9eff7f298ae1e336e/tblib-3.1.0.tar.gz", hash = "sha256:06404c2c9f07f66fee2d7d6ad43accc46f9c3361714d9b8426e7f47e595cd652", size = 30766, upload-time = "2025-03-31T12:58:27.473Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/44/aa5c8b10b2cce7a053018e0d132bd58e27527a0243c4985383d5b6fd93e9/tblib-3.1.0-py3-none-any.whl", hash = "sha256:670bb4582578134b3d81a84afa1b016128b429f3d48e6cbbaecc9d15675e984e", size = 12552, upload-time = "2025-03-31T12:58:26.142Z" },
-]
-
-[[package]]
 name = "tenacity"
 version = "9.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4782,15 +4691,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5b/b9/1ed31d167be802da0fc95020d04cd27b7d7065cc6fbefdd2f9186f60d7bd/tomli-2.2.1-cp313-cp313-win32.whl", hash = "sha256:d3f5614314d758649ab2ab3a62d4f2004c825922f9e370b29416484086b264ec", size = 98724, upload-time = "2024-11-27T22:38:32.837Z" },
     { url = "https://files.pythonhosted.org/packages/c7/32/b0963458706accd9afcfeb867c0f9175a741bf7b19cd424230714d722198/tomli-2.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:a38aa0308e754b0e3c67e344754dff64999ff9b513e691d0e786265c93583c69", size = 109383, upload-time = "2024-11-27T22:38:34.455Z" },
     { url = "https://files.pythonhosted.org/packages/6e/c2/61d3e0f47e2b74ef40a68b9e6ad5984f6241a942f7cd3bbfbdbd03861ea9/tomli-2.2.1-py3-none-any.whl", hash = "sha256:cb55c73c5f4408779d0cf3eef9f762b9c9f147a77de7b258bef0a5628adc85cc", size = 14257, upload-time = "2024-11-27T22:38:35.385Z" },
-]
-
-[[package]]
-name = "toolz"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/8a/0b/d80dfa675bf592f636d1ea0b835eab4ec8df6e9415d8cfd766df54456123/toolz-1.0.0.tar.gz", hash = "sha256:2c86e3d9a04798ac556793bced838816296a2f085017664e4995cb40a1047a02", size = 66790, upload-time = "2024-10-04T16:17:04.001Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/98/eb27cc78ad3af8e302c9d8ff4977f5026676e130d28dd7578132a457170c/toolz-1.0.0-py3-none-any.whl", hash = "sha256:292c8f1c4e7516bf9086f8850935c799a874039c8bcf959d47b600e4c44a6236", size = 56383, upload-time = "2024-10-04T16:17:01.533Z" },
 ]
 
 [[package]]
@@ -5558,15 +5458,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a9/4a/4833a134c76af987eff3ce8cb71e42932234120e6be061eb2555061e8844/yarl-1.19.0-cp313-cp313-win32.whl", hash = "sha256:24e4c367ad69988a2283dd45ea88172561ca24b2326b9781e164eb46eea68345", size = 85878, upload-time = "2025-04-06T02:35:43.517Z" },
     { url = "https://files.pythonhosted.org/packages/32/e9/59327daab3af8f79221638a8f0d11474d20f6a8fbc41e9da80c5ef69e688/yarl-1.19.0-cp313-cp313-win_amd64.whl", hash = "sha256:0110f91c57ab43d1538dfa92d61c45e33b84df9257bd08fcfcda90cce931cbc9", size = 92448, upload-time = "2025-04-06T02:35:45.694Z" },
     { url = "https://files.pythonhosted.org/packages/a4/06/ae25a353e8f032322df6f30d6bb1fc329773ee48e1a80a2196ccb8d1206b/yarl-1.19.0-py3-none-any.whl", hash = "sha256:a727101eb27f66727576630d02985d8a065d09cd0b5fcbe38a5793f71b2a97ef", size = 45990, upload-time = "2025-04-06T02:36:24.343Z" },
-]
-
-[[package]]
-name = "zict"
-version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d1/ac/3c494dd7ec5122cff8252c1a209b282c0867af029f805ae9befd73ae37eb/zict-3.0.0.tar.gz", hash = "sha256:e321e263b6a97aafc0790c3cfb3c04656b7066e6738c37fffcca95d803c9fba5", size = 33238, upload-time = "2023-04-17T21:41:16.041Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/80/ab/11a76c1e2126084fde2639514f24e6111b789b0bfa4fc6264a8975c7e1f1/zict-3.0.0-py2.py3-none-any.whl", hash = "sha256:5796e36bd0e0cc8cf0fbc1ace6a68912611c1dbd74750a3f3026b9b9d6a327ae", size = 43332, upload-time = "2023-04-17T21:41:13.444Z" },
 ]
 
 [[package]]

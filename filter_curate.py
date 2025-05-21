@@ -1,15 +1,16 @@
 import os
+from typing import Union
 import yaml
 from dotenv import load_dotenv
 import multiprocessing as mp
 
-from dask.distributed import Client, LocalCluster
 import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from create_study import Study
 from naturalv2.evals.experiment import Experiment
+from naturalv2.sources.pubmed import PubMedSet
 from naturalv2.sources.reddit import RedditSource
 
 # ruff: noqa
@@ -43,9 +44,6 @@ class StudyDataset:
 
 @hydra.main(config_path="conf/", config_name="config.yaml", version_base="1.2")
 def main(cfg: DictConfig) -> None:
-    cluster = LocalCluster(n_workers=mp.cpu_count() - 1 or 1, threads_per_worker=1)
-    client = Client(cluster)
-
     study_file = os.path.join(
         cfg.save_path, "studies", cfg.conditions[0] + "_study.yaml"
     )
@@ -62,75 +60,69 @@ def main(cfg: DictConfig) -> None:
     else:
         study_dataset = StudyDataset(study.conditions, cfg.sources)
 
-    try:
-        for source_name in cfg.sources:
-            source_dataset: RedditSource = instantiate(cfg[source_name])
+    for source_name in cfg.sources:
+        source_dataset: Union[RedditSource, PubMedSet] = instantiate(cfg[source_name])
 
-            # search for keyword list + download
-            if f"{source_name}_condition_filtered" not in study_dataset.data_paths:
-                condition_filter_paths = source_dataset.condition_filter(
-                    study.conditions
-                )
-                study_dataset.data_paths.update(
-                    {f"{source_name}_condition_filtered": condition_filter_paths}
-                )
-
-            # rule based filter + format datapoints
-            if f"{source_name}_cleaned" not in study_dataset.data_paths:
-                clean_path, data_size = source_dataset.clean_data(study.conditions[0])
-                study_dataset.data_paths.update({f"{source_name}_cleaned": clean_path})
-                study_dataset.data_sizes.update({f"{source_name}_cleaned": data_size})
-            clean_path = study_dataset.data_paths[f"{source_name}_cleaned"]
-
-            # Search for treatment and outcome to curate data for each experiment
-            os.makedirs(os.path.join(cfg.save_path, "experiments"), exist_ok=True)
-
-            def curate_exp_data(nct_id, split):
-                exp_file = os.path.join(cfg.save_path, f"experiments/{nct_id}.yaml")
-                # Load Experiment from exisiting file or create a new one
-                try:
-                    exp = Experiment.from_yaml(exp_file)
-                except:
-                    status = "active" if split == "test" else "completed"
-                    exp = Experiment(cfg.data_path, nct_id, status=status)
-                # Track the studies of which this Experiment is a part
-                if cfg.conditions[0] not in exp.studies:
-                    exp.studies.append([cfg.conditions[0], split])
-                # Curate a dataset for this Experiment from {source_name}
-                for attribute in ["treatment", "outcome"]:
-                    if source_name not in getattr(exp, f"{attribute}_common_names"):
-                        exp.set_common_names(
-                            attribute,
-                            source_name,
-                            cfg.sample_model,
-                            source_dataset.get_common_name_prompts(),
-                        )
-                exp_data_path, exp_data_size = source_dataset.experiment_data(
-                    exp, study.conditions[0], cfg.filter_by_date, clean_path
-                )
-                # Track Experiment data and save to yaml
-                exp.source_paths[source_name].append(exp_data_path)
-                exp.to_yaml(exp_file)
-                return exp_data_path, exp_data_size
-
-            splits = (
-                ["train" for _ in range(len(train_ncts))]
-                + ["val" for _ in range(len(val_ncts))]
-                + ["test" for _ in range(len(test_ncts))]
+        # search for keyword list + download
+        if f"{source_name}_condition_filtered" not in study_dataset.data_paths:
+            condition_filter_paths = source_dataset.condition_filter(study.conditions)
+            study_dataset.data_paths.update(
+                {f"{source_name}_condition_filtered": condition_filter_paths}
             )
-            for nct_id, split in zip(train_ncts + val_ncts + test_ncts, splits):
-                if f"{source_name}_{nct_id}" not in study_dataset.data_paths:
-                    exp_data_path, exp_data_size = curate_exp_data(nct_id, split)
-                    # Track Experiment data in study dataset
-                    study_dataset.data_paths.update(
-                        {f"{source_name}_{nct_id}": exp_data_path}
+
+        # rule based filter + format datapoints
+        if f"{source_name}_cleaned" not in study_dataset.data_paths:
+            clean_path, data_size = source_dataset.clean_data(study.conditions[0])
+            study_dataset.data_paths.update({f"{source_name}_cleaned": clean_path})
+            study_dataset.data_sizes.update({f"{source_name}_cleaned": data_size})
+        clean_path = study_dataset.data_paths[f"{source_name}_cleaned"]
+
+        # Search for treatment and outcome to curate data for each experiment
+        os.makedirs(os.path.join(cfg.save_path, "experiments"), exist_ok=True)
+
+        def curate_exp_data(nct_id, split):
+            exp_file = os.path.join(cfg.save_path, f"experiments/{nct_id}.yaml")
+            # Load Experiment from exisiting file or create a new one
+            try:
+                exp = Experiment.from_yaml(exp_file)
+            except:
+                status = "active" if split == "test" else "completed"
+                exp = Experiment(cfg.data_path, nct_id, status=status)
+            # Track the studies of which this Experiment is a part
+            if cfg.conditions[0] not in exp.studies:
+                exp.studies.append([cfg.conditions[0], split])
+            # Curate a dataset for this Experiment from {source_name}
+            for attribute in ["treatment", "outcome"]:
+                if source_name not in getattr(exp, f"{attribute}_common_names"):
+                    exp.set_common_names(
+                        attribute,
+                        source_name,
+                        cfg.sample_model,
+                        source_dataset.get_common_name_prompts(),
                     )
-                    study_dataset.data_sizes.update(
-                        {f"{source_name}_{nct_id}": exp_data_size}
-                    )
-    finally:
-        client.close()
-        cluster.close()
+            exp_data_path, exp_data_size = source_dataset.experiment_data(
+                exp, study.conditions[0], cfg.filter_by_date, clean_path
+            )
+            # Track Experiment data and save to yaml
+            exp.source_paths[source_name].append(exp_data_path)
+            exp.to_yaml(exp_file)
+            return exp_data_path, exp_data_size
+
+        splits = (
+            ["train" for _ in range(len(train_ncts))]
+            + ["val" for _ in range(len(val_ncts))]
+            + ["test" for _ in range(len(test_ncts))]
+        )
+        for nct_id, split in zip(train_ncts + val_ncts + test_ncts, splits):
+            if f"{source_name}_{nct_id}" not in study_dataset.data_paths:
+                exp_data_path, exp_data_size = curate_exp_data(nct_id, split)
+                # Track Experiment data in study dataset
+                study_dataset.data_paths.update(
+                    {f"{source_name}_{nct_id}": exp_data_path}
+                )
+                study_dataset.data_sizes.update(
+                    {f"{source_name}_{nct_id}": exp_data_size}
+                )
 
     # Save paths to data for in study_dataset yaml
     study_dataset.to_yaml(

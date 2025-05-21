@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Literal
 
@@ -16,6 +17,9 @@ from naturalv2.sources.reddit_utils import (
     subreddit_relevance_llm,
 )
 from naturalv2.utils import load_prompt
+
+
+logger = logging.getLogger(__name__)
 
 
 class RedditSource:
@@ -40,14 +44,14 @@ class RedditSource:
             if self.match_method == "string_match":
                 if any(keyword.lower() in desc.lower() for keyword in keywords):
                     self.relevant_subs.append(sub_name)
-                    print(f"{sub_name} is relevant.")
+                    logger.info(f"{sub_name} is relevant.")
             elif self.match_method == "llm":
                 lm = LM(**self.lm_cfg)
                 answer = subreddit_relevance_llm(desc, keywords, lm)
                 if answer.lower().startswith("yes"):
                     self.relevant_subs.append(sub_name)
-                    print(f"{sub_name} is relevant.")
-        print(len(self.relevant_subs), "relevant subreddits found!")
+                    logger.info(f"{sub_name} is relevant.")
+        logger.info(len(self.relevant_subs), "relevant subreddits found!")
 
         condition_data_paths = []
         for sub in self.relevant_subs:

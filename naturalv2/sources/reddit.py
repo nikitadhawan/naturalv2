@@ -42,9 +42,7 @@ class RedditSource:
 
             if any(keyword.lower() in sub_info.lower() for keyword in keywords):
                 self.relevant_subs.append(sub_name)
-                logger.debug(
-                    f"Subreddit r/{sub_name} contains keywords in description: \n{sub_info}"
-                )
+                logger.info(f"Keyword matching found subreddit r/{sub_name}")
 
         logger.info(f"{len(self.relevant_subs)} relevant subreddits found!")
 

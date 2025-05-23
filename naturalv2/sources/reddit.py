@@ -1,12 +1,10 @@
 import logging
 import os
-from typing import Literal
 
 import pandas as pd
 from omegaconf import DictConfig
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     date_filter,
@@ -14,7 +12,6 @@ from naturalv2.sources.reddit_utils import (
     get_context_post_df,
     get_sub_about_info,
     rule_based_filter,
-    subreddit_relevance_llm,
 )
 from naturalv2.utils import load_prompt
 
@@ -24,33 +21,31 @@ logger = logging.getLogger(__name__)
 
 class RedditSource:
     def __init__(
-        self,
-        data_path: str,
-        match_method: Literal["string_match", "llm"],
-        lm_cfg: DictConfig,
-    ):
+        self, data_path: str, lm_cfg: DictConfig, anonymize: bool = True
+    ) -> None:
         self.data_path = data_path
-        self.match_method = match_method
         self.lm_cfg = lm_cfg
 
-        self.subs_about = get_sub_about_info(self.data_path)
-        self._anonymizer = Anonymizer()
+        os.makedirs(self.data_path, exist_ok=True)
+
+        self.anonymize = anonymize
+        if anonymize:
+            self._anonymizer = Anonymizer()
 
     def condition_filter(self, keywords: list[str]) -> list[str]:
+        subs_about = get_sub_about_info(self.data_path)
+
         self.relevant_subs = []
-        for row in self.subs_about.iterrows():
+        for row in subs_about.iterrows():
             sub_name, desc, public_desc = row[1].to_list()
-            desc = f"Subreddit: r/{sub_name}.\nDescription: {desc}\nPublic description: {public_desc}"
-            if self.match_method == "string_match":
-                if any(keyword.lower() in desc.lower() for keyword in keywords):
-                    self.relevant_subs.append(sub_name)
-                    logger.info(f"{sub_name} is relevant.")
-            elif self.match_method == "llm":
-                lm = LM(**self.lm_cfg)
-                answer = subreddit_relevance_llm(desc, keywords, lm)
-                if answer.lower().startswith("yes"):
-                    self.relevant_subs.append(sub_name)
-                    logger.info(f"{sub_name} is relevant.")
+            sub_info = f"Subreddit: r/{sub_name}.\nDescription: {desc}\nPublic description: {public_desc}"
+
+            if any(keyword.lower() in sub_info.lower() for keyword in keywords):
+                self.relevant_subs.append(sub_name)
+                logger.debug(
+                    f"Subreddit r/{sub_name} contains keywords in description: \n{sub_info}"
+                )
+
         logger.info(f"{len(self.relevant_subs)} relevant subreddits found!")
 
         condition_data_paths = []
@@ -62,21 +57,25 @@ class RedditSource:
                     sub,
                     "submissions",
                     self.data_path,
-                    anonymizer_instance=self._anonymizer,
+                    anonymizer_instance=self._anonymizer if self.anonymize else None,
                 )
             if not os.path.exists(comments_path):
                 download_sub_data(
                     sub,
                     "comments",
                     self.data_path,
-                    anonymizer_instance=self._anonymizer,
+                    anonymizer_instance=self._anonymizer if self.anonymize else None,
                 )
+
             condition_data_paths.extend([submissions_path, comments_path])
 
         return condition_data_paths
 
     def clean_data(self, study_name: str) -> tuple[str, int]:
-        os.makedirs(os.path.join(self.data_path, study_name), exist_ok=True)
+        os.makedirs(
+            os.path.join(self.data_path, study_name.lower().replace(" ", "_")),
+            exist_ok=True,
+        )
         save_path = os.path.join(self.data_path, f"{study_name}/reddit_cleaned.csv")
         if os.path.exists(save_path):
             cleaned_data = pd.read_csv(save_path, index_col=0)
@@ -90,13 +89,16 @@ class RedditSource:
             comments = pd.read_csv(
                 os.path.join(self.data_path, f"{sub}_comments.csv"), index_col=0
             )
+
             submissions = rule_based_filter(submissions, "selftext")
             comments = rule_based_filter(comments, "body")
+
             merged_df = get_context_post_df(submissions, comments)
             rule_filtered_df = pd.concat(
                 [rule_filtered_df, merged_df], ignore_index=True
             )
             rule_filtered_df.to_csv(save_path)
+
         rule_filtered_df = rule_filtered_df.drop_duplicates("post")
         rule_filtered_df.to_csv(save_path)
         return save_path, len(rule_filtered_df)
@@ -160,17 +162,14 @@ class RedditSource:
         exp_df.to_csv(save_path)
         return save_path, len(exp_df)
 
-    def get_common_name_prompts(self) -> dict[str, str]:
+    def get_common_name_prompts(self) -> dict[str, list[dict[str, str]]]:
         base_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
         )
-        system_prompt = load_prompt(base_dir, "common_name_system")
-        t_prompt = load_prompt(base_dir, "common_name_treatment").format(
-            source="Reddit"
+        t_prompt = load_prompt(
+            base_dir, "common_name_treatment", return_format="messages", source="Reddit"
         )
-        o_prompt = load_prompt(base_dir, "common_name_outcome").format(source="Reddit")
-        return {
-            "system": system_prompt,
-            "treatment": t_prompt,
-            "outcome": o_prompt,
-        }
+        o_prompt = load_prompt(
+            base_dir, "common_name_outcome", return_format="messages", source="Reddit"
+        )
+        return {"treatment": t_prompt, "outcome": o_prompt}

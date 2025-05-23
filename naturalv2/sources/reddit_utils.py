@@ -1,17 +1,26 @@
 import asyncio
 import datetime
+import glob
 import json
 import logging
 import os
-import urllib
+import time
 import warnings
-from time import time
-from typing import Generator, Literal, Optional
-from urllib import request
+from functools import partial
+from typing import Any, Generator, Literal, Optional
+from urllib import error, request
 
 import pandas as pd
 import wget
 import zstandard
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+from tqdm.contrib.concurrent import process_map
 
 from naturalv2.models.lm import LM, get_message_content
 from naturalv2.sources.anonymizer import Anonymizer
@@ -21,25 +30,6 @@ warnings.simplefilter("ignore", UserWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
 logger = logging.getLogger(__name__)
-
-
-def download_subs_list(data_path: str) -> None:
-    if not os.path.exists(data_path + "subs_list.txt"):
-        url = "https://the-eye.eu/redarcs/"
-        response = request.urlopen(url)
-        html = response.read().decode("utf-8")
-
-        # Extract subreddit names from links
-        subs = []
-        for line in html.split("\n"):
-            if "href=" in line and ".zst" in line:
-                sub = line.split("href=")[1].split("_")[0].split("/")[-1]
-                if sub not in subs:
-                    subs.append(sub)
-
-        with open(data_path + "subs_list.txt", "w") as f:
-            f.write("\n".join(subs))
-        logger.info(f"{len(subs)} subreddits listed.")
 
 
 def _read_and_decode(
@@ -165,70 +155,172 @@ def download_sub_data(
     )
 
 
-def download_from_url(
-    url_str: str, max_retries: int = 5, retry_delay: int = 120
-) -> dict[str, str]:
-    for attempt in range(max_retries):
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            req = request.Request(url_str, headers=headers)
-            data = json.load(request.urlopen(req))
-            time.sleep(2)
-            return data
-        except urllib.error.HTTPError as e:
-            if e.code != 429:
-                logger.error(f"Error fetching data from {url_str}: {e}")
-                return {"error": str(e)}
-            if attempt < max_retries - 1:
-                logger.warning(
-                    f"Rate limited, waiting {retry_delay} seconds before retry..."
-                )
-                time.sleep(retry_delay)
-            else:
-                logger.error(f"Max retries exceeded for {url_str}")
-                return {"error": "Max retries exceeded"}
-        except Exception as e:
-            logger.error(f"Unexpected error fetching {url_str}: {e}")
-            return {"error": str(e)}
-    return {"error": "Failed to fetch data after maximum retries"}
+def download_subs_list(data_path: str) -> None:
+    filepath = os.path.join(data_path, "subs_list.txt")
+    if not os.path.exists(filepath):
+        url = "https://the-eye.eu/redarcs/"
+        response = request.urlopen(url)
+        html: str = response.read().decode("utf-8")
+
+        # Extract subreddit names from links
+        subs = []
+        for line in html.split("\n"):
+            if "href=" in line and ".zst" in line:
+                sub = line.split("href=")[1].split("_")[0].split("/")[-1]
+                if sub not in subs:
+                    subs.append(sub)
+
+        with open(filepath, "w") as f:
+            f.write("\n".join(subs))
+
+        logger.info(f"{len(subs)} subreddits listed.")
+
+
+def is_rate_limit_error(exception):
+    return isinstance(exception, error.HTTPError) and exception.code == 429
+
+
+def fallback_return(retry_state):
+    """Returns a dictionary with an error message and the URL that caused the error."""
+    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
+
+
+@retry(
+    wait=wait_exponential(multiplier=2.4, min=60, max=120),
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(is_rate_limit_error),
+    retry_error_callback=fallback_return,
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
+)
+def download_from_url(url_str: str) -> dict[str, Any]:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        req = request.Request(url_str, headers=headers)
+        data = json.load(request.urlopen(req))
+        time.sleep(2)
+        return data
+    except error.HTTPError as e:
+        if e.code == 429:
+            raise  # tenacity will handle rate limit errors
+
+        logger.error(f"HTTP error {e.code} for {url_str}: {e.reason}")
+        return {"error": f"HTTP error {e.code}", "url": url_str}
+    except Exception as e:
+        logger.error(f"Unexpected error fetching {url_str}: {e}")
+        return {"error": str(e), "url": url_str}
+
+
+def _get_sub_desc(data: dict[str, Any]) -> Optional[dict[str, str]]:
+    if "data" in data:
+        descr = data["data"].get("description", "")
+        public_descr = data["data"].get("public_description", "")
+        sub = data["data"].get("display_name", "")
+        return {
+            "sub": sub,
+            "description": descr,
+            "public_description": public_descr,
+        }
+    return None
+
+
+def _fetch_sub_about(data_path: str, sub: str) -> Optional[dict[str, str]]:
+    about_file = os.path.join(data_path, "subs_about", f"{sub}_about.json")
+    if os.path.exists(about_file):
+        with open(about_file, "r") as f:
+            data = json.load(f)
+    else:
+        about_url = f"https://www.reddit.com/r/{sub}/about.json"
+        data = download_from_url(about_url)
+
+        with open(about_file, "w") as f:
+            json.dump(data, f)
+
+    return _get_sub_desc(data)
 
 
 def get_sub_about_info(data_path: str) -> pd.DataFrame:
-    if os.path.exists(os.path.join(data_path, "subs_about.csv")):
-        return pd.read_csv(data_path + "subs_about.csv", index_col=0)
-
-    if not os.path.exists(os.path.join(data_path, "subs_list.txt")):
+    subs_list_path = os.path.join(data_path, "subs_list.txt")
+    if not os.path.exists(subs_list_path):
+        logger.info("Subreddit list not found. Downloading the list of subreddits.")
         download_subs_list(data_path)
 
-    with open(data_path + "subs_list.txt", "r") as f:
+    with open(subs_list_path, "r") as f:
         subs_list = f.read().splitlines()
 
-    about_csv_path = data_path + "subs_about.csv"
-    about_df = pd.DataFrame(columns=["sub", "description", "public_description"])
-    about_jsons = data_path + "subs_about"
-    if not os.path.exists(about_jsons):
-        os.makedirs(about_jsons)
-    for sub in subs_list:
-        about_file = data_path + f"subs_about/{sub}_about.json"
-        if os.path.exists(about_file):
-            with open(about_file, "r") as f:
-                data = json.load(f)
-        else:
-            about_url = f"https://www.reddit.com/r/{sub}/about.json"
-            data = download_from_url(about_url)
-            if not data:
-                continue
-            with open(about_file, "w") as f:
-                json.dump(data, f)
+    about_jsons_dir = os.path.join(data_path, "subs_about")
+    os.makedirs(about_jsons_dir, exist_ok=True)
 
-        if "data" in list(data.keys()):
-            descr = data["data"].get("description", "")
-            public_descr = data["data"].get("public_description", "")
-            row = {"sub": sub, "description": descr, "public_description": public_descr}
-            about_df = pd.concat([about_df, pd.DataFrame([row])], ignore_index=True)
-        else:
-            assert "429" not in data["error"]
-    about_df.to_csv(about_csv_path)
+    about_csv_path = os.path.join(data_path, "subs_about.csv")
+
+    # construct the about_df from the existing JSON files
+    def _create_about_csv_from_json_files():
+        all_json_files = glob.glob(os.path.join(about_jsons_dir, "*.json"))
+        rows = []
+        for json_file in all_json_files:
+            with open(json_file, "r") as f:
+                data: dict[str, Any] = json.load(f)
+                row_data = _get_sub_desc(data)
+                if row_data is not None:
+                    rows.append(row_data)
+
+        return pd.DataFrame(
+            rows, columns=["sub", "description", "public_description"], copy=False
+        ).convert_dtypes(dtype_backend="pyarrow")
+
+    # filter out already downloaded subreddits from subs_list
+    # NOTE: A json file is always saved, regardless of whether there was an error
+    # while fetching the subreddit about info or not. But, subreddits that
+    # had an error during downloading will not be added to the CSV file.
+    downloaded_subs = [
+        os.path.splitext(file)[0].split("_")[0] for file in os.listdir(about_jsons_dir)
+    ]
+    subs_list = list(set(subs_list) - set(downloaded_subs))
+
+    if len(subs_list) == 0:
+        if os.path.exists(about_csv_path):
+            logger.info(
+                "All subreddits already downloaded. Loading existing about CSV file."
+            )
+            return pd.read_csv(about_csv_path, index_col=0)
+
+        logger.warning(
+            "All subreddits already downloaded, but no CSV file found. "
+            "Creating a new CSV file from the existing JSON files."
+        )
+        df = _create_about_csv_from_json_files()
+        df.to_csv(about_csv_path)
+        return df
+
+    partial_df: Optional[pd.DataFrame] = None
+    if os.path.exists(about_csv_path):
+        partial_df = pd.read_csv(about_csv_path, index_col=0)
+    elif len(downloaded_subs) > 0:  # download was interrupted before CSV creation
+        partial_df = _create_about_csv_from_json_files()
+
+    rows = []
+    results = process_map(
+        partial(_fetch_sub_about, data_path),
+        subs_list,
+        chunksize=1,
+        desc="Fetching subreddit about info",
+    )
+    for row in results:
+        if row is not None:
+            rows.append(row)
+
+    if partial_df is None:
+        about_df = pd.DataFrame(
+            rows, columns=["sub", "description", "public_description"], copy=False
+        ).convert_dtypes(dtype_backend="pyarrow")
+        about_df.to_csv(about_csv_path)
+    else:  # append new rows to the existing DataFrame
+        new_df = pd.DataFrame(
+            rows, columns=["sub", "description", "public_description"], copy=False
+        )
+        about_df = pd.concat([partial_df, new_df], ignore_index=True)
+        about_df = about_df.drop_duplicates(subset=["sub"])
+        about_df.to_csv(about_csv_path)
+
     return about_df
 
 

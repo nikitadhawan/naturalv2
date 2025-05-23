@@ -14,4 +14,4 @@ retry_after: 5
 num_retries: 4
 seed: ${..seed}
 temperature: 0.7
-max_tokens: 512
+max_tokens: 2048

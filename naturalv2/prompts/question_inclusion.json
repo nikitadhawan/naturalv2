@@ -1,0 +1,3 @@
+{
+    "user_prompt_template": "Given the following inclusion and exclusion criteria:\n{inclusion_criteria}\n\nDoes the available information in the report satisfy these criteria?\n"
+}

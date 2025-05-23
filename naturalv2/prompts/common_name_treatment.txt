@@ -1,3 +1,0 @@
-What are common brand names or terms that are used when discussing the treatment, {keyword}, specifically in content found on {source}?
-
-Return only a Python list of at most 5 individual words, without any other text or formatting.

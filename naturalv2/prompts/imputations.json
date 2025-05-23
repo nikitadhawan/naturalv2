@@ -1,0 +1,4 @@
+{
+    "system_prompt": "You are a medical assistant tasked with creating a profile of a patient based on a given description and report on them. You have to present it as a JSON dictionary with prespecified keys. Fill in suitable values for ALL the keys. You can use information provided about the patient.",
+    "user_prompt_template": "**Your Instructions**\nCreate a possible profile for this patient with the following fields and represent it as dictionary:\n\n{covariate_desc}\n\nPlease ensure you fill all the fields with a valid value. Unfilled fields or values like \"Unknown\" are NOT allowed.\nNote that your completed task should ONLY yield a JSON containing ALL the listed keys alongside their accurate values.\n\nThe patient satisfies the following criteria:\n{inclusion_criteria}\n\nFollowing is a text report about the patient, which may be useful for your task."
+}

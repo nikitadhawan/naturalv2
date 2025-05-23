@@ -1,0 +1,3 @@
+{
+    "user_prompt_template": "Choose the correct answer from the provided options about the following feature for the individual described in the report:\nFeature: {covariate}."
+}

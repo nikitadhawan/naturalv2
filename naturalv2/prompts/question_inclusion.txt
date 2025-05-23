@@ -1,4 +1,0 @@
-Given the following inclusion and exclusion criteria:
-{inclusion_criteria}
-
-Does the available information in the report satisfy these criteria?

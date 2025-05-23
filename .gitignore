@@ -149,7 +149,6 @@ outputs/
 multirun/
 *.csv
 *.tsv
-*.json
 *.log
 *.sql
 *.sqlite

@@ -1,0 +1,3 @@
+{
+    "user_prompt_template": "Does the individual described in the report count positively towards: {outcome}?"
+}

@@ -1,0 +1,4 @@
+{
+    "system_prompt": "You are a helpful medical assistant who can translate medical terminology into common terms.",
+    "user_prompt_template": "What are common brand names or terms that are used when discussing the treatment, {keyword}, specifically in content found on {source}?\n\nReturn only a Python list of at most 5 individual words, without any other text or formatting."
+}

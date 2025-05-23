@@ -16,7 +16,7 @@ defaults:
 seed: 42
 train_ratio: 0.6
 conditions:
-  - diabetes
+  - Nervous System Diseases
 sources:
   - reddit
   - pubmed

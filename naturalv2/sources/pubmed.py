@@ -3,10 +3,14 @@ import json
 import os
 
 import pandas as pd
-from pubmed_utils import fetch_articles, pubmed_queries_llm, search_pubmed
 
+from naturalv2.sources.reddit_utils import (
+    date_filter,
+    get_context_post_df,
+    rule_based_filter,
+)
 
-# ruff: noqa
+from .pubmed_utils import fetch_articles, pubmed_queries_llm, search_pubmed
 
 
 class PubMedSet:
@@ -17,12 +21,14 @@ class PubMedSet:
         self.trial = trial
         self.llm = llm
         query_keywords = self.get_keywords(match_method, trial)
+
         if download:
             self.download_data(api_key, query_keywords)
+
         # TODO
-        self.treatment_names
-        self.outcome_words
-        self.trial_keywords
+        # self.treatment_names
+        # self.outcome_words
+        # self.trial_keywords
 
     def get_keywords(self, method, trial):
         if method == "string_match":
@@ -31,20 +37,24 @@ class PubMedSet:
                 + trial.conditions
                 + [i.title for i in trial.interventions]
             )
+
         if method == "llm":
             return pubmed_queries_llm(trial, self.llm)
 
-    def get_query(self, keyword):
-        query = (
+        raise ValueError(
+            f"Unknown match method {method}. Please use 'string_match' or 'llm'."
+        )
+
+    def get_query(self, keyword: str) -> str:
+        return (
             f'("{keyword}"[All Fields]) AND '
             '"english"[Language] AND '
             '"case reports"[Publication Type] AND '
             "hasabstract[Filter] AND "
             '"humans"[MeSH Terms]'
         )
-        return query
 
-    def download_data(self, api_key, keywords):
+    def download_data(self, api_key: str, keywords: list[str]) -> None:
         self.data_files = []
         for keyword in keywords:
             keyword_data_path = self.data_path + f"{keyword}_case_reports.json"
@@ -60,7 +70,7 @@ class PubMedSet:
                 print(f"For query: {keyword}, {len(case_reports)} case reports found!")
             self.data_files.append(keyword_data_path)
 
-    def curate_data(self, filter_by_date=False):
+    def curate_data(self, filter_by_date: bool = False) -> pd.DataFrame:
         rule_filtered_df = pd.DataFrame()
         save_path = self.data_path + f"{self.trial.nctid}_pubmed_rule_based.csv"
         # treatment_names = get_reddit_synonyms([i.title for i in self.trial.interventions], self.llm)

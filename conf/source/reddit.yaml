@@ -1,4 +1,3 @@
 _target_: naturalv2.sources.reddit.RedditSource
 data_path: ${data_path}/reddit_data/
-match_method: string_match
 lm_cfg: ${sample_model}

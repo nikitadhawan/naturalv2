@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import warnings
 from dataclasses import dataclass
@@ -8,10 +9,15 @@ from litellm import Router, model_cost, token_counter
 from litellm.cost_calculator import completion_cost
 from litellm.types.router import AllowedFailsPolicy, RetryPolicy, RouterGeneralSettings
 from litellm.types.utils import ModelResponse, TextCompletionResponse
+from omegaconf import DictConfig, OmegaConf
 from typing_extensions import TypedDict
+
+from naturalv2.utils import ListResponse
 
 
 ResponseType = Union[ModelResponse, TextCompletionResponse]
+
+logger = logging.getLogger(__name__)
 
 
 class LLMParams(TypedDict, total=False):
@@ -278,8 +284,53 @@ class LM:
             text_completion=self.completion_type == "text",
         )
 
-        logging.debug("Token usage: %s", response.usage)
+        logger.debug("Token usage: %s", response.usage)
         self._update_cost(response)
+
+        return response
+
+    def call_sync(
+        self, prompt: Optional[str] = None, messages: Optional[list] = None, **kwargs
+    ) -> ResponseType:
+        """Make a request to the LLM and return the response.
+
+        This is a synchronous version of the __call__ method. It blocks until the
+        response is received.
+
+        Parameters
+        ----------
+        prompt : Optional[str], default=None
+            The prompt to use for the LLM request.
+        messages : Optional[list], default=None
+            The messages to use for the LLM request. This should be a list of dictionaries
+            containing the role and content of each message. This is typically used for
+            chat-based models.
+        **kwargs : dict[str, Any]
+            Additional keyword arguments to pass to the LLM request.
+
+        Returns
+        -------
+        ResponseType
+            The response from the LLM.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():  # run the async function in a new event loop
+            # NOTE: This is a workaround for running async code in a Jupyter notebook
+            # or other environments where the event loop is already running.
+            import nest_asyncio
+
+            nest_asyncio.apply()
+            response = loop.run_until_complete(
+                self.__call__(prompt=prompt, messages=messages, **kwargs)
+            )
+        else:  # run the async function directly
+            response = asyncio.run(
+                self.__call__(prompt=prompt, messages=messages, **kwargs)
+            )
 
         return response
 
@@ -306,7 +357,7 @@ class LM:
         request_params = {**self._request_params, **kwargs}
 
         if request_params.get("stream"):
-            logging.warning(
+            logger.warning(
                 "Streaming response is not supported for the LM class. "
                 "This parameter will be ignored.",
                 stacklevel=2,
@@ -328,9 +379,9 @@ class LM:
             try:
                 self._cost += completion_cost(completion_response=response)
             except Exception as e:
-                logging.error(f"Failed to calculate cost: {e}")
+                logger.error(f"Failed to calculate cost: {e}")
 
-            logging.debug(f"Running cost: ${float(self._cost):.10f}")
+            logger.debug(f"Running cost: ${float(self._cost):.10f}")
 
 
 # ---------------------------------------------------------------------------- #
@@ -354,6 +405,23 @@ def get_message_content(response: ResponseType) -> list[Optional[str]]:
         c.message.content if hasattr(c, "message") else c["text"]
         for c in response.choices
     ]
+
+
+def extract_list_response(response: ResponseType) -> Optional[list[list[Any]]]:
+    response_strs = get_message_content(response)
+    if not response_strs:
+        return None
+
+    response_list_objs = []
+    for response_str in response_strs:
+        try:
+            response_list_obj = ListResponse.model_validate_json(response_str)
+            response_list_objs.append(response_list_obj.output)
+        except Exception as e:
+            logger.error(f"Failed to parse response: {e}")
+            continue
+
+    return response_list_objs
 
 
 def get_logprobs(response: ResponseType) -> Optional[list[LogprobsOutput]]:
@@ -458,3 +526,20 @@ def estimate_token_count(
     output_token_count = max_tokens * n
 
     return input_token_count + output_token_count
+
+
+def build_lm_instance_from_cfg(cfg: DictConfig):
+    """Get LM instance from configuration."""
+    # make a deep copy of the config
+    cfg_copy = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+
+    # change 'deployment' params from dict to list, ignore keys.
+    cfg_copy["deployment_params"] = [
+        value for _, value in cfg_copy["deployment_params"].items()
+    ]
+
+    # remove keys that are not needed for LM initialization
+    cfg_copy.pop("local", None)
+    cfg_copy.pop("get_response", None)
+
+    return LM(**cfg_copy)

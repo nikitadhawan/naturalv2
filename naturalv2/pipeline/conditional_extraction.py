@@ -9,7 +9,7 @@ from scipy.special import softmax
 from tqdm import tqdm
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM, get_prompt_logprobs
+from naturalv2.models.lm import LM, build_lm_instance_from_cfg, get_prompt_logprobs
 from naturalv2.pipeline.natural import PipelineStage
 from naturalv2.utils import (
     enum_to_dcts,
@@ -22,6 +22,8 @@ from naturalv2.utils import (
 
 if TYPE_CHECKING:  # so that script can run without installing vllm, unless required
     from naturalv2.models.vllm import VLLM
+
+logger = logging.getLogger(__name__)
 
 
 def prepare_conditional_inputs(
@@ -187,7 +189,7 @@ def extract_conditionals(
 
         model = VLLM(**model_cfg)
     else:
-        model = LM(**model_cfg)
+        model = build_lm_instance_from_cfg(model_cfg)
 
     # Discretize input dataframe
     input_df = experiment.discretize(input_df)
@@ -279,7 +281,7 @@ class ConditionalExtractionStage(PipelineStage):
             self.save_path,
             extract_type=self.extract_type,
         )
-        logging.info(
+        logger.info(
             f"Extracted {self.extract_type} conditionals from {len(self.data)} reports."
         )
         return self.data
@@ -310,7 +312,7 @@ class InclusionProbStage(PipelineStage):
             self.save_path,
             extract_type=self.extract_type,
         )
-        logging.info(
+        logger.info(
             f"Extracted {self.extract_type} conditionals from {len(self.data)} reports."
         )
         return self.data

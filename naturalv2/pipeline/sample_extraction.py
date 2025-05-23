@@ -9,9 +9,12 @@ from pydantic import BaseModel
 from tqdm import tqdm
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM, get_message_content
+from naturalv2.models.lm import LM, build_lm_instance_from_cfg, get_message_content
 from naturalv2.pipeline.natural import PipelineStage
 from naturalv2.utils import create_response_format, get_save_path
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _extract_covariates_from_report(
@@ -69,7 +72,7 @@ async def extract_covariates(
     if os.path.exists(file_path):
         return pd.read_csv(file_path, index_col=0)
 
-    model = LM(**model_cfg)
+    model = build_lm_instance_from_cfg(model_cfg)
 
     system_message = {
         "role": "system",
@@ -146,7 +149,7 @@ class RelevanceFilterStage(PipelineStage):
             )
         )
         self.data = filtered_data[filtered_data["relevant"].lower() == "yes"]
-        logging.info(f"After relevance filter: {len(self.data)} reports.")
+        logger.info(f"After relevance filter: {len(self.data)} reports.")
         return self.data
 
     def get_stats(self) -> Dict[str, int]:
@@ -176,7 +179,7 @@ class TreatmentOutcomeFilterStage(PipelineStage):
             )
         )
         self.data = self.experiment.hard_filter_ty(ty_samples)
-        logging.info(f"After treatment-outcome filter: {len(self.data)} reports.")
+        logger.info(f"After treatment-outcome filter: {len(self.data)} reports.")
         return self.data
 
     def get_stats(self) -> Dict[str, int]:
@@ -206,7 +209,7 @@ class KnownsStage(PipelineStage):
             )
         )
         self.data = self.experiment.hard_filter_inclusion(data)
-        logging.info(f"After inclusion filter: {len(self.data)} reports.")
+        logger.info(f"After inclusion filter: {len(self.data)} reports.")
         return self.data
 
     def get_stats(self) -> Dict[str, int]:
@@ -240,7 +243,7 @@ class ImputationsStage(PipelineStage):
         # self.data = self.data.dropna(
         #     subset=self.experiment.covariate_names
         # ).reset_index(drop=True)
-        logging.info(f"Final: {len(self.data)} reports after imputation.")
+        logger.info(f"Final: {len(self.data)} reports after imputation.")
         return self.data
 
     def get_stats(self) -> Dict[str, int]:

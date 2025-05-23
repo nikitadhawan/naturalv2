@@ -164,4 +164,6 @@ if __name__ == "__main__":
     csv_path = os.path.join(args.output_dir, "create_study_results.csv")
     df.to_csv(csv_path, index=False)
     logger.info(f"Results saved to {csv_path}")
-    logger.info(f"{count_unique_ncts(args.output_dir)} unique trials covered.")
+    logger.info(
+        f"{count_unique_ncts(os.path.join(args.output_dir, 'studies'))} unique trials covered."
+    )

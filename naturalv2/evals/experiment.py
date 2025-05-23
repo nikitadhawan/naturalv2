@@ -1,3 +1,4 @@
+import logging
 import os
 from ast import literal_eval
 from typing import Any, Literal, Optional
@@ -17,7 +18,7 @@ from naturalv2.evals.clinical_trial import (
     OutcomeMeasureType,
     Reference,
 )
-from naturalv2.models.lm import LM, get_message_content
+from naturalv2.models.lm import build_lm_instance_from_cfg, extract_list_response
 from naturalv2.utils import (
     ListResponse,
     check_binary_endpoint,
@@ -26,6 +27,9 @@ from naturalv2.utils import (
     get_nested_value,
     load_prompt,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class Experiment:
@@ -123,7 +127,7 @@ class Experiment:
         attr: Literal["treatment", "outcome"],
         source_name: str,
         lm_cfg: DictConfig,
-        prompt_dct: dict,
+        prompt_dct: dict[str, list[dict[str, str]]],
     ) -> None:
         if attr not in ["treatment", "outcome"]:
             raise ValueError(f"Expected 'treatment' or 'outcome', got {attr}")
@@ -131,16 +135,17 @@ class Experiment:
         if getattr(self, f"{attr}_common_names"):
             return
 
-        lm = LM(**lm_cfg)
-        system_msg = {"role": "system", "content": prompt_dct["system"]}
+        lm = build_lm_instance_from_cfg(lm_cfg)
         common_names = []
         for name in getattr(self, f"{attr}_names"):
-            prompt = prompt_dct[attr].format(**{"keyword": name})
-            messages = [system_msg, {"role": "user", "content": prompt}]
+            messages = prompt_dct[attr]
+            messages[1]["content"] = messages[1]["content"].format(**{"keyword": name})
             lm_response = lm(messages=messages, response_format=ListResponse)
-            common_names.extend(
-                self._parse_lm_response(get_message_content(lm_response)[0])
-            )
+            parsed_response = extract_list_response(lm_response)
+            if parsed_response:
+                common_names.extend(parsed_response[0])
+            else:
+                logger.warning(f"No common names found for {name} in {source_name}.")
 
         getattr(self, f"{attr}_common_names").update(
             {source_name: list(set(common_names))}
@@ -356,16 +361,27 @@ class Experiment:
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
         )
 
-        inclusion_prompt = load_prompt(base_dir, "question_inclusion")
+        inclusion_prompt: str = load_prompt(
+            base_dir, "question_inclusion", return_format="prompt"
+        )
         self.question_prompts["Inclusion"] = inclusion_prompt.format(
             inclusion_criteria=self.inclusion_criteria
         )
-        covariate_prompt = load_prompt(base_dir, "question_covariate")
+
+        covariate_prompt: str = load_prompt(
+            base_dir, "question_covariate", return_format="prompt"
+        )
         for cov in self.covariate_names:
             self.question_prompts[cov] = covariate_prompt.format(covariate=cov)
-        treatment_prompt = load_prompt(base_dir, "question_treatment")
+
+        treatment_prompt: str = load_prompt(
+            base_dir, "question_treatment", return_format="prompt"
+        )
         self.question_prompts["treatment"] = treatment_prompt
-        outcome_prompt = load_prompt(base_dir, "question_outcome")
+
+        outcome_prompt: str = load_prompt(
+            base_dir, "question_outcome", return_format="prompt"
+        )
         for outcome in self.outcome_names:
             self.question_prompts[outcome] = outcome_prompt.format(outcome=outcome)
 
@@ -385,11 +401,11 @@ class Experiment:
             dct[field] = field_map[dct[field]]
         return dct
 
-    def get_system_prompt(self, prompt_type, outcome, source_name):
+    def get_system_prompt(self, prompt_type: str, outcome: str, source_name: str):
         base_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
         )
-        prompt = load_prompt(base_dir, prompt_type)
+        prompt: str = load_prompt(base_dir, prompt_type, return_format="prompt")
         outcome_desc = {outcome: self.outcome_desc[outcome]}
         format_inputs = {
             "conditions": str(self.conditions),

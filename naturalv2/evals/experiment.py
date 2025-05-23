@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 from ast import literal_eval
@@ -138,7 +139,7 @@ class Experiment:
         lm = build_lm_instance_from_cfg(lm_cfg)
         common_names = []
         for name in getattr(self, f"{attr}_names"):
-            messages = prompt_dct[attr]
+            messages = copy.deepcopy(prompt_dct[attr])
             messages[1]["content"] = messages[1]["content"].format(**{"keyword": name})
             lm_response = lm(messages=messages, response_format=ListResponse)
             parsed_response = extract_list_response(lm_response)

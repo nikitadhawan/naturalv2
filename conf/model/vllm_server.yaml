@@ -9,7 +9,7 @@ redis_client_kwargs:
   ssl: True
   ssl_check_hostname: False
 allowed_failures: 10
-cooldown_time: 120
+cooldown_time: 2
 retry_after: 5
 num_retries: 4
 seed: ${..seed}

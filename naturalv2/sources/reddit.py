@@ -369,7 +369,8 @@ class RedditSource:
         exp_df.to_csv(save_path)
         return save_path, len(exp_df)
 
-    def get_common_name_prompts(self) -> dict[str, list[dict[str, str]]]:
+    @staticmethod
+    def get_common_name_prompts() -> dict[str, list[dict[str, str]]]:
         """Retrieve common name prompts for Reddit.
 
         Returns

@@ -78,6 +78,7 @@ class PubMedSet:
 
         return save_path, len(rule_filtered_df)
 
+    @staticmethod
     def get_common_name_prompts() -> dict[str, list[dict[str, str]]]:
         base_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"

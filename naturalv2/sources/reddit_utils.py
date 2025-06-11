@@ -1,4 +1,5 @@
-import asyncio
+"""Utilities for downloading and processing Reddit data from The Eye archive."""
+
 import datetime
 import glob
 import json
@@ -11,6 +12,7 @@ from typing import Any, Generator, Literal, Optional
 from urllib import error, request
 
 import pandas as pd
+import tenacity
 import wget
 import zstandard
 from tenacity import (
@@ -22,7 +24,6 @@ from tenacity import (
 )
 from tqdm.contrib.concurrent import process_map
 
-from naturalv2.models.lm import LM, get_message_content
 from naturalv2.sources.anonymizer import Anonymizer
 
 
@@ -32,125 +33,97 @@ warnings.simplefilter("ignore", FutureWarning)
 logger = logging.getLogger(__name__)
 
 
-def _read_and_decode(
-    reader: zstandard.ZstdDecompressionReader,
-    chunk_size: int,
-    max_window_size: int,
-    previous_chunk: Optional[bytes] = None,
-    bytes_read: int = 0,
-) -> str:
-    chunk = reader.read(chunk_size)
-    bytes_read += chunk_size
+def _get_sub_desc(data: dict[str, Any]) -> Optional[dict[str, str]]:
+    """Extract subreddit description and public description from the data."""
+    if "data" in data:
+        descr = data["data"].get("description", "")
+        public_descr = data["data"].get("public_description", "")
+        sub = data["data"].get("display_name", "")
+        return {
+            "sub": sub,
+            "description": descr,
+            "public_description": public_descr,
+        }
+    return None
 
-    if previous_chunk is not None:
-        chunk = previous_chunk + chunk
 
+def _is_rate_limit_error(exception: Exception) -> bool:
+    """Check if the exception is a rate limit error (HTTP 429)."""
+    return isinstance(exception, error.HTTPError) and exception.code == 429
+
+
+def _fallback_return(retry_state: "tenacity.RetryCallState") -> dict[str, Any]:
+    """Returns a dictionary with an error message and the URL that caused the error."""
+    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
+
+
+@retry(
+    wait=wait_exponential(multiplier=2.4, min=60, max=120),
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(_is_rate_limit_error),
+    retry_error_callback=_fallback_return,
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
+)
+def _download_from_url(url_str: str) -> dict[str, Any]:
+    """Download JSON data from a URL with error handling and rate limiting.
+
+    Parameters
+    ----------
+    url_str : str
+        The URL to download the JSON data from.
+
+    Returns
+    -------
+    dict[str, Any]
+        The JSON data as a dictionary, or an error message if the download fails.
+
+    Raises
+    ------
+    tenacity.RetryError
+        If the download fails after the maximum number of retries.
+    """
     try:
-        return chunk.decode()
-    except UnicodeDecodeError as err:
-        if bytes_read > max_window_size:
-            raise UnicodeError(
-                f"Unable to decode frame after reading {bytes_read:,} bytes"
-            ) from err
-        logger.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
-        return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        req = request.Request(url_str, headers=headers)
+        data = json.load(request.urlopen(req))
+        time.sleep(2)
+        return data
+    except error.HTTPError as e:
+        if e.code == 429:
+            raise  # tenacity will handle rate limit errors
+
+        logger.error(f"HTTP error {e.code} for {url_str}: {e.reason}")
+        return {"error": f"HTTP error {e.code}", "url": url_str}
+    except Exception as e:
+        logger.error(f"Unexpected error fetching {url_str}: {e}")
+        return {"error": str(e), "url": url_str}
 
 
-def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
-    with open(file_name, "rb") as file_handle:
-        buffer = ""
-        reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
-            file_handle
-        )
+def _fetch_sub_about(data_path: str, sub: str) -> Optional[dict[str, str]]:
+    """Fetch subreddit about information from Reddit API or local JSON file."""
+    about_file = os.path.join(data_path, "subs_about", f"{sub}_about.json")
+    if os.path.exists(about_file):
+        with open(about_file, "r") as f:
+            data = json.load(f)
+    else:
+        about_url = f"https://www.reddit.com/r/{sub}/about.json"
+        data = _download_from_url(about_url)
 
-        while True:
-            chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
-            if not chunk:
-                break
-            lines = (buffer + chunk).split("\n")
+        with open(about_file, "w") as f:
+            json.dump(data, f)
 
-        for line in lines[:-1]:
-            yield line, file_handle.tell()
-
-        buffer = lines[-1]
-    reader.close()
-
-
-def download_sub_data(
-    subreddit: str,
-    data_type: Literal["submissions", "comments"],
-    data_path: str,
-    anonymizer_instance: Optional["Anonymizer"] = None,
-    batch_size: int = 1,
-    num_workers: int = 1,
-) -> None:
-    if data_type not in ["submissions", "comments"]:
-        raise ValueError(
-            "Expected data_type to be 'submissions' or 'comments', but got {}".format(
-                data_type
-            )
-        )
-
-    os.makedirs(data_path, exist_ok=True)
-
-    save_path = os.path.join(data_path, "{}_{}.csv".format(subreddit, data_type))
-    if os.path.exists(save_path):
-        logger.warning(
-            f"File {save_path} already exists. Skipping download for {subreddit} {data_type}."
-        )
-        return
-
-    file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
-    if not os.path.exists(file_path):
-        _ = wget.download(
-            "https://the-eye.eu/redarcs/files/{}_{}.zst".format(subreddit, data_type),
-            out=data_path,
-            bar=None,
-        )
-
-    file_lines = 0
-    bad_lines = 0
-    data = []
-
-    for line, _ in _read_lines_zst(file_path):
-        try:
-            obj = json.loads(line)
-            data += [obj]
-        except (KeyError, json.JSONDecodeError):
-            bad_lines += 1
-        file_lines += 1
-
-    df = pd.DataFrame(data, copy=False)
-
-    # remove deleted posts or comments
-    df = (
-        df[df["selftext"] != "[deleted]"]
-        if data_type == "submissions"
-        else df[df["body"] != "[deleted]"]
-    )
-
-    # anonymize dataframe
-    if anonymizer_instance is not None:
-        df = anonymizer_instance.anonymize_dataframe(
-            df,
-            exclude_cols=["permalink", "created_utc", "subreddit", "score", "author"],
-            unstructured_text_cols=["selftext", "title"]
-            if data_type == "submissions"
-            else ["body"],
-            data_source_name=f"{subreddit}_{data_type}",
-            batch_size=batch_size,
-            num_workers=num_workers,
-        )
-
-    df.to_csv(save_path)
-    os.remove(file_path)
-    logger.info(
-        f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
-        f"({bad_lines:,} bad lines)"
-    )
+    return _get_sub_desc(data)
 
 
 def download_subs_list(data_path: str) -> None:
+    """Download the list of subreddits from The Eye archive.
+
+    Parameters
+    ----------
+    data_path : str
+        The path where the list of subreddits will be saved.
+
+    """
     filepath = os.path.join(data_path, "subs_list.txt")
     if not os.path.exists(filepath):
         url = "https://the-eye.eu/redarcs/"
@@ -171,69 +144,26 @@ def download_subs_list(data_path: str) -> None:
         logger.info(f"{len(subs)} subreddits listed.")
 
 
-def is_rate_limit_error(exception):
-    return isinstance(exception, error.HTTPError) and exception.code == 429
-
-
-def fallback_return(retry_state):
-    """Returns a dictionary with an error message and the URL that caused the error."""
-    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
-
-
-@retry(
-    wait=wait_exponential(multiplier=2.4, min=60, max=120),
-    stop=stop_after_attempt(5),
-    retry=retry_if_exception(is_rate_limit_error),
-    retry_error_callback=fallback_return,
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
-)
-def download_from_url(url_str: str) -> dict[str, Any]:
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        req = request.Request(url_str, headers=headers)
-        data = json.load(request.urlopen(req))
-        time.sleep(2)
-        return data
-    except error.HTTPError as e:
-        if e.code == 429:
-            raise  # tenacity will handle rate limit errors
-
-        logger.error(f"HTTP error {e.code} for {url_str}: {e.reason}")
-        return {"error": f"HTTP error {e.code}", "url": url_str}
-    except Exception as e:
-        logger.error(f"Unexpected error fetching {url_str}: {e}")
-        return {"error": str(e), "url": url_str}
-
-
-def _get_sub_desc(data: dict[str, Any]) -> Optional[dict[str, str]]:
-    if "data" in data:
-        descr = data["data"].get("description", "")
-        public_descr = data["data"].get("public_description", "")
-        sub = data["data"].get("display_name", "")
-        return {
-            "sub": sub,
-            "description": descr,
-            "public_description": public_descr,
-        }
-    return None
-
-
-def _fetch_sub_about(data_path: str, sub: str) -> Optional[dict[str, str]]:
-    about_file = os.path.join(data_path, "subs_about", f"{sub}_about.json")
-    if os.path.exists(about_file):
-        with open(about_file, "r") as f:
-            data = json.load(f)
-    else:
-        about_url = f"https://www.reddit.com/r/{sub}/about.json"
-        data = download_from_url(about_url)
-
-        with open(about_file, "w") as f:
-            json.dump(data, f)
-
-    return _get_sub_desc(data)
-
-
 def get_sub_about_info(data_path: str) -> pd.DataFrame:
+    """Fetch subreddit about information and create a DataFrame.
+
+    This function checks if the list of subreddits exists, downloads it if not,
+    and then fetches the about information for each subreddit. It saves the
+    information in a CSV file and returns a DataFrame containing the subreddit
+    names, descriptions, and public descriptions.
+
+    Parameters
+    ----------
+    data_path : str
+        The path where the subreddit about information will be saved.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the subreddit names, descriptions, and public
+        descriptions.
+
+    """
     subs_list_path = os.path.join(data_path, "subs_list.txt")
     if not os.path.exists(subs_list_path):
         logger.info("Subreddit list not found. Downloading the list of subreddits.")
@@ -325,34 +255,203 @@ def get_sub_about_info(data_path: str) -> pd.DataFrame:
     return about_df
 
 
-def get_submission_permalink(permalink: str) -> str:
+def _read_and_decode(
+    reader: zstandard.ZstdDecompressionReader,
+    chunk_size: int,
+    max_window_size: int,
+    previous_chunk: Optional[bytes] = None,
+    bytes_read: int = 0,
+) -> str:
+    chunk = reader.read(chunk_size)
+    bytes_read += chunk_size
+
+    if previous_chunk is not None:
+        chunk = previous_chunk + chunk
+
+    try:
+        return chunk.decode()
+    except UnicodeDecodeError as err:
+        if bytes_read > max_window_size:
+            raise UnicodeError(
+                f"Unable to decode frame after reading {bytes_read:,} bytes"
+            ) from err
+        logger.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
+        return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
+
+
+def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
+    with open(file_name, "rb") as file_handle:
+        buffer = ""
+        reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
+            file_handle
+        )
+
+        while True:
+            chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
+            if not chunk:
+                break
+            lines = (buffer + chunk).split("\n")
+
+        for line in lines[:-1]:
+            yield line, file_handle.tell()
+
+        buffer = lines[-1]
+    reader.close()
+
+
+def download_sub_data(
+    subreddit: str,
+    data_type: Literal["submissions", "comments"],
+    data_path: str,
+    anonymizer_instance: Optional["Anonymizer"] = None,
+    batch_size: int = 1,
+    num_workers: int = 1,
+) -> None:
+    """Download subreddit data from The Eye archive.
+
+    Parameters
+    ----------
+    subreddit : str
+        The name of the subreddit to download data for.
+    data_type : Literal["submissions", "comments"]
+        The type of data to download, either "submissions" or "comments".
+    data_path : str
+        The path where the data will be saved.
+    anonymizer_instance : Optional[Anonymizer], optional
+        An instance of Anonymizer to anonymize the data, by default None.
+    batch_size : int, optional
+        The batch size for anonymization, by default 1.
+    num_workers : int, optional
+        The number of workers for anonymization, by default 1.
+
+    Raises
+    -------
+    ValueError
+        If `data_type` is not "submissions" or "comments".
+    """
+    if data_type not in ["submissions", "comments"]:
+        raise ValueError(
+            "Expected data_type to be 'submissions' or 'comments', but got {}".format(
+                data_type
+            )
+        )
+
+    os.makedirs(data_path, exist_ok=True)
+
+    save_path = os.path.join(data_path, "{}_{}.csv".format(subreddit, data_type))
+    if os.path.exists(save_path):
+        logger.warning(
+            f"File {save_path} already exists. Skipping download for {subreddit} {data_type}."
+        )
+        return
+
+    file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
+    if not os.path.exists(file_path):
+        _ = wget.download(
+            "https://the-eye.eu/redarcs/files/{}_{}.zst".format(subreddit, data_type),
+            out=data_path,
+            bar=None,
+        )
+
+    file_lines = 0
+    bad_lines = 0
+    data = []
+
+    for line, _ in _read_lines_zst(file_path):
+        try:
+            obj = json.loads(line)
+            data += [obj]
+        except (KeyError, json.JSONDecodeError):
+            bad_lines += 1
+        file_lines += 1
+
+    df = pd.DataFrame(data, copy=False)
+
+    # remove deleted posts or comments
+    df = (
+        df[df["selftext"] != "[deleted]"]
+        if data_type == "submissions"
+        else df[df["body"] != "[deleted]"]
+    )
+
+    # anonymize dataframe
+    if anonymizer_instance is not None:
+        df = anonymizer_instance.anonymize_dataframe(
+            df,
+            cols_to_keep=["created_utc", "author", "permalink", "subreddit", "score"],
+            cols_to_anonymize=["selftext", "title"]
+            if data_type == "submissions"
+            else ["body"],
+            data_source_name=f"{subreddit}_{data_type}",
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
+    df.to_csv(save_path)
+    os.remove(file_path)
+    logger.info(
+        f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
+        f"({bad_lines:,} bad lines)"
+    )
+
+
+def _get_submission_permalink(permalink: str) -> str:
+    """Extracts the submission permalink from a full Reddit permalink."""
     return "/" + permalink.split("/")[-2] + "/"
 
 
-def get_comment_permalink(permalink: str) -> str:
+def _get_comment_permalink(permalink: str) -> str:
+    """Extracts the comment permalink from a full Reddit permalink."""
     return "/" + permalink.split("/")[-3] + "/"
 
 
-def date_filter(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
-    date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-    utc_date_cutoff = int(date_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
-
-    idx = df["date_created"].apply(lambda x: get_utc_timestamp(x) <= utc_date_cutoff)
-    return df[idx]
-
-
-def get_date(utc_timestamp: float) -> str:
-    dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
-    return dt.strftime("%B %d, %Y")
-
-
-def get_utc_timestamp(date_str: str) -> int:
+def _get_utc_timestamp(date_str: str) -> int:
     dt = datetime.datetime.strptime(date_str, "%B %d, %Y")
     dt = dt.replace(tzinfo=datetime.timezone.utc)
     return int(dt.timestamp())
 
 
+def _date_filter(df: pd.DataFrame, date_str: str) -> pd.DataFrame:
+    """Filters the DataFrame based on the date created column."""
+    date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    utc_date_cutoff = int(date_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+    idx = df["date_created"].apply(lambda x: _get_utc_timestamp(x) <= utc_date_cutoff)
+    return df[idx]
+
+
+def _get_date(utc_timestamp: float) -> str:
+    dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
+    return dt.strftime("%B %d, %Y")
+
+
 def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
+    """Apply rule-based filtering to a DataFrame of Reddit posts.
+
+    This function filters out posts based on several criteria:
+    - Ensures the text field is of type str.
+    - Ensures the permalink is of type str.
+    - Removes posts without a score.
+    - Removes posts that are deleted or removed.
+    - Removes very short comments (less than 10 words).
+    - Removes posts with "bot" in the author's name.
+    - Cleans the text field by unescaping HTML tags and removing leading/trailing whitespace.
+    - Ensures the text field has a space within the first 2048 characters.
+    - Ensures the text field has at least 50% alphabetic characters (including spaces).
+
+    Parameters
+    ----------
+    post_df : pd.DataFrame
+        The DataFrame containing Reddit posts.
+    text_field : str
+        The name of the text field in the DataFrame to be filtered.
+
+    Returns
+    -------
+    pd.DataFrame
+        The filtered DataFrame containing only valid posts.
+
+    """
     # remove rows where the text field is not of type str
     idx = post_df[text_field].apply(lambda x: isinstance(x, str))
     post_df = post_df.loc[idx]
@@ -402,48 +501,19 @@ def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
     return post_df
 
 
-# def check_treatment_mention(lst, treatment_names):
-#     filtered_lst = []
-#     for elem in lst:
-#         matches = [x for x in treatment_names if x in elem["subreddit"].lower()]
-#         matches += [x for x in treatment_names if x in elem["title"].lower()]
-#         matches += [x for x in treatment_names if x in elem["post"].lower()]
-#         if "initial_post" in list(elem.keys()):
-#             matches += [x for x in treatment_names if x in elem["initial_post"].lower()]
-#         matches = set(matches)
-#         if len(matches) > 0:
-#             elem["treatments"] = list(matches)
-#             filtered_lst.append(elem)
-#     return filtered_lst
-
-
-# def check_outcome_mention(lst, outcome_words):
-#     filtered_lst = []
-#     for elem in lst:
-#         matches = [x for x in outcome_words if x in elem["subreddit"].lower()]
-#         matches += [x for x in outcome_words if x in elem["title"].lower()]
-#         matches += [x for x in outcome_words if x in elem["post"].lower()]
-#         if "initial_post" in list(elem.keys()):
-#             matches += [x for x in outcome_words if x in elem["initial_post"].lower()]
-#         matches = set(matches)
-#         if len(matches) > 0:
-#             elem["outcome_words"] = list(matches)
-#             filtered_lst.append(elem)
-#     return filtered_lst
-
-
-def get_context_post_df(
+def _get_context_post_df(
     submissions: pd.DataFrame, comments: pd.DataFrame
 ) -> pd.DataFrame:
+    """Join submissions and comments DataFrames to create a context post DataFrame."""
     submissions = submissions.copy()
-    submissions["date_created"] = submissions["created_utc"].astype(int).map(get_date)
+    submissions["date_created"] = submissions["created_utc"].astype(int).map(_get_date)
     submissions["submission_permalink"] = submissions["permalink"].map(
-        get_submission_permalink
+        _get_submission_permalink
     )
 
     comments = comments.copy()
-    comments["permalink_processed"] = comments["permalink"].map(get_comment_permalink)
-    comments["date_created"] = comments["created_utc"].astype(int).map(get_date)
+    comments["permalink_processed"] = comments["permalink"].map(_get_comment_permalink)
+    comments["date_created"] = comments["created_utc"].astype(int).map(_get_date)
 
     comments_grouped = comments.groupby("permalink_processed")
 
@@ -529,53 +599,3 @@ def get_context_post_df(
             "author_replies",
         ]
     )
-
-
-def get_reddit_synonyms(keywords: str, lm: LM) -> list[str]:
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful medical assistant who can translate medical terminology into common terms.",
-        },
-        {
-            "role": "user",
-            "content": f"""
-            What are common brand names or terms that people specifically use when discussing any of {str(keywords)},
-            especially on platforms like Reddit? Return only a Python list of at most 10 individual words, without any other text or formatting.
-            """,
-        },
-    ]
-    response = asyncio.run(lm(messages=messages))
-    llm_keywords = get_message_content(response)
-    all_keywords = []
-
-    # process outputs into a list of individual words
-    for keyword in llm_keywords:
-        processed_keyword = (
-            keyword[keyword.find("[") + 1 : keyword.find("]")]
-            .replace('"', "")
-            .replace("'", "")
-        )
-        keyword_list = [k.strip() for k in processed_keyword.split(",")]
-        all_keywords.extend(keyword_list)
-
-    logger.info(f"Reddit keywords: {all_keywords}")
-    return [k.lower() for k in all_keywords]
-
-
-def subreddit_relevance_llm(desc: str, keywords: str, lm: LM) -> str:
-    system_prompt = "You are an expert in analyzing online forums for relevant discussions about clinical conditions."
-    system_prompt += "Your task is to determine if a subreddit is likely to contain personal experiences related to a set of related conditions based on the subreddit description."
-
-    user_prompt = "Evaluate the subreddit relevance to the conditions listed. Consider if the subreddit likely contains personal experiences with the condition. Answer Yes if relevant, No if not."
-    user_prompt += (
-        f"\n\n**Conditions:** {keywords}\n\n**Subreddit Description:** {desc}"
-    )
-    user_prompt += "Is the subreddit likely to contain personal experiences relevant to the listed conditions? Answer with Yes or No."
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-    response = asyncio.run(lm(messages=messages))
-    return get_message_content(response)[0]

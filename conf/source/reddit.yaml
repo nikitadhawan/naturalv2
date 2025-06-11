@@ -1,7 +1,7 @@
 _target_: naturalv2.sources.reddit.RedditSource
-data_path: ${data_path}/reddit_data/
+data_path: ${data_path}/reddit_data
 lm_cfg: ${sample_model}
 max_download_workers: null
 anonymize: True
-anonymizer_score_threshold: 0.7
+anonymizer_score_threshold: 0.85
 anonymizer_batch_size: 1000

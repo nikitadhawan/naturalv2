@@ -15,12 +15,13 @@ defaults:
 
 seed: 42
 train_ratio: 0.6
+experiment_name: test
 conditions:
   - Nervous System Diseases
 sources:
   - reddit
   - pubmed
-experiment_name: test
+split: train
 probs_model:
   completion_type: text
   temperature: 1.0
@@ -31,9 +32,12 @@ probs_model:
 save_path: ${user.save_path}
 data_path: ${user.data_path}
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
-load_model: True
+
+# configs for filter_curate pipleine
+curate_batch_size: 100
+curate_max_concurrency: 50
+max_workers_curate: null
 filter_by_date: True
-split: train
 
 pipeline_stages:
   - _target_: naturalv2.pipeline.sample_extraction.RelevanceFilterStage

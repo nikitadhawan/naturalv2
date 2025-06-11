@@ -1,13 +1,10 @@
-import copy
 import logging
 import os
 from ast import literal_eval
-from string import Template
 from typing import Any, Literal, Optional
 
 import pandas as pd
 import yaml
-from omegaconf import DictConfig
 
 from naturalv2.evals.clinical_trial import (
     ArmGroup,
@@ -20,7 +17,6 @@ from naturalv2.evals.clinical_trial import (
     OutcomeMeasureType,
     Reference,
 )
-from naturalv2.models.lm import build_lm_instance_from_cfg, extract_list_response
 from naturalv2.utils import (
     ListResponse,
     check_binary_endpoint,
@@ -62,6 +58,9 @@ class Experiment:
                 trial,
                 "protocolSection.statusModule.resultsFirstPostDateStruct.date",
             )
+        )
+        self.trial_keywords = get_nested_value(
+            trial, "protocolSection.conditionsModule.keywords"
         )
         self.conditions = get_nested_value(
             trial, "protocolSection.conditionsModule.conditions"
@@ -123,37 +122,6 @@ class Experiment:
         exp = cls.__new__(cls)
         exp.__dict__.update(data)
         return exp
-
-    def set_common_names(
-        self,
-        attr: Literal["treatment", "outcome"],
-        source_name: str,
-        lm_cfg: DictConfig,
-        prompt_dct: dict[str, list[dict[str, str]]],
-    ) -> None:
-        if attr not in ["treatment", "outcome"]:
-            raise ValueError(f"Expected 'treatment' or 'outcome', got {attr}")
-
-        if getattr(self, f"{attr}_common_names"):
-            return
-
-        lm = build_lm_instance_from_cfg(lm_cfg)
-        common_names = []
-        for name in getattr(self, f"{attr}_names"):
-            messages = copy.deepcopy(prompt_dct[attr])
-            messages[0]["content"] = Template(messages[0]["content"]).safe_substitute(
-                keyword=name
-            )
-            lm_response = lm.call_sync(messages=messages, response_format=ListResponse)
-            parsed_response = extract_list_response(lm_response)
-            if parsed_response:
-                common_names.extend(parsed_response[0])
-            else:
-                logger.warning(f"No common names found for {name} in {source_name}.")
-
-        getattr(self, f"{attr}_common_names").update(
-            {source_name: list(set(common_names))}
-        )
 
     def hard_filter_ty(self, extractions):
         for name in ["treatment"] + self.outcome_names:

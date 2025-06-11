@@ -5,11 +5,6 @@ from typing import Optional
 import pandas as pd
 from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine, OperatorConfig
-from presidio_structured import (
-    PandasAnalysisBuilder,
-    PandasDataProcessor,
-    StructuredEngine,
-)
 from tqdm import tqdm
 
 
@@ -33,8 +28,15 @@ class Anonymizer:
     """
     A class for anonymizing sensitive information in text data.
 
-    This class uses Presidio's AnalyzerEngine and AnonymizerEngine to detect and anonymize
-    sensitive entities such as credit card numbers, email addresses, and personal identifiers.
+    This class uses Presidio's AnalyzerEngine and AnonymizerEngine to detect and
+    anonymize sensitive entities such as credit card numbers, email addresses, and
+    personal identifiers.
+
+    Parameters
+    ----------
+    score_threshold : float, optional
+        The score threshold for entity detection. Entities with a score below this
+        threshold will not be anonymized. Default is 0.85.
     """
 
     ENTITIES = [
@@ -75,7 +77,8 @@ class Anonymizer:
         "FI_PERSONAL_IDENTITY_CODE",
     ]
 
-    def __init__(self, score_threshold: float = 0.7) -> None:
+    def __init__(self, score_threshold: float = 0.85) -> None:
+        """Initialize the Anonymizer with a score threshold."""
         self._score_threshold = score_threshold
         self._analyzer = AnalyzerEngine(
             default_score_threshold=score_threshold, supported_languages=["en"]
@@ -90,6 +93,19 @@ class Anonymizer:
             )
 
     def anonymize_text(self, text: str) -> tuple[str, dict[str, int]]:
+        """Anonymize sensitive entities in a given text.
+
+        Parameters
+        ----------
+        text : str
+            The input text to be anonymized.
+
+        Returns
+        -------
+        tuple[str, dict[str, int]]
+            A tuple containing the anonymized text and a dictionary with entity
+            counts.
+        """
         results = self._analyzer.analyze(
             text=text, language="en", entities=self.ENTITIES
         )
@@ -106,77 +122,81 @@ class Anonymizer:
     def anonymize_dataframe(
         self,
         df: pd.DataFrame,
-        exclude_cols: list[str] = None,
-        unstructured_text_cols: list[str] = None,
+        cols_to_keep: list[str],
+        cols_to_anonymize: list[str] = None,
         data_source_name: Optional[str] = None,
-        batch_size: int = 1,
+        batch_size: int = 1000,
         num_workers: int = 1,
     ) -> pd.DataFrame:
-        exclude_cols, unstructured_text_cols = self._validate_anonymize_dataframe_args(
-            exclude_cols, unstructured_text_cols, batch_size, num_workers
+        """Anonymize specified columns in a DataFrame.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The DataFrame containing the data to be anonymized.
+        cols_to_keep : list[str]
+            List of column names to keep in the DataFrame. All other columns,
+            besides those specified in `cols_to_anonymize`, will be dropped from
+            the DataFrame.
+        cols_to_anonymize : list[str], optional
+            List of column names to anonymize. If not provided, no columns will be
+            anonymized. If provided, only these columns will be anonymized.
+        data_source_name : str, optional
+            Name of the data source for logging purposes. If not provided, defaults
+            to "DataFrame".
+        batch_size : int, default=1000
+            The size of each batch of data to process for anonymization.
+        num_workers : int, default=1
+            The number of parallel workers to use for anonymization. Must be a
+            positive integer greater than 0.
+
+        Returns
+        -------
+        pd.DataFrame
+            A new DataFrame with the specified columns anonymized. If no columns are
+            specified for anonymization, the original DataFrame is returned,
+            possibly with some columns dropped based on `cols_to_keep`.
+
+        Raises
+        ------
+        ValueError
+            If `num_workers` or `batch_size` are not positive integers greater than 0,
+            or if `cols_to_keep` or `cols_to_anonymize` are not lists of strings.
+
+        """
+        cols_to_keep, cols_to_anonymize = self._validate_anonymize_dataframe_args(
+            cols_to_keep, cols_to_anonymize, batch_size, num_workers
         )
 
-        # the structured engine will only handle (int, float, bool, str) dtypes,
-        # but we only care about numeric and string dtypes for structured analysis,
-        # so we exclude any other dtypes from structured analysis
-        for col in df.columns:
-            if col not in exclude_cols and (
-                not pd.api.types.is_numeric_dtype(df[col])
-                and not pd.api.types.is_string_dtype(df[col])
-            ):
-                exclude_cols.append(col)
+        cols_to_keep = [col for col in cols_to_keep if col in df.columns]
+        cols_to_anonymize = [col for col in cols_to_anonymize if col in df.columns]
+        if not cols_to_keep and not cols_to_anonymize:
+            logging.warning(
+                "No columns to keep or anonymize. Returning the original DataFrame."
+            )
+            return df.copy()
 
-        df_copy = df.copy()
+        anonymized_df = (
+            df.loc[:, cols_to_keep + cols_to_anonymize].copy()
+            if cols_to_keep
+            else df.copy()
+        )
+
+        if not cols_to_anonymize:
+            logging.warning(
+                "No columns to anonymize. Returning the DataFrame with only kept columns."
+            )
+            return anonymized_df
+
         df_entity_stats = Counter()
-        df_for_structured = df.drop(
-            columns=exclude_cols + unstructured_text_cols, errors="ignore"
-        )
-        # fill NaN values based on the dtype of the column
-        for col in df_for_structured.columns:
-            if pd.api.types.is_numeric_dtype(df_for_structured[col]):
-                df_for_structured[col].fillna(0, inplace=True)
-            elif pd.api.types.is_string_dtype(df_for_structured[col]):
-                df_for_structured[col].fillna("", inplace=True)
 
-        tqdm.write(
-            f"Anonymizing {data_source_name if data_source_name else 'DataFrame'}"
-        )
-        structured_analysis = PandasAnalysisBuilder(
-            analyzer=self._analyzer,
-            n_process=num_workers,
-            batch_size=batch_size,
-        ).generate_analysis(
-            df_for_structured,
-            selection_strategy="mixed",
-            mixed_strategy_threshold=0.5,
-            n=_get_sample_size(len(df_for_structured)),
-        )
-
-        # convert columns that appear in structured_analysis to string type in df_copy
-        for col in structured_analysis.entity_mapping:
-            df_copy[col] = df_copy[col].astype(str)
-
-        pandas_engine = StructuredEngine(data_processor=PandasDataProcessor())
-        anonymized_df = pandas_engine.anonymize(
-            df_copy,
-            structured_analysis=structured_analysis,
-            operators=self.operators,
-        )
-
-        for col, entity_type in structured_analysis.entity_mapping.items():
-            non_nan_count = df_copy[col].notna().sum()  # before filling NaN values
-            if non_nan_count > 0:
-                df_entity_stats[entity_type] += non_nan_count
-
-        tqdm.write(
-            f"[{data_source_name if data_source_name else 'DataFrame'}] "
-            f"Anonymizing unstructured text columns: {', '.join(unstructured_text_cols)}"
-        )
         batch_analyzer = BatchAnalyzerEngine(self._analyzer)
-        for col in unstructured_text_cols:
-            if col in df_copy.columns and (pd.api.types.is_string_dtype(df_copy[col])):
+        for col in cols_to_anonymize:
+            if col in anonymized_df.columns and (
+                pd.api.types.is_string_dtype(anonymized_df[col])
+            ):
                 anonymized_col, col_stats = self._anonymize_column(
-                    df_copy.loc[:, col],
+                    anonymized_df.loc[:, col],
                     batch_analyzer,
                     batch_size=batch_size,
                     num_workers=num_workers,
@@ -203,6 +223,7 @@ class Anonymizer:
         batch_size: int = 1,
         num_workers: int = 1,
     ) -> tuple[pd.Series, dict[str, int]]:
+        """Anonymize a single column in a DataFrame."""
         col_stats_agg = Counter()
 
         col_data = col.fillna("").astype(str).to_list()
@@ -256,11 +277,12 @@ class Anonymizer:
 
     def _validate_anonymize_dataframe_args(
         self,
-        exclude_cols: Optional[list[str]],
-        unstructured_text_cols: Optional[list[str]],
+        cols_to_keep: list[str],
+        cols_to_anonymize: Optional[list[str]],
         batch_size: int,
         num_workers: int,
     ):
+        """Validate the arguments for the `anonymize_dataframe` method."""
         if num_workers <= 0:
             raise ValueError(
                 "Expected ``num_workers`` to be a positive integer greater than 0 "
@@ -272,33 +294,25 @@ class Anonymizer:
                 f"but got {batch_size}"
             )
 
-        if exclude_cols is None:
-            exclude_cols = []
-        if unstructured_text_cols is None:
-            unstructured_text_cols = []
+        if cols_to_anonymize is None:
+            cols_to_anonymize = []
 
-        if not isinstance(exclude_cols, list) or not all(
-            isinstance(col, str) for col in exclude_cols
+        if not isinstance(cols_to_keep, list) or not all(
+            isinstance(col, str) for col in cols_to_keep
         ):
             raise ValueError(
-                "Expected `exclude_cols` to be a list of strings but got "
-                f"{type(exclude_cols)}"
+                "Expected `cols_to_keep` to be a list of strings but got "
+                f"{type(cols_to_keep)}"
             )
-        if not isinstance(unstructured_text_cols, list) or not all(
-            isinstance(col, str) for col in unstructured_text_cols
+        if not isinstance(cols_to_anonymize, list) or not all(
+            isinstance(col, str) for col in cols_to_anonymize
         ):
             raise ValueError(
-                "Expected `unstructured_text_cols` to be a list of strings but got "
-                f"{type(unstructured_text_cols)}"
+                "Expected `cols_to_anonymize` to be a list of strings but got "
+                f"{type(cols_to_anonymize)}"
             )
 
-        overlap = set(exclude_cols) & set(unstructured_text_cols)
-        if overlap:
-            raise ValueError(
-                "Expected `exclude_cols` and `unstructured_text_cols` to be disjoint "
-                f"sets but found overlap: {overlap}"
-            )
-        return exclude_cols, unstructured_text_cols
+        return cols_to_keep, cols_to_anonymize
 
     def _log_anonymization_stats(self, df_entity_stats: Counter) -> None:
         if df_entity_stats:

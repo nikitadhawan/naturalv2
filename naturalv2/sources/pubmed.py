@@ -1,51 +1,34 @@
-import datetime
 import json
 import os
+from typing import Optional
 
 import pandas as pd
+from omegaconf import DictConfig
 
-from naturalv2.sources.reddit_utils import (
-    date_filter,
-    get_context_post_df,
-    rule_based_filter,
-)
+from naturalv2.evals.experiment import Experiment
+from naturalv2.utils import load_prompt
 
-from .pubmed_utils import fetch_articles, pubmed_queries_llm, search_pubmed
+from .pubmed_utils import fetch_articles, search_pubmed
 
 
 class PubMedSet:
     def __init__(
-        self, data_path, trial, match_method, llm, download=False, api_key=None
+        self,
+        data_path: str,
+        lm_cfg: DictConfig,
+        download: bool = False,
+        api_key: Optional[str] = None,
     ):
         self.data_path = data_path
-        self.trial = trial
-        self.llm = llm
-        query_keywords = self.get_keywords(match_method, trial)
-
-        if download:
-            self.download_data(api_key, query_keywords)
+        self.lm_cfg = lm_cfg
+        self.api_key = api_key
 
         # TODO
         # self.treatment_names
         # self.outcome_words
         # self.trial_keywords
 
-    def get_keywords(self, method, trial):
-        if method == "string_match":
-            return (
-                trial.keywords
-                + trial.conditions
-                + [i.title for i in trial.interventions]
-            )
-
-        if method == "llm":
-            return pubmed_queries_llm(trial, self.llm)
-
-        raise ValueError(
-            f"Unknown match method {method}. Please use 'string_match' or 'llm'."
-        )
-
-    def get_query(self, keyword: str) -> str:
+    def get_search_query(self, keyword: str) -> str:
         return (
             f'("{keyword}"[All Fields]) AND '
             '"english"[Language] AND '
@@ -54,15 +37,15 @@ class PubMedSet:
             '"humans"[MeSH Terms]'
         )
 
-    def download_data(self, api_key: str, keywords: list[str]) -> None:
+    def condition_filter(self, keywords: list[str]) -> list[str]:
         self.data_files = []
         for keyword in keywords:
             keyword_data_path = self.data_path + f"{keyword}_case_reports.json"
             if not os.path.exists(keyword_data_path):
-                query = self.get_query(keyword)
-                webenv, query_key = search_pubmed(query, api_key)
+                query = self.get_search_query(keyword)
+                webenv, query_key = search_pubmed(query, self.api_key)
                 case_reports = fetch_articles(
-                    webenv, query_key, api_key, self.data_path
+                    webenv, query_key, self.api_key, self.data_path
                 )
                 with open(keyword_data_path, "w") as f:
                     json.dump(case_reports, f, indent=2)
@@ -70,36 +53,39 @@ class PubMedSet:
                 print(f"For query: {keyword}, {len(case_reports)} case reports found!")
             self.data_files.append(keyword_data_path)
 
-    def curate_data(self, filter_by_date: bool = False) -> pd.DataFrame:
+        return self.data_files
+
+    def clean_data(self, study_name: str) -> tuple[str, int]:
+        pass
+
+    def curate_experiment_data(
+        self,
+        experiment: Experiment,
+        study_name: str,
+        filter_by_date: bool,
+        clean_data_path: str,
+    ) -> tuple[str, int]:
         rule_filtered_df = pd.DataFrame()
-        save_path = self.data_path + f"{self.trial.nctid}_pubmed_rule_based.csv"
-        # treatment_names = get_reddit_synonyms([i.title for i in self.trial.interventions], self.llm)
-        # outcome_words = get_reddit_synonyms([o.title for o in self.trial.primary_endpoints], self.llm)
+        save_path = os.path.join(
+            self.data_path, f"{experiment.nct_id}_pubmed_rule_based.csv"
+        )
+
         if not os.path.exists(save_path):
-            for sub in self.subreddits:
-                submissions = pd.read_csv(self.data_files[f"{sub}_submissions"])
-                comments = pd.read_csv(self.data_files[f"{sub}_comments"])
-                if date_filter:
-                    trial_date = datetime.datetime.strptime(
-                        self.trial.results_first_posted, "%Y-%m-%d"
-                    )
-                    trial_date_utc = int(
-                        trial_date.replace(tzinfo=datetime.timezone.utc).timestamp()
-                    )
-                    submissions = filter_by_date(submissions, trial_date_utc)
-                    comments = filter_by_date(comments, trial_date_utc)
-                submissions = rule_based_filter(submissions, "selftext")
-                comments = rule_based_filter(comments, "body")
-                merged_df = get_context_post_df(
-                    submissions, comments, self.treatment_names, self.outcome_words
-                )
-                rule_filtered_df = pd.concat(
-                    [rule_filtered_df, merged_df], ignore_index=True
-                )
-                rule_filtered_df.to_csv(save_path)
-            rule_filtered_df = rule_filtered_df.drop_duplicates("post")
-            rule_filtered_df.to_csv(save_path)
+            # TODO: curate experiment data
+            pass
         else:
             rule_filtered_df = pd.read_csv(save_path, index_col=0)
-        self.curated_data = rule_filtered_df
-        return self.curated_data
+
+        return save_path, len(rule_filtered_df)
+
+    def get_common_name_prompts() -> dict[str, list[dict[str, str]]]:
+        base_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
+        )
+        t_prompt = load_prompt(
+            base_dir, "common_name_treatment", return_format="messages", source="PubMed"
+        )
+        o_prompt = load_prompt(
+            base_dir, "common_name_outcome", return_format="messages", source="PubMed"
+        )
+        return {"treatment": t_prompt, "outcome": o_prompt}

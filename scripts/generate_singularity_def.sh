@@ -123,7 +123,7 @@ cat >> "$DEF_FILE" << 'EOF'
     cd /workspace
     /root/.local/bin/uv venv --python 3.11 --seed /venv
     . /venv/bin/activate
-    
+
     # Install dependencies using uv
     /root/.local/bin/uv sync -n --dev --active
 

@@ -1,4 +1,4 @@
 {
-    "system_prompt": "You are a helpful medical assistant who can translate medical terminology into common terms.",
-    "user_prompt_template": "What are common terms that are used when discussing the outcome, $keyword, specifically in content found on $source?\n\nReturn only a Python list of at most 5 individual words, without any other text or formatting."
+    "system_prompt": "You are a medical terminology expert specializing in translating clinical outcome terminology into commonly used terms. Focus on identifying how medical outcomes, endpoints, and results are referenced in real-world medical discussions, patient communications, and healthcare literature.",
+    "user_prompt_template": "Based on the medical outcome from a clinical trial described below, identify the most common alternative terms, colloquial expressions, or synonyms used to refer to this outcome in $source content.\n\nTrial: '$trial_title' \nOutcome: $keyword \nOutcome description: $outcome_desc\n\nRequirements:\n- Return at most 10 terms as a Python list\n- Include common synonyms, common misspellings, patient-friendly terms, or clinical abbreviations.\n- Focus on terms patients, healthcare providers, or researchers would actually use on $source.\n- Consider both formal medical language and lay terminology.\n\nReturn only the Python list with no additional text."
 }

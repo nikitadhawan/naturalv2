@@ -1,7 +1,7 @@
 import logging
 import os
 from ast import literal_eval
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import pandas as pd
 import yaml
@@ -12,6 +12,7 @@ from naturalv2.evals.clinical_trial import (
     ClinicalTrial,
     MeasureGroup,
     Measurement,
+    Mesh,
     Outcome,
     OutcomeMeasure,
     OutcomeMeasureType,
@@ -42,14 +43,14 @@ class Experiment:
         else:
             self.trial_path = os.path.join(data_path, f"nct_reports/{nct_id}.json")
         self.status = status
-        self.studies: list[list[str, str]] = []
+        self.studies: list[list[str]] = []
 
         trial = ClinicalTrial.from_json_file(self.trial_path)
 
         # extract relevant information from the trial
         self.nct_id = trial.protocolSection.identificationModule.nctId
         self.title = trial.protocolSection.identificationModule.officialTitle
-        self.date: Optional[str] = (
+        self.date: str | None = (
             get_nested_value(
                 trial, "protocolSection.statusModule.completionDateStruct.date"
             )
@@ -65,15 +66,26 @@ class Experiment:
         self.conditions = get_nested_value(
             trial, "protocolSection.conditionsModule.conditions"
         )
+        meshes: list[Mesh] | None = get_nested_value(
+            trial, "derivedSection.conditionBrowseModule.meshes"
+        )
+        self.trial_disease_mesh = [mesh.term for mesh in meshes] if meshes else []
 
-        references: Optional[list[Reference]] = get_nested_value(
+        ancestors: list[Mesh] | None = get_nested_value(
+            trial, "derivedSection.conditionBrowseModule.ancestors"
+        )
+        self.trial_disease_ancestors = (
+            [ancestor.term for ancestor in ancestors] if ancestors else []
+        )
+
+        references: list[Reference] | None = get_nested_value(
             trial, "protocolSection.referencesModule.references"
         )
         self.references: list[str] = (
             [ref.citation for ref in references if ref.citation] if references else []
         )
 
-        baseline_measures: Optional[list[BaselineMeasure]] = get_nested_value(
+        baseline_measures: list[BaselineMeasure] | None = get_nested_value(
             trial, "resultsSection.baselineCharacteristicsModule.measures"
         )
         self.covariate_names: list[str] = [
@@ -83,7 +95,7 @@ class Experiment:
             "Inclusion"  # , "Dosage"
         ]  # inclusion-related binary variables
 
-        self.inclusion_criteria: Optional[str] = get_nested_value(
+        self.inclusion_criteria: str | None = get_nested_value(
             trial, "protocolSection.eligibilityModule.eligibilityCriteria"
         )
 
@@ -99,10 +111,14 @@ class Experiment:
             self.options.update({feat: ["No", "Yes"]})
         self.options.update({"treatment": self.treatment_names})
 
-        self.covariate_desc: dict[str, list[str]] = {}
+        self.covariate_desc: dict[str, str] = {}
         if baseline_measures is not None:
             self.covariate_desc.update(
-                {cov.title: cov.description for cov in baseline_measures}
+                {
+                    cov.title: cov.description
+                    for cov in baseline_measures
+                    if cov.description
+                }
             )
         self.covariate_desc["Duration"] = (
             "Time period that the patient took treatment for, with units."
@@ -111,31 +127,42 @@ class Experiment:
         self.question_prompts: dict[str, str] = {}
         self._set_questions()
 
-    def to_yaml(self, filename):
+    def to_yaml(self, filename: str) -> None:
         with open(filename, "w") as file:
             yaml.safe_dump(self.__dict__, file)
 
     @classmethod
-    def from_yaml(cls, filename):
+    def from_yaml(cls, filename: str) -> "Experiment":
         with open(filename, "r") as file:
             data = yaml.safe_load(file)
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Invalid data format in {filename}. Expected a dictionary."
+            )
+
         exp = cls.__new__(cls)
         exp.__dict__.update(data)
         return exp
 
-    def hard_filter_ty(self, extractions):
-        for name in ["treatment"] + self.outcome_names:
-            extractions = extractions[extractions[name].isin(self.options[name])]
-        return extractions
+    def hard_filter_ty(
+        self, extractions: pd.DataFrame, t_col: str, y_col: str, outcome: str
+    ) -> pd.DataFrame:
+        return extractions[
+            extractions[y_col].isin(self.options[outcome])
+            & extractions[t_col].isin(self.options["treatment"])
+        ]
 
-    def hard_filter_inclusion(self, extractions):
+    def hard_filter_inclusion(self, extractions: pd.DataFrame) -> pd.DataFrame:
         for name in self.extended_covariate_names:
             extractions = extractions[
-                extractions[name].lower().isin(["yes", "unknown"])
+                extractions[name].str.lower().isin(["yes", "unknown"])
             ]
         return extractions
 
-    def discretize(self, extractions: pd.DataFrame) -> pd.DataFrame:
+    def discretize(
+        self, extractions: pd.DataFrame, t_col: str, y_col: str
+    ) -> pd.DataFrame:
         # extractions = extractions.map(
         #     lambda x: np.nan if x in ["Unknown", "unknown"] else x
         # )
@@ -160,11 +187,11 @@ class Experiment:
                 extractions[cov] = extractions[cov].replace(cov_map)
 
         binary_map_num = {"No": 0, "Yes": 1}
-        for feat in self.extended_covariate_names + self.outcome_names:
+        for feat in self.extended_covariate_names + [y_col]:
             extractions[feat] = extractions[feat].replace(binary_map_num)
 
         treatment_map = {name: i for (i, name) in enumerate(self.treatment_names)}
-        extractions["treatment"] = extractions["treatment"].replace(treatment_map)
+        extractions["treatment"] = extractions[t_col].replace(treatment_map)
 
         self._set_transforms()
 
@@ -177,10 +204,10 @@ class Experiment:
         if (
             self.status == "active"
         ):  # use arm information to find outcome-treatment pairs
-            primary_outcomes: Optional[list[Outcome]] = get_nested_value(
+            primary_outcomes: list[Outcome] | None = get_nested_value(
                 trial, "protocolSection.outcomesModule.primaryOutcomes"
             )
-            arm_groups: Optional[list[ArmGroup]] = get_nested_value(
+            arm_groups: list[ArmGroup] | None = get_nested_value(
                 trial, "protocolSection.armsInterventionsModule.armGroups"
             )
 
@@ -204,7 +231,7 @@ class Experiment:
                                 (outcome.measure, (arm1.label, arm2.label))
                             )
         else:  # use outcome information to find outcome-treatment pairs
-            trial_outcome_measures: Optional[list[OutcomeMeasure]] = get_nested_value(
+            trial_outcome_measures: list[OutcomeMeasure] | None = get_nested_value(
                 trial,
                 "resultsSection.outcomeMeasuresModule.outcomeMeasures",
             )
@@ -229,10 +256,10 @@ class Experiment:
                 for i, cohort1 in enumerate(measure_groups):
                     for j, cohort2 in enumerate(measure_groups):
                         if i < j:
-                            measure1: Optional[Measurement] = outcome.get_group_stats(
+                            measure1: Measurement | None = outcome.get_group_stats(
                                 cohort1
                             )
-                            measure2: Optional[Measurement] = outcome.get_group_stats(
+                            measure2: Measurement | None = outcome.get_group_stats(
                                 cohort2
                             )
 
@@ -284,7 +311,7 @@ class Experiment:
         # TODO: maybe use timeframes in question_prompts, e.g.
         # outcome_q = "What was the patient's reported {out.title}?"
         # if out.timeFrame: outcome_q.replace("?", "after a duration of {out.timeFrame.split(",")[-1]}?")
-        self.outcome_timeframes: list[Optional[str]] = [
+        self.outcome_timeframes: list[str | None] = [
             outcome.timeFrame for outcome in outcomes
         ]
 
@@ -301,7 +328,7 @@ class Experiment:
             for outcome in outcomes
         }
 
-    def _set_transforms(self):
+    def _set_transforms(self) -> None:
         binary_map_num = {"No": 0, "Yes": 1}
         binary_map_lang = {0: "No", 1: "Yes"}
 
@@ -355,11 +382,13 @@ class Experiment:
             )
 
     def _parse_lm_response(self, lm_response: str) -> list[str]:
-        return (
-            ListResponse.model_validate_json(lm_response).output if lm_response else []
-        )
+        output: list[str] = []
+        if lm_response:
+            output = ListResponse.model_validate_json(lm_response).output or []
 
-    def apply_transform(self, dct, repr_type="numeric"):
+        return output
+
+    def apply_transform(self, dct, repr_type: str = "numeric") -> dict[str, Any]:
         all_keys = list(dct.keys())
         for field in all_keys:
             field_map = (
@@ -377,7 +406,7 @@ class Experiment:
         source_name: str,
         report: str,
         return_format: Literal["prompt", "messages"] = "messages",
-    ):
+    ) -> str | list[dict[str, str]]:
         base_dir = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
         )
@@ -389,21 +418,21 @@ class Experiment:
                 self.treatment_names + self.treatment_common_names[source_name]
             ),
             "outcome": outcome,
-            "covariates": str(self.covariate_names),
+            "outcome_common_names": self.outcome_common_names.get(source_name, []),
+            "covariates": str(self.covariate_names + self.extended_covariate_names),
             "ty_desc": "".join(
                 [
                     f"\n{k}: {v}"
                     for k, v in {**self.treatment_desc, **outcome_desc}.items()
                 ]
             ),
-            "covariates_desc": "".join(
+            "covariate_desc": "".join(
                 [f"\n{k}: {v}" for k, v in self.covariate_desc.items()]
             ),
             "inclusion_criteria": self.inclusion_criteria,
             "report": report,
         }
 
-        prompt: str = load_prompt(
+        return load_prompt(
             base_dir, prompt_type, return_format=return_format, **format_inputs
         )
-        return prompt

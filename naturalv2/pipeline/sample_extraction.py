@@ -1,28 +1,404 @@
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Literal, Optional
+from enum import Enum
+from typing import Any, Literal
 
+import aiofiles
 import pandas as pd
 from omegaconf import DictConfig
 from pydantic import BaseModel
-from tqdm import tqdm
+from tqdm.asyncio import tqdm
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM, build_lm_instance_from_cfg, get_message_content
-from naturalv2.pipeline.natural import PipelineStage
+from naturalv2.models.lm import (
+    LM,
+    ResponseType,
+    build_lm_instance_from_cfg,
+    get_message_content,
+)
+from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.utils import create_response_format, get_save_path
 
 
 logger = logging.getLogger(__name__)
 
 
-async def _extract_covariates_from_report(
-    model: LM, messages: list[dict[str, str]], response_format: BaseModel
-) -> dict[str, Any]:
-    response = model(messages=messages, response_format=response_format)
-    response_text = get_message_content(response)[0]
-    return response_format.model_validate_json(response_text).model_dump(mode="json")
+class ExtractType(str, Enum):
+    """Enumeration for covariate extraction types."""
+
+    RELEVANCE = "relevance"
+    TY_FILTER = "ty_filter"
+    KNOWNS = "knowns"
+    IMPUTATIONS = "imputations"
+
+
+class CovariateExtractionStage(PipelineStage):
+    """Base class for stages that extract covariates from reports.
+
+    This class provides a common interface for stages that process reports
+    to extract information about relevance, treatment, outcome, known covariates,
+    and imputation of missing information. Each subclass should implement
+    the ``process`` method to define how the data is processed.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after extraction.
+    llm : LM
+        Lazy-loaded language model instance used for covariate extraction.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+
+    """
+
+    def __init__(
+        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+    ) -> None:
+        """Initialize the class."""
+        super().__init__(model_cfg)
+        self.max_concurrent_workers = max_concurrent_workers
+        self.data: pd.DataFrame | None = None
+
+    def get_language_model(self) -> LM:
+        """Return the language model used in this stage."""
+        return build_lm_instance_from_cfg(self.model_cfg)
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        """Process the input data and return transformed data."""
+        raise NotImplementedError("Subclasses must implement the process method.")
+
+    def get_stats(self) -> dict[str, Any]:
+        """Return statistics about the processed data.
+
+        Returns
+        -------
+        dict[str, Any]
+            A dictionary containing statistics about the processed data.
+        """
+        return {
+            "count": len(self.data) if self.data is not None else 0,
+            "cost": self.llm.cost,
+        }
+
+
+class RelevanceFilterStage(CovariateExtractionStage):
+    """Stage for filtering relevant reports.
+
+    At this stage, an LLM is asked to determine if a report is relevant to a
+    given condition, treatment, outcome or other covariate of interest.
+    This stage processes the input data to filter out reports that are not relevant
+    based on the LLM's response.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after relevance filtering.
+    llm : LM
+        Lazy-loaded language model instance used for relevance filtering.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+    """
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        """Process the input data to filter relevant reports.
+
+        This method uses an LLM to determine if each report is relevant to the
+        specified condition, treatment, outcome, or other covariate of interest.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input DataFrame containing reports to be filtered.
+        context : PipelineContext
+            Context for the pipeline execution, containing experiment and
+            configuration details.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing only the relevant reports after filtering.
+
+        Raises
+        ------
+        Exception
+            If there is an error during the extraction process.
+        """
+        response_format = create_response_format(
+            "RelevanceResponse", ["is_relevant"], {"is_relevant": Literal["Yes", "No"]}
+        )
+        filtered_data = await extract_covariates(
+            input_df=data,
+            experiment=context.experiment,
+            source_name=context.source_name,
+            outcome=context.outcome,
+            extract_type=ExtractType.RELEVANCE,
+            llm=self.llm,
+            model_name=self._model_name,
+            save_path=context.save_path,
+            response_format=response_format,
+            max_concurrent_requests=self.max_concurrent_workers,
+        )
+
+        self.data = filtered_data[filtered_data["is_relevant"].str.lower() == "yes"]
+        logger.info(f"After relevance filter: {len(self.data)} reports.")
+        return self.data
+
+
+class TreatmentOutcomeFilterStage(CovariateExtractionStage):
+    """Stage for filtering reports with treatment and outcome information.
+
+    In this stage, an LLM is used to determine the treatment taken and whether
+    the outcome is mentioned in each report. The stage processes the input data
+    to filter out reports that do not provide sufficient information about the
+    treatment and outcome.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after treatment-outcome filtering.
+    llm : LM
+        Lazy-loaded language model instance used for treatment-outcome filtering.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+    """
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        """Process the input data to filter reports based on treatment and outcome.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input DataFrame containing reports to be filtered.
+        context : PipelineContext
+            Context for the pipeline execution, containing experiment and
+            configuration details.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing only the reports that provide information
+            about the treatment taken and whether the outcome is mentioned.
+
+        Raises
+        ------
+        Exception
+            If there is an error during the extraction process.
+        """
+        treatment_options = (
+            context.experiment.treatment_names
+            + context.experiment.treatment_common_names[context.source_name]
+            + ["Unknown"]
+        )
+        response_format = create_response_format(
+            "TYFilterResponse",
+            ["treatment_taken", "is_outcome_mentioned"],
+            types={
+                "treatment_taken": Literal[*treatment_options],
+                "is_outcome_mentioned": Literal["Yes", "No"],
+            },
+        )
+        ty_samples = await extract_covariates(
+            input_df=data,
+            experiment=context.experiment,
+            source_name=context.source_name,
+            outcome=context.outcome,
+            extract_type=ExtractType.TY_FILTER,
+            llm=self.llm,
+            model_name=self._model_name,
+            save_path=context.save_path,
+            response_format=response_format,
+            max_concurrent_requests=self.max_concurrent_workers,
+        )
+
+        self.data = context.experiment.hard_filter_ty(
+            ty_samples,
+            t_col="treatment_taken",
+            y_col="is_outcome_mentioned",
+            outcome=context.outcome,
+        )
+        logger.info(f"After treatment-outcome filter: {len(self.data)} reports.")
+        return self.data
+
+
+class KnownsStage(CovariateExtractionStage):
+    """Stage for extracting known covariates.
+
+    In this stage, an LLM is used to extract known covariates from the reports.
+    The LLM is allowed to return 'Unknown' for any covariate that it cannot
+    determine.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after extracting known covariates.
+    llm : LM
+        Lazy-loaded language model instance used for covariate extraction.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+
+    """
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        """Process the input data to extract known covariates.
+
+        This method uses an LLM to extract known covariates from the reports.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Input DataFrame containing reports to be processed.
+        context : PipelineContext
+            Context for the pipeline execution, containing experiment and
+            configuration details.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing the extracted known covariates from the reports.
+
+        Raises
+        ------
+        Exception
+            If there is an error during the extraction process.
+        """
+        response_format = create_response_format(
+            "KnownsResponse",
+            context.experiment.covariate_names
+            + context.experiment.extended_covariate_names,
+            {
+                "Duration": int | Literal["Unknown"],
+                "Inclusion": Literal["Yes", "No", "Unknown"],
+            },
+        )
+        self.data = await extract_covariates(
+            input_df=data,
+            experiment=context.experiment,
+            source_name=context.source_name,
+            outcome=context.outcome,
+            extract_type=ExtractType.KNOWNS,
+            llm=self.llm,
+            model_name=self._model_name,
+            save_path=context.save_path,
+            response_format=response_format,
+            max_concurrent_requests=self.max_concurrent_workers,
+        )
+
+        self.data = context.experiment.hard_filter_inclusion(self.data)
+        logger.info(f"After inclusion filter: {len(self.data)} reports.")
+        return self.data
+
+
+class ImputationsStage(CovariateExtractionStage):
+    """Stage for imputing missing covariates.
+
+    In this stage, an LLM is used to impute missing covariates in the reports.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional, default=None
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after imputing missing covariates.
+    llm : LM
+        Lazy-loaded language model instance used for covariate extraction.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+    """
+
+    def __init__(
+        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+    ) -> None:
+        super().__init__(model_cfg, max_concurrent_workers)
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        covariate_names = (
+            context.experiment.covariate_names
+            + context.experiment.extended_covariate_names
+        )
+        response_format = create_response_format(
+            "ImputationsResponse",
+            keys=covariate_names,
+            types={"Duration": int, "Inclusion": Literal["Yes", "No"]},
+        )
+        self.data = await extract_covariates(
+            input_df=data,
+            experiment=context.experiment,
+            source_name=context.source_name,
+            outcome=context.outcome,
+            extract_type=ExtractType.IMPUTATIONS,
+            llm=self.llm,
+            model_name=self._model_name,
+            save_path=context.save_path,
+            response_format=response_format,
+            max_concurrent_requests=self.max_concurrent_workers,
+        )
+
+        logger.info(f"Final: {len(self.data)} reports after imputation.")
+        return self.data
 
 
 async def extract_covariates(
@@ -30,214 +406,394 @@ async def extract_covariates(
     experiment: Experiment,
     source_name: str,
     outcome: str,
-    model_cfg: DictConfig,
+    extract_type: ExtractType,
+    llm: LM,
+    model_name: str,
     save_path: str,
-    extract_type: Literal["relevance", "ty_filter", "knowns", "imputations"],
-    batch_size: int = 1,
-    response_format: Optional[type[BaseModel]] = None,
+    response_format: BaseModel | None = None,
+    max_concurrent_requests: int | None = None,
 ) -> pd.DataFrame:
-    """Extract covariates from input data using LLM.
+    """Extract information from reports using an LLM.
+
+    This function processes the input DataFrame to extract information about
+    relevance, treatment, outcome, known covariates, or imputation of missing
+    information based on the specified extraction type.
 
     Parameters
     ----------
-    input_df: pd.DataFrame
-        Input dataframe with reports
-    experiment: Experiment
-        Experiment object
-    source_name: str
-        Source of data, according to which prompts will be constructed
-    outcome: str
-        The outcome of interest
-    model_cfg: DictConfig
-        Model configuration
-    save_path: str
-        Base path to save results
-    extract_type: Literal["relevance", "ty_filter", "knowns", "imputations"]
-        Type of extraction to perform
-    batch_size: int
-        Number of samples to process in each batch
-    response_format: Optional[type[BaseModel]]
-        Pydantic model for response format validation
+    input_df : pd.DataFrame
+        DataFrame containing the reports to be processed.
+    experiment : Experiment
+        Experiment instance containing metadata and prompt templates.
+    source_name : str
+        Name of the source from which the reports are extracted.
+    outcome : str
+        The outcome variable for which covariates are being extracted.
+    extract_type : ExtractType
+        The type of extraction to perform (e.g., relevance, treatment-outcome filter,
+        known covariates, or imputations).
+    llm : LM
+        Language model instance used for processing the reports.
+    model_name : str
+        Name of the language model being used.
+    save_path : str
+        Path where the processed data will be saved.
+    response_format : BaseModel | None, optional, default=None
+        Pydantic model defining the expected format of the LLM response.
+        If None, no validation will be performed on the response.
+    max_concurrent_requests : int | None, optional, default=None
+        Maximum number of concurrent requests to the LLM. If None, defaults to 10 or
+        the number of samples in the input DataFrame.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with extracted covariates
+        DataFrame containing the extracted covariates from the reports.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the specified save path does not exist or cannot be created.
+    ValueError
+        If the input DataFrame does not contain the required 'report' field for prompt
+        formatting.
+    Exception
+        If there is an error during the extraction process, such as issues with the LLM
+        or data processing.
+
+    Notes
+    -----
+    - If the save path already exists, the function will read the existing CSV file
+      and return it as a DataFrame.
 
     """
     file_path = get_save_path(
-        save_path, experiment.nct_id, model_cfg.model, extract_type
+        save_path, experiment.nct_id, model_name, extract_type.value
     )
 
     if os.path.exists(file_path):
         return pd.read_csv(file_path, index_col=0)
 
-    model = build_lm_instance_from_cfg(model_cfg)
+    # Set up the prompt and result queues for asynchronous processing
+    num_samples = len(input_df)
+    num_workers = min(max_concurrent_requests or min(10, num_samples), num_samples)
+    queue_size = max(num_workers * 10, 1000)
 
-    out_dicts = []
+    prompt_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
+    result_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
 
-    def _get_messages(reports: list[str]) -> list[list[dict[str, str]]]:
-        return [
-            experiment.build_prompt_for_report(
-                prompt_type=extract_type,
-                outcome=outcome,
-                source_name=source_name,
-                report=report,
+    # Create progress bars for the different tasks
+    producer_pbar = _create_progress_bar(total=num_samples, desc="Creating prompts")
+    worker_pbar = _create_progress_bar(total=num_samples, desc="Processing prompts")
+    writer_pbar = _create_progress_bar(total=num_samples, desc="Writing results")
+
+    # Create tasks to produce prompts
+    producer_task = asyncio.create_task(
+        _llm_task_producer(
+            prompt_queue,
+            input_df,
+            experiment,
+            extract_type.value,
+            outcome,
+            source_name,
+            producer_pbar,
+        ),
+        name="LLM-Task-Producer",
+    )
+
+    # Create worker tasks to process prompts
+    worker_tasks = [
+        asyncio.create_task(
+            _prompt_processor(
+                worker_id,
+                prompt_queue,
+                result_queue,
+                llm,
+                worker_pbar,
+                response_format=response_format,
+            ),
+            name=f"Prompt-Processor-{worker_id}",
+        )
+        for worker_id in range(num_workers)
+    ]
+
+    # Create a CSV writer task to write results to a file
+    csv_writer_task = asyncio.create_task(
+        _csv_writer(result_queue, file_path, writer_pbar),
+        name="CSV-Writer",
+    )
+
+    try:
+        # Wait for the producer to finish producing tasks
+        await producer_task
+        await prompt_queue.join()  # Ensure all prompts are processed
+
+        # Signal workers to stop by putting None in the queue
+        for _ in range(len(worker_tasks)):
+            await prompt_queue.put((None, None, None))  # Signal to stop processing
+
+        # Wait for all workers to finish
+        worker_errors = await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+        processing_error_count = 0
+        for idx, error in enumerate(worker_errors):
+            if isinstance(error, int):
+                processing_error_count += error
+            elif isinstance(error, Exception):
+                logging.error(
+                    f"Worker {idx} encountered an exception: {type(error).__name__} - {error}",
+                    exc_info=True,
+                )
+                processing_error_count += 1
+
+        await result_queue.put(None)  # Signal the CSV writer to finish
+        success_count = await csv_writer_task
+        logger.info(
+            f"Processing completed. {success_count} records written, "
+            f"{processing_error_count} errors"
+        )
+    except Exception as e:
+        logger.error(f"Error during extraction: {e}", exc_info=True)
+        # Cancel any running tasks
+        for task in [csv_writer_task, producer_task] + worker_tasks:
+            if not task.done():
+                task.cancel()
+        raise
+    finally:
+        # Clean up progress bars
+        for pbar in [producer_pbar, worker_pbar, writer_pbar]:
+            if not pbar.disable:
+                pbar.close()
+
+    if os.path.exists(file_path):
+        return pd.read_csv(file_path, index_col=0)
+
+    return pd.DataFrame()  # Return empty DataFrame if file not found
+
+
+def _create_progress_bar(total: int, desc: str) -> tqdm:
+    """Create a tqdm progress bar."""
+    return tqdm(total=total, desc=desc, leave=False)
+
+
+def _prompt_formatter(
+    row: pd.Series,
+    experiment: Experiment,
+    prompt_type: str,
+    outcome: str,
+    source_name: str,
+) -> list[dict[str, str]]:
+    """Format the prompt for a given row of data."""
+    if "report" not in row:
+        raise ValueError("Row must contain 'report' field for prompt formatting.")
+
+    return experiment.build_prompt_for_report(
+        prompt_type=prompt_type,
+        outcome=outcome,
+        source_name=source_name,
+        report=row["report"],
+        return_format="messages",
+    )
+
+
+def _result_processor(
+    row: pd.Series,
+    response: ResponseType,
+    response_format: BaseModel | None = None,
+) -> dict[str, Any] | None:
+    """Process the LLM response and combine it with the original row data."""
+    response_text = get_message_content(response)[0]
+    if response_text is None:
+        logging.warning(
+            f"No content in LLM response for row index {row.name if hasattr(row, 'name') else 'unknown'}"
+        )
+        return None
+
+    try:
+        if response_format:
+            parsed_data = response_format.model_validate_json(response_text).model_dump(
+                mode="json"
             )
-            for report in reports
-        ]
-
-    for start in tqdm(range(0, len(input_df), batch_size)):
-        batch_df = input_df.iloc[start : start + batch_size]
-
-        reports = batch_df["report"].tolist()
-        messages = _get_messages(reports)
-
-        tasks = [
-            _extract_covariates_from_report(model, message, response_format)
-            for message in messages
-        ]
-        results = await asyncio.gather(*tasks)
-
-        out_dicts.extend(
-            [{**results[j], **{"report": reports[j]}} for j in range(len(batch_df))]
+        else:  # No Pydantic validation, just return raw text or a simple dict
+            parsed_data = {"llm_response": response_text}
+    except Exception as e:
+        logging.error(
+            "Failed to validate/parse LLM response for row index "
+            f"{row.name if hasattr(row, 'name') else 'unknown'}: {e}. "
+            f"Response text: '{response_text[:200]}...'"
         )
+        return None  # Signal error
 
-    llm_samples_df = pd.DataFrame.from_dict(out_dicts)
-    # TODO later: Remove to use only new extractions - shouldn't change results much.
-    if extract_type == "imputations":
-        input_df.update(llm_samples_df, overwrite=False)
-        llm_samples_df = input_df.copy()
+    # Combine original row data with parsed LLM data
+    parsed_row_data: dict[str, Any] = row.to_dict()
+    parsed_row_data.update(parsed_data)
 
-    # if extract_type != "ty_filter":
-    #     llm_samples_df = experiment.discretize(
-    #         llm_samples_df, hard_filter=False, inf=False
-    #     )
-
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    llm_samples_df.to_csv(file_path)
-    return llm_samples_df
+    return parsed_row_data
 
 
-class RelevanceFilterStage(PipelineStage):
-    """Stage for filtering relevant reports."""
-
-    def __init__(self, model_cfg: DictConfig):
-        self.model_cfg = model_cfg
-
-    def process(self, data: pd.DataFrame) -> pd.DataFrame:
-        self.response_format = create_response_format(
-            "RelevanceResponse", ["relevant"], {"relevant": Literal["Yes", "No"]}
-        )
-        filtered_data = asyncio.run(
-            extract_covariates(
-                data,
-                self.experiment,
-                self.source_name,
-                self.outcome,
-                self.model_cfg,
-                self.save_path,
-                "relevance",
-                response_format=self.response_format,
+async def _llm_task_producer(
+    queue: asyncio.Queue,
+    input_df: pd.DataFrame,
+    experiment: Experiment,
+    prompt_type: str,
+    outcome: str,
+    source_name: str,
+    pbar: tqdm,
+) -> None:
+    """Produce prompts for the LLM from the input DataFrame."""
+    for idx, row in input_df.iterrows():
+        try:
+            messages = _prompt_formatter(
+                row, experiment, prompt_type, outcome, source_name
             )
-        )
-        self.data = filtered_data[filtered_data["relevant"].lower() == "yes"]
-        logger.info(f"After relevance filter: {len(self.data)} reports.")
-        return self.data
-
-    def get_stats(self) -> Dict[str, int]:
-        return {"relevant": len(self.data)}
-
-
-class TreatmentOutcomeFilterStage(PipelineStage):
-    """Stage for filtering reports with treatment and outcome information."""
-
-    def __init__(self, model_cfg: DictConfig):
-        self.model_cfg = model_cfg
-
-    def process(self, data: pd.DataFrame) -> pd.DataFrame:
-        self.response_format = create_response_format(
-            "TYFilterResponse", self.experiment.treatment_names + [self.outcome]
-        )
-        ty_samples = asyncio.run(
-            extract_covariates(
-                data,
-                self.experiment,
-                self.source_name,
-                self.outcome,
-                self.model_cfg,
-                self.save_path,
-                "ty_filter",
-                response_format=self.response_format,
+            await queue.put((idx, row, messages))
+        except Exception as e:
+            logging.error(
+                f"Failed to format prompt for report at index {idx}: {type(e).__name__} - {e}",
+                exc_info=True,
             )
-        )
-        self.data = self.experiment.hard_filter_ty(ty_samples)
-        logger.info(f"After treatment-outcome filter: {len(self.data)} reports.")
-        return self.data
-
-    def get_stats(self) -> Dict[str, int]:
-        return {"ty_filtered": len(self.data)}
+            await queue.put((idx, row, None))  # Indicate failure with None
+        finally:
+            pbar.update(1)
 
 
-class KnownsStage(PipelineStage):
-    """Stage for extracting knowns information, allowing 'Unknown' for missing info."""
+async def _prompt_processor(
+    worker_id: int,
+    prompt_queue: asyncio.Queue,
+    result_queue: asyncio.Queue,
+    llm: LM,
+    pbar: tqdm,
+    response_format: BaseModel | None = None,
+) -> int:
+    """Worker function to process prompts.
 
-    def __init__(self, model_cfg: DictConfig):
-        self.model_cfg = model_cfg
+    This function calls the LLM with formatted prompts and processes the results.
+    """
+    error_count = 0
+    while True:
+        index, row, messages = await prompt_queue.get()
+        if index is None and row is None:
+            break
 
-    def process(self, data: pd.DataFrame) -> pd.DataFrame:
-        self.response_format = create_response_format(
-            "KnownsResponse", self.experiment.covariate_names
-        )
-        self.data = asyncio.run(
-            extract_covariates(
-                data,
-                self.experiment,
-                self.source_name,
-                self.outcome,
-                self.model_cfg,
-                self.save_path,
-                "knowns",
-                response_format=self.response_format,
+        try:
+            if messages is None:  # prompt formatting failed
+                logging.error(
+                    f"Worker {worker_id} received None messages for item at index {index}"
+                )
+                error_count += 1
+                await result_queue.put(False)  # Signal failure to writer
+                continue
+
+            result = await llm(
+                messages=messages,
+                response_format=response_format or {"type": "json_object"},
             )
-        )
-        self.data = self.experiment.hard_filter_inclusion(data)
-        logger.info(f"After inclusion filter: {len(self.data)} reports.")
-        return self.data
-
-    def get_stats(self) -> Dict[str, int]:
-        return {"inclusion_filtered": len(self.data)}
-
-
-class ImputationsStage(PipelineStage):
-    """Stage for imputing missing information."""
-
-    def __init__(self, model_cfg: DictConfig):
-        self.model_cfg = model_cfg
-
-    def process(self, data: pd.DataFrame) -> pd.DataFrame:
-        self.response_format = create_response_format(
-            "ImputationsResponse",
-            self.experiment.covariate_names,  # TODO: include treatment according ot extract_type
-        )
-        self.data = asyncio.run(
-            extract_covariates(
-                data,
-                self.experiment,
-                self.source_name,
-                self.outcome,
-                self.model_cfg,
-                self.save_path,
-                "imputations",
-                response_format=self.response_format,
+            processed_result = _result_processor(
+                row, result, response_format=response_format
             )
-        )
-        # Drop rows with missing covariates even after imputation
-        # self.data = self.data.dropna(
-        #     subset=self.experiment.covariate_names
-        # ).reset_index(drop=True)
-        logger.info(f"Final: {len(self.data)} reports after imputation.")
-        return self.data
 
-    def get_stats(self) -> Dict[str, int]:
-        return {"final": len(self.data)}
+            if processed_result is not None:
+                await result_queue.put(processed_result)
+            else:
+                logging.warning(
+                    f"Worker {worker_id} received None result for item at index {index}"
+                )
+                await result_queue.put(False)  # Signal failure to writer
+
+        except Exception as e:
+            logging.error(
+                f"Worker {worker_id} failed on item at index {index}: {type(e).__name__} - {e}",
+                exc_info=True,
+            )
+            error_count += 1
+            await result_queue.put(False)  # Signal failure
+        finally:
+            pbar.update(1)
+            prompt_queue.task_done()
+
+    return error_count
+
+
+async def _csv_writer(
+    result_queue: asyncio.Queue,
+    output_filepath: str,
+    pbar: tqdm,
+    flush_interval: float = 5.0,
+) -> int:
+    """Asynchronously write results to a CSV file."""
+    success_count = 0
+    last_flush_time = asyncio.get_event_loop().time()
+    fieldnames = None
+
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+
+    try:
+        async with aiofiles.open(
+            output_filepath, mode="w", newline="", encoding="utf-8"
+        ) as csvfile:
+            writer = None
+            while True:
+                try:
+                    result: dict[str, Any] | False | None = await asyncio.wait_for(
+                        result_queue.get(), timeout=flush_interval
+                    )
+                except asyncio.TimeoutError:  # Timeout reached, flush the file
+                    if writer is not None:
+                        await csvfile.flush()
+                    continue
+
+                try:
+                    if result is None:  # Termination signal
+                        logger.debug("CSV writer received termination signal.")
+                        break
+
+                    if result is False:  # Processing error
+                        logger.debug("Received False result from processing.")
+                        continue
+
+                    if writer is None:
+                        fieldnames = list(result.keys())
+                        # Create header row
+                        header_row = ["index"] + fieldnames
+                        header_line = (
+                            ",".join(f'"{field}"' for field in header_row) + "\n"
+                        )
+                        await csvfile.write(header_line)
+                        writer = (
+                            True  # Just use as a flag that we've written the header
+                        )
+
+                    # Create the row data
+                    row_data = {"index": success_count, **result}
+
+                    # Format the row with proper CSV quoting
+                    row_values = []
+                    for field in ["index"] + fieldnames:
+                        value = str(row_data.get(field, ""))
+                        # Escape quotes and wrap in quotes
+                        escaped_value = value.replace('"', '""')
+                        row_values.append(f'"{escaped_value}"')
+
+                    row_line = ",".join(row_values) + "\n"
+                    await csvfile.write(row_line)
+
+                    success_count += 1
+                    pbar.update(1)
+
+                    # Periodic flush
+                    current_time = asyncio.get_event_loop().time()
+                    if (current_time - last_flush_time) >= flush_interval:
+                        await csvfile.flush()
+                        last_flush_time = current_time
+                finally:
+                    result_queue.task_done()
+
+        # Final flush happens automatically when exiting the async context manager
+
+    except Exception as e:
+        logger.error(f"Error writing to CSV file {output_filepath}: {e}", exc_info=True)
+    finally:
+        pbar.close()
+
+    return success_count

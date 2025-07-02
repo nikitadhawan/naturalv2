@@ -149,8 +149,7 @@ class Experiment:
         self, extractions: pd.DataFrame, t_col: str, y_col: str, outcome: str
     ) -> pd.DataFrame:
         return extractions[
-            extractions[y_col].isin(self.options[outcome])
-            & extractions[t_col].isin(self.options["treatment"])
+            extractions[y_col].isin(self.options[outcome]) & extractions[t_col] == "Yes"
         ]
 
     def hard_filter_inclusion(self, extractions: pd.DataFrame) -> pd.DataFrame:
@@ -163,39 +162,82 @@ class Experiment:
     def discretize(
         self, extractions: pd.DataFrame, t_col: str, y_col: str
     ) -> pd.DataFrame:
-        # extractions = extractions.map(
-        #     lambda x: np.nan if x in ["Unknown", "unknown"] else x
-        # )
-        for cov in self.covariate_names:
-            all_answers = extractions[cov].unique()
-            if len(all_answers) > 10:
-                extractions[cov] = pd.to_numeric(extractions[cov], errors="coerce")
-                quant_50 = extractions[cov].describe()["50%"]
-                extractions.loc[extractions[cov] <= quant_50, cov] = 0
-                extractions.loc[extractions[cov] > quant_50, cov] = 1
-                self.options.update(
-                    {
-                        cov: [
-                            f"Less than or equal to {quant_50}",
-                            f"Greater than {quant_50}",
-                        ]
-                    }
+        for covariate in self.covariate_names:
+            covariate_data = extractions[covariate]
+            all_answers = extractions[covariate].unique()
+
+            if len(all_answers) > 10:  # many unique values, convert to binary
+                # Try to convert to numeric first
+                numeric_series = pd.to_numeric(covariate_data, errors="coerce")
+
+                if (
+                    numeric_series.notna().sum() > len(extractions) * 0.5
+                ):  # mostly numeric
+                    quant_50 = numeric_series.describe()["50%"]
+                    binary_codes = (numeric_series > quant_50).astype(int)
+                    extractions[covariate] = binary_codes
+
+                    self.options.update(
+                        {
+                            covariate: [
+                                f"Less than or equal to {quant_50}",
+                                f"Greater than {quant_50}",
+                            ]
+                        }
+                    )
+                else:  # mostly non-numeric strings, use frequency-based approach
+                    # Get top N most frequent values and group rest as "Other"
+                    value_counts = covariate_data.value_counts()
+                    top_values = value_counts.head(9).index.tolist()
+
+                    # Replace infrequent values with "Other"
+                    extractions.loc[~covariate_data.isin(top_values), covariate] = (
+                        "Other"
+                    )
+
+                    # Convert to categorical
+                    updated_answers = covariate_data.unique()
+                    codes, options = self._convert_to_categorical(
+                        covariate_data, updated_answers
+                    )
+                    extractions[covariate] = codes
+                    self.options[covariate] = options
+
+            else:  # few unique values, convert to categorical
+                codes, options = self._convert_to_categorical(
+                    covariate_data, all_answers
                 )
-            else:
-                self.options.update({cov: list(all_answers)})
-                cov_map = {name: i for (i, name) in enumerate(self.options[cov])}
-                extractions[cov] = extractions[cov].replace(cov_map)
+                extractions[covariate] = codes
+                self.options[covariate] = options
 
-        binary_map_num = {"No": 0, "Yes": 1}
+        # Convert binary columns to numerical encoding
+        binary_map_num = {"no": 0, "yes": 1}
         for feat in self.extended_covariate_names + [y_col]:
-            extractions[feat] = extractions[feat].replace(binary_map_num)
+            if feat in extractions.columns:
+                extractions[feat] = extractions[feat].str.lower().map(binary_map_num)
 
-        treatment_map = {name: i for (i, name) in enumerate(self.treatment_names)}
-        extractions["treatment"] = extractions[t_col].replace(treatment_map)
+        # Convert treatment column to categorical encoding
+        codes, options = self._convert_to_categorical(
+            extractions[t_col], self.treatment_names
+        )
+        extractions[t_col] = codes
+        self.options["treatment"] = options
 
         self._set_transforms()
 
         return extractions
+
+    @staticmethod
+    def _convert_to_categorical(
+        col_data: pd.Series, all_answers: list[str] | None = None
+    ) -> tuple[pd.Series, list[str]]:
+        """Convert column to categorical encoding and update options."""
+        if all_answers is None:
+            all_answers = col_data.unique()
+
+        codes, valid_answers = pd.factorize(col_data, use_na_sentinel=True, sort=True)
+
+        return codes, valid_answers.to_list()
 
     def _set_outcome_treatment_effects(self, trial: ClinicalTrial) -> None:
         self.outcome_treatment: list[tuple[str, tuple[str, str]]] = []
@@ -333,7 +375,7 @@ class Experiment:
         binary_map_lang = {0: "No", 1: "Yes"}
 
         self.numerical_repr = {
-            "treatment": {name: i for (i, name) in enumerate(self.treatment_names)}
+            "treatment": {name: i for (i, name) in enumerate(self.options["treatment"])}
         }
         self.numerical_repr.update(dict.fromkeys(self.outcome_names, binary_map_num))
         self.numerical_repr.update(
@@ -346,12 +388,12 @@ class Experiment:
             }
         )
 
-        self.language_repr = dict(enumerate(self.treatment_names))
+        self.language_repr = dict(enumerate(self.options["treatment"]))
         self.language_repr.update(dict.fromkeys(self.outcome_names, binary_map_lang))
         self.language_repr.update(
             dict.fromkeys(self.extended_covariate_names, binary_map_lang)
         )
-        self.numerical_repr.update(
+        self.language_repr.update(
             {cov: dict(enumerate(self.options[cov])) for cov in self.covariate_names}
         )
 

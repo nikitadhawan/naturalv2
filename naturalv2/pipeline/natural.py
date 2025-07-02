@@ -225,6 +225,8 @@ class NATURALPipeline:
 
                     stage.add_stat("data_count", len(current_data))
                     stage.add_stat("model_name", stage._model_name)
+                    stage.add_stat("model_request_params", stage.llm._request_params)
+                    # TODO: add prompt template to stats
                     stage_stats = stage.get_stats()
                     logger.info(
                         f"Stage {stage.stage_name} completed successfully. "

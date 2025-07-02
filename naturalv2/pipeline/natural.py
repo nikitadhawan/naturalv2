@@ -16,6 +16,9 @@ from naturalv2.models.lm import LM
 
 logger = logging.getLogger(__name__)
 
+TREAMENT_COL_NAME = "treatment_taken"
+OUTCOME_COL_NAME = "is_outcome_mentioned"
+
 
 class ProcessingError(Exception):
     """Exception raised when there is an error in processing a stage in the pipeline."""
@@ -69,6 +72,7 @@ class PipelineStage(ABC):
         self.model_cfg = model_cfg
         self._llm: LM | None = None
         self._model_name: str = model_cfg.get("model_name", "")
+        self._stats: dict[str, Any] = {}
 
     @property
     def stage_name(self) -> str:
@@ -108,10 +112,24 @@ class PipelineStage(ABC):
         """
         pass
 
-    @abstractmethod
     def get_stats(self) -> dict[str, Any]:
-        """Return statistics about the stage's processing."""
-        pass
+        """Return a dictionary of statistics collected during processing."""
+        if "cost" not in self._stats:
+            self._stats["cost"] = self.llm.cost
+
+        return self._stats
+
+    def add_stat(self, key: str, value: Any) -> None:
+        """Add a statistic to the stage's stats dictionary.
+
+        Parameters
+        ----------
+        key : str
+            The key for the statistic.
+        value : Any
+            The value of the statistic.
+        """
+        self._stats[key] = value
 
     def validate_input(self, data: pd.DataFrame) -> None:
         """Validate input data. Override for stage-specific validation.
@@ -165,6 +183,7 @@ class NATURALPipeline:
             end_time = time.monotonic()
             duration = end_time - start_time
             logger.info(f"Stage {stage.stage_name} took {duration:.2f} seconds.")
+            stage.add_stat("processing_time", f"{duration:.2f} seconds")
 
     async def run(
         self, input_df: pd.DataFrame, context: PipelineContext
@@ -204,6 +223,8 @@ class NATURALPipeline:
                 async with self._log_time(stage) as _:
                     current_data = await stage.process(current_data, context)
 
+                    stage.add_stat("data_count", len(current_data))
+                    stage.add_stat("model_name", stage._model_name)
                     stage_stats = stage.get_stats()
                     logger.info(
                         f"Stage {stage.stage_name} completed successfully. "

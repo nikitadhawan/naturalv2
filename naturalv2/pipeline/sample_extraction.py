@@ -17,7 +17,12 @@ from naturalv2.models.lm import (
     build_lm_instance_from_cfg,
     get_message_content,
 )
-from naturalv2.pipeline.natural import PipelineContext, PipelineStage
+from naturalv2.pipeline.natural import (
+    OUTCOME_COL_NAME,
+    TREAMENT_COL_NAME,
+    PipelineContext,
+    PipelineStage,
+)
 from naturalv2.utils import create_response_format, get_save_path
 
 
@@ -33,8 +38,8 @@ class ExtractType(str, Enum):
     IMPUTATIONS = "imputations"
 
 
-class CovariateExtractionStage(PipelineStage):
-    """Base class for stages that extract covariates from reports.
+class SampleExtractionStage(PipelineStage):
+    """Base class for stages that extract information from reports.
 
     This class provides a common interface for stages that process reports
     to extract information about relevance, treatment, outcome, known covariates,
@@ -81,21 +86,8 @@ class CovariateExtractionStage(PipelineStage):
         """Process the input data and return transformed data."""
         raise NotImplementedError("Subclasses must implement the process method.")
 
-    def get_stats(self) -> dict[str, Any]:
-        """Return statistics about the processed data.
 
-        Returns
-        -------
-        dict[str, Any]
-            A dictionary containing statistics about the processed data.
-        """
-        return {
-            "count": len(self.data) if self.data is not None else 0,
-            "cost": self.llm.cost,
-        }
-
-
-class RelevanceFilterStage(CovariateExtractionStage):
+class RelevanceFilterStage(SampleExtractionStage):
     """Stage for filtering relevant reports.
 
     At this stage, an LLM is asked to determine if a report is relevant to a
@@ -171,7 +163,7 @@ class RelevanceFilterStage(CovariateExtractionStage):
         return self.data
 
 
-class TreatmentOutcomeFilterStage(CovariateExtractionStage):
+class TreatmentOutcomeFilterStage(SampleExtractionStage):
     """Stage for filtering reports with treatment and outcome information.
 
     In this stage, an LLM is used to determine the treatment taken and whether
@@ -231,10 +223,10 @@ class TreatmentOutcomeFilterStage(CovariateExtractionStage):
         )
         response_format = create_response_format(
             "TYFilterResponse",
-            ["treatment_taken", "is_outcome_mentioned"],
+            [TREAMENT_COL_NAME, OUTCOME_COL_NAME],
             types={
-                "treatment_taken": Literal[*treatment_options],
-                "is_outcome_mentioned": Literal["Yes", "No"],
+                TREAMENT_COL_NAME: Literal[*treatment_options],
+                OUTCOME_COL_NAME: Literal["Yes", "No"],
             },
         )
         ty_samples = await extract_covariates(
@@ -252,15 +244,15 @@ class TreatmentOutcomeFilterStage(CovariateExtractionStage):
 
         self.data = context.experiment.hard_filter_ty(
             ty_samples,
-            t_col="treatment_taken",
-            y_col="is_outcome_mentioned",
+            t_col=TREAMENT_COL_NAME,
+            y_col=OUTCOME_COL_NAME,
             outcome=context.outcome,
         )
         logger.info(f"After treatment-outcome filter: {len(self.data)} reports.")
         return self.data
 
 
-class KnownsStage(CovariateExtractionStage):
+class KnownsStage(SampleExtractionStage):
     """Stage for extracting known covariates.
 
     In this stage, an LLM is used to extract known covariates from the reports.
@@ -341,7 +333,7 @@ class KnownsStage(CovariateExtractionStage):
         return self.data
 
 
-class ImputationsStage(CovariateExtractionStage):
+class ImputationsStage(SampleExtractionStage):
     """Stage for imputing missing covariates.
 
     In this stage, an LLM is used to impute missing covariates in the reports.

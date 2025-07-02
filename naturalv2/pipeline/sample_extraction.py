@@ -226,7 +226,7 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
             [TREAMENT_COL_NAME, OUTCOME_COL_NAME],
             types={
                 TREAMENT_COL_NAME: Literal[*treatment_options],
-                OUTCOME_COL_NAME: Literal["Yes", "No"],
+                OUTCOME_COL_NAME: Literal["Yes", "No", "Unknown"],
             },
         )
         ty_samples = await extract_covariates(
@@ -367,14 +367,10 @@ class ImputationsStage(SampleExtractionStage):
     async def process(
         self, data: pd.DataFrame, context: PipelineContext
     ) -> pd.DataFrame:
-        covariate_names = (
-            context.experiment.covariate_names
-            + context.experiment.extended_covariate_names
-        )
         response_format = create_response_format(
             "ImputationsResponse",
-            keys=covariate_names,
-            types={"Duration": int, "Inclusion": Literal["Yes", "No"]},
+            keys=context.experiment.covariate_names,
+            types={"Duration": int},
         )
         self.data = await extract_covariates(
             input_df=data,

@@ -146,10 +146,11 @@ class Experiment:
         return exp
 
     def hard_filter_ty(
-        self, extractions: pd.DataFrame, t_col: str, y_col: str, outcome: str
+        self, extractions: pd.DataFrame, t_col: str, y_col: str
     ) -> pd.DataFrame:
         return extractions[
-            extractions[y_col].isin(self.options[outcome]) & extractions[t_col] == "Yes"
+            extractions[t_col].isin(self.options["treatment"]) & extractions[y_col]
+            == "Yes"
         ]
 
     def hard_filter_inclusion(self, extractions: pd.DataFrame) -> pd.DataFrame:

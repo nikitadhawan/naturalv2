@@ -48,8 +48,8 @@ logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
 
-def weight_by_inclusion(ites: np.ndarray, inclusion_probs: pd.DataFrame) -> np.ndarray:
-    """Weight ITEs by inclusion probabilities.
+def _weight_by_inclusion(ites: np.ndarray, inclusion_probs: pd.DataFrame) -> np.ndarray:
+    """Weight individual treatment effects (ITE) by inclusion probabilities.
 
     Parameters
     ----------
@@ -74,7 +74,7 @@ def weight_by_inclusion(ites: np.ndarray, inclusion_probs: pd.DataFrame) -> np.n
     return np.average(ites, axis=1, weights=probs)
 
 
-def calculate_treatment_effects(
+def _calculate_treatment_effects(
     experiment: Experiment,
     outcome: str,
     estimator: NaturalIPW | NaturalMC | NaturalOI,
@@ -106,7 +106,9 @@ def calculate_treatment_effects(
     else:
         all_ites = estimator.get_individual_treatment_effects(extractions)
 
-    weighted_effects = weight_by_inclusion(all_ites, extractions)  # len: num_treatments
+    weighted_effects = _weight_by_inclusion(
+        all_ites, extractions
+    )  # len: num_treatments
 
     for i, treat1 in enumerate(experiment.treatment_names):
         for j, treat2 in enumerate(experiment.treatment_names):
@@ -226,7 +228,7 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
 
                 # Calculate and save treatment effects
                 estimator = instantiate(cfg.estimator, experiment=experiment)
-                results = calculate_treatment_effects(
+                results = _calculate_treatment_effects(
                     experiment, outcome, estimator, extractions
                 )
 

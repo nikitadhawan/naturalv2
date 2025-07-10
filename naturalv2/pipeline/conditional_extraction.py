@@ -303,7 +303,7 @@ async def extract_conditionals(
             prompt_queue,
             input_df,
             experiment,
-            extract_type.value,
+            extract_type,
             interleaved_options,
             outcome,
             source_name,

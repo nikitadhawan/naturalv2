@@ -1,3 +1,5 @@
+"""Experiment class for managing a clinical trial and related data."""
+
 import logging
 import os
 from ast import literal_eval
@@ -127,8 +129,8 @@ class Experiment:
         self.options.update({TREATMENT_COL_NAME: self.treatment_names})
 
         # Store different representations of the features
-        self.numerical_repr: dict[str, dict[str, int]] | None = None
-        self.language_repr: dict[str, dict[int, str]] | None = None
+        self._numerical_repr: dict[str, dict[str, int]] = {}
+        self._language_repr: dict[str, dict[int, str]] = {}
 
         # Set question prompts for each feature
         self.question_prompts: dict[str, str] = {}
@@ -481,9 +483,9 @@ class Experiment:
         output_dict: dict[str, str] | dict[str, int] = {}
         for field in input_dict:
             field_map = (
-                self.numerical_repr[field]
+                self._numerical_repr[field]
                 if repr_type == "numeric"
-                else self.language_repr[field]
+                else self._language_repr[field]
             )
             output_dict[field] = field_map[input_dict[field]]
         return output_dict
@@ -698,30 +700,30 @@ class Experiment:
         binary_map_num = {"No": 0, "Yes": 1}
         binary_map_lang = {0: "No", 1: "Yes"}
 
-        self.numerical_repr = {
+        self._numerical_repr = {
             TREATMENT_COL_NAME: {
                 name: i for (i, name) in enumerate(self.options[TREATMENT_COL_NAME])
             }
         }
-        self.numerical_repr.update(dict.fromkeys(self.outcome_names, binary_map_num))
-        self.numerical_repr.update(
+        self._numerical_repr.update(dict.fromkeys(self.outcome_names, binary_map_num))
+        self._numerical_repr.update(
             dict.fromkeys(self.extended_covariate_names, binary_map_num)
         )
-        self.numerical_repr.update(
+        self._numerical_repr.update(
             {
                 cov: {name: i for (i, name) in enumerate(self.options[cov])}
                 for cov in self.covariate_names
             }
         )
 
-        self.language_repr = {
+        self._language_repr = {
             TREATMENT_COL_NAME: dict(enumerate(self.options[TREATMENT_COL_NAME]))
         }
-        self.language_repr.update(dict.fromkeys(self.outcome_names, binary_map_lang))
-        self.language_repr.update(
+        self._language_repr.update(dict.fromkeys(self.outcome_names, binary_map_lang))
+        self._language_repr.update(
             dict.fromkeys(self.extended_covariate_names, binary_map_lang)
         )
-        self.language_repr.update(
+        self._language_repr.update(
             {cov: dict(enumerate(self.options[cov])) for cov in self.covariate_names}
         )
 

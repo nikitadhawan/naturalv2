@@ -558,6 +558,8 @@ class Experiment:
 
     def _set_outcome_treatment_effects(self, trial: ClinicalTrial) -> None:
         """Set variables related to outcomes, treatments and their effect sizes."""
+        # NOTE: we use lists instead of tuples in _outcome_treatement because
+        # of YAML serialization issues with tuples
         self._outcome_treatment: list[list[str, list[str, str]]] = []
         self._treatment_desc, self._outcome_desc = {}, {}
 

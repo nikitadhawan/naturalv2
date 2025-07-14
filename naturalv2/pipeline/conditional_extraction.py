@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import build_lm_instance_from_cfg, get_prompt_logprobs
-from naturalv2.pipeline import INCLUSION_COL_NAME, OUTCOME_COL_NAME, TREATMENT_COL_NAME
+from naturalv2.pipeline import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.utils import convert_enum_to_dicts, enumerate_strings, get_save_path
@@ -485,7 +485,7 @@ async def _llm_task_producer(
                 to_sample = (
                     experiment.covariate_names
                     if extract_type == ConditionalsExtractType.TY_GIVEN_X
-                    else experiment.covariate_names + [OUTCOME_COL_NAME]
+                    else experiment.covariate_names + [TREATMENT_COL_NAME]
                 )
 
                 # Add question and answers for covariates to the report
@@ -627,7 +627,7 @@ def _result_processor(
             logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
         logprobs.append(logprob)
 
-    probs = softmax(np.array(logprobs), axis=0)
+    probs: np.ndarray = softmax(np.array(logprobs), axis=0)
     sample_index = np.random.choice(len(probs), p=probs)
 
     # Combine original row data with parsed LLM data

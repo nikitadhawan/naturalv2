@@ -82,7 +82,7 @@ class DifferenceInMeans(object):
         return self
 
     def get_treatment_effects(self, data: CausalData) -> pd.Series:
-        """Calculate individual treatment effects based on the fitted model.
+        """Calculate average treatment effects based on the fitted model.
 
         Parameters
         ----------
@@ -92,7 +92,7 @@ class DifferenceInMeans(object):
         Returns
         -------
         pd.Series
-            A series containing the estimated individual treatment effects.
+            A series containing the estimated average treatment effects.
         """
         data.validate()
 

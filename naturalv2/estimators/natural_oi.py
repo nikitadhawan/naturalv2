@@ -1,5 +1,7 @@
 """Natural Outcome Imputation Estimator."""
 
+from ast import literal_eval
+
 import numpy as np
 import pandas as pd
 
@@ -80,9 +82,9 @@ class NaturalOI:
         ]
 
         conditionals.loc[:, "y_given_tx_probs"] = conditionals.apply(
-            lambda row: np.array(
-                [float(prob) for prob in row["y_given_tx_probs"][1:-1].split()]
-            ).reshape(self._conditional_shape),
+            lambda row: np.array(literal_eval(row["y_given_tx_probs"])).reshape(
+                self._conditional_shape
+            ),
             axis=1,
         )
         # choose probs corresponding to {outcome}

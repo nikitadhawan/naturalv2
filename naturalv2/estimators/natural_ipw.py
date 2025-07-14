@@ -15,7 +15,7 @@ class NaturalIPW:
     This class computes Individual Treatment Effects (ITE) using the IPW method.
     It calculates the propensity scores for each treatment given the covariates
     and uses these scores to estimate the ITEs from the conditional probabilities
-    of outcomes given treatments and covariates.
+    of treatment and outcome given covariates.
 
     Parameters
     ----------
@@ -70,7 +70,7 @@ class NaturalIPW:
         ]  # dataset should have already been discretized and the transforms ready
 
         conditionals.loc[:, "ty_given_x_probs"] = conditionals.apply(
-            lambda row: np.array([ast.literal_eval(row["ty_given_x_probs"])]).reshape(
+            lambda row: np.array(ast.literal_eval(row["ty_given_x_probs"])).reshape(
                 self._conditional_shape
             ),
             axis=1,

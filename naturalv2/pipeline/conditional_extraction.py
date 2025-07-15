@@ -268,6 +268,7 @@ async def extract_conditionals(
     )
 
     if os.path.exists(file_path):
+        logging.info(f"File {file_path} already exists. Loading existing results.")
         return pd.read_csv(file_path, index_col=0)
 
     # Discretize input dataframe
@@ -279,7 +280,7 @@ async def extract_conditionals(
         "y_given_tx": [outcome],
         "inclusion": [INCLUSION_COL_NAME],
     }
-    features_to_enumerate = conditional_feature_mapping[extract_type]
+    features_to_enumerate = conditional_feature_mapping[extract_type.value]
     _, interleaved_options, idx_to_feat = _prepare_for_conditional_extraction(
         experiment, features_to_enumerate
     )
@@ -340,7 +341,6 @@ async def extract_conditionals(
     try:
         # Wait for the producer to finish producing tasks
         await producer_task
-        await prompt_queue.join()  # Ensure all prompts are processed
 
         # Signal workers to stop by putting None in the queue
         for _ in range(len(worker_tasks)):
@@ -353,7 +353,7 @@ async def extract_conditionals(
         for idx, error in enumerate(worker_errors):
             if isinstance(error, int):
                 processing_error_count += error
-            elif isinstance(error, Exception):
+            elif isinstance(error, BaseException):
                 logging.error(
                     f"Worker {idx} encountered an exception: {type(error).__name__} - {error}",
                     exc_info=True,
@@ -366,7 +366,7 @@ async def extract_conditionals(
             f"Processing completed. {success_count} records written, "
             f"{processing_error_count} errors"
         )
-    except Exception as e:
+    except BaseException as e:
         logger.error(f"Error during extraction: {e}", exc_info=True)
         # Cancel any running tasks
         for task in [csv_writer_task, producer_task] + worker_tasks:
@@ -472,7 +472,7 @@ async def _llm_task_producer(
     queue: asyncio.Queue,
     input_df: pd.DataFrame,
     experiment: Experiment,
-    extract_type: ConditionalsExtractType | None,
+    extract_type: ConditionalsExtractType,
     interleaved_mcqa: list[str],
     outcome: str,
     source_name: str,
@@ -541,7 +541,7 @@ async def _prompt_processor(
     prompt_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
     llm: "LM",
-    extract_type: ConditionalsExtractType | None,
+    extract_type: ConditionalsExtractType,
     length_norm: bool,
     index_to_features: list[dict[str, Any]],
     pbar: tqdm,
@@ -555,6 +555,7 @@ async def _prompt_processor(
         try:
             index, row, prompts = await prompt_queue.get()
             if index is None and row is None:
+                prompt_queue.task_done()
                 break
         except asyncio.CancelledError:
             break
@@ -574,7 +575,7 @@ async def _prompt_processor(
             async with asyncio.TaskGroup() as tg:
                 tasks: list[asyncio.Task] = []
                 for prompt in prompts:
-                    tasks.append(tg.create_task(llm(prompt=prompt)))
+                    tasks.append(tg.create_task(llm(prompt=prompt), name="LLM-Call"))
 
             responses: list["ResponseType"] = [task.result() for task in tasks]
             processed_results = _result_processor(
@@ -586,7 +587,7 @@ async def _prompt_processor(
             )
 
             await result_queue.put(processed_results)
-        except* Exception as eg:  # TaskGroup wraps exceptions in ExceptionGroup
+        except BaseExceptionGroup as eg:  # TaskGroup wraps exceptions in ExceptionGroup
             # log all exceptions
             for e in eg.exceptions:
                 logging.error(
@@ -630,9 +631,14 @@ def _result_processor(
     probs: np.ndarray = softmax(np.array(logprobs), axis=0)
     sample_index = np.random.choice(len(probs), p=probs)
 
-    # Combine original row data with parsed LLM data
+    sampled_features = index_to_features[sample_index]
+    sampled_features = {
+        f"{key}_sampled": value for key, value in sampled_features.items()
+    }
+
+    # Add the sampled features to the row data
     parsed_row_data: dict[str, Any] = row.to_dict()
-    parsed_row_data.update(index_to_features[sample_index])
+    parsed_row_data.update(sampled_features)
     parsed_row_data[f"{extract_type.value}_probs"] = probs.tolist()
 
     return parsed_row_data

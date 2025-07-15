@@ -87,7 +87,7 @@ class RelevanceFilterStage(SampleExtractionStage):
     """Stage for filtering relevant reports.
 
     At this stage, an LLM is asked to determine if a report is relevant to a
-    given condition, treatment, outcome or other covariate of interest.
+    given condition, treatment, outcome or other covariates of interest.
     This stage processes the input data to filter out reports that are not relevant
     based on the LLM's response.
 
@@ -517,7 +517,7 @@ async def extract_covariates(
         for idx, error in enumerate(worker_errors):
             if isinstance(error, int):
                 processing_error_count += error
-            elif isinstance(error, Exception):
+            elif isinstance(error, BaseException):
                 logging.error(
                     f"Worker {idx} encountered an exception: {type(error).__name__} - {error}",
                     exc_info=True,
@@ -530,7 +530,7 @@ async def extract_covariates(
             f"Processing completed. {success_count} records written, "
             f"{processing_error_count} errors"
         )
-    except Exception as e:
+    except BaseException as e:
         logger.error(f"Error during extraction: {e}", exc_info=True)
         # Cancel any running tasks
         for task in [csv_writer_task, producer_task] + worker_tasks:
@@ -676,7 +676,7 @@ async def _prompt_processor(
                 )
                 await result_queue.put(False)  # Signal failure to writer
 
-        except Exception as e:
+        except BaseException as e:
             logging.error(
                 f"Worker {worker_id} failed on item at index {index}: {type(e).__name__} - {e}",
                 exc_info=True,

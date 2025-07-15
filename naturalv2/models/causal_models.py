@@ -81,7 +81,7 @@ class DifferenceInMeans(object):
 
         return self
 
-    def get_treatment_effects(self, data: CausalData) -> pd.Series:
+    def get_average_treatment_effects(self, data: CausalData) -> pd.Series:
         """Calculate average treatment effects based on the fitted model.
 
         Parameters
@@ -126,7 +126,7 @@ class IPSW(DifferenceInMeans):
         learner = LogisticRegression(solver="liblinear")
         self._model = IPW(learner=learner)
 
-    def get_treatment_effects(self, data: CausalData) -> pd.Series:
+    def get_individual_treatment_effects(self, data: CausalData) -> pd.Series:
         """Calculate individual treatment effects using the IPSW method.
 
         Parameters
@@ -174,7 +174,7 @@ class OutcomeImputation(DifferenceInMeans):
         learner = LinearRegression()
         self._model = Standardization(learner=learner)
 
-    def get_treatment_effects(self, data: CausalData) -> pd.DataFrame:
+    def get_individual_treatment_effects(self, data: CausalData) -> pd.DataFrame:
         """Calculate individual treatment effects using the Outcome Imputation method.
 
         Parameters

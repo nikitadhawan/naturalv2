@@ -9,10 +9,9 @@ from naturalv2.evals.experiment import Experiment
 from naturalv2.models.causal_models import (
     IPSW,
     CausalData,
-    DifferenceInMeans,
     OutcomeImputation,
 )
-from naturalv2.pipeline import TREATMENT_COL_NAME
+from naturalv2.pipeline import OUTCOME_COL_NAME, TREATMENT_COL_NAME
 
 
 class NaturalMC:
@@ -37,10 +36,7 @@ class NaturalMC:
         self.estimator_type = estimator_type
 
         self._num_treat = len(experiment.treatment_names)
-        self._causal_models: dict[
-            str, type[DifferenceInMeans] | type[IPSW] | type[OutcomeImputation]
-        ] = {
-            # "naive": DifferenceInMeans,
+        self._causal_models: dict[str, type[IPSW] | type[OutcomeImputation]] = {
             "ipw": IPSW,
             "oi": OutcomeImputation,
         }
@@ -69,6 +65,7 @@ class NaturalMC:
             If the treatment column or covariates are not present in the data.
 
         """
+        print(observational_data.columns)
         if TREATMENT_COL_NAME not in observational_data.columns:
             raise ValueError(
                 f"{TREATMENT_COL_NAME} must be in ``observational_data`` columns."
@@ -89,11 +86,11 @@ class NaturalMC:
         data = CausalData(
             X=observational_data[self.experiment.covariate_names].copy(),  # covariates
             T=observational_data[TREATMENT_COL_NAME].copy(),  # treatment
-            Y=observational_data[outcome].copy(),  # outcome
+            Y=observational_data[OUTCOME_COL_NAME].copy(),  # outcome
         )
 
         model.fit(data)
-        individual_outcomes = model.get_treatment_effects(data)
+        individual_outcomes = model.get_individual_treatment_effects(data)
 
         all_ites = np.zeros((self._num_treat, len(observational_data)))
         for t in range(self._num_treat):

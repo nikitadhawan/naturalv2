@@ -121,9 +121,11 @@ class NaturalOI:
         for i in range(len(feat_dicts)):
             features = feat_dicts[i]
             subset = conditionals.copy()
+
             # restrict posts using sampled features
             for key in self._covariate_names:
                 subset = subset.loc[subset[key] == features[key]]
+
             for t in range(self._num_treat):
                 subset_t = subset.loc[subset[TREATMENT_COL_NAME] == t]
 

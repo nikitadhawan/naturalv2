@@ -109,11 +109,14 @@ class Experiment:
                 }
             )
         self.covariate_desc["Duration"] = (
-            "Time period that the patient took treatment for, with units."
+            "The number of days that the treatment was taken (rounded to the nearest integer)."
         )
         self.extended_covariate_names: list[str] = [
             INCLUSION_COL_NAME  # , "Dosage"
         ]  # inclusion-related binary variables
+        self.covariate_desc[INCLUSION_COL_NAME] = (
+            "Whether the report indicates that the individual meets the inclusion criteria."
+        )
 
         # Set treatment and outcome names and common names
         self._set_outcome_treatment_effects(trial)
@@ -338,7 +341,8 @@ class Experiment:
 
             extractions = extractions[
                 extractions[name].str.lower().isin(["yes", "unknown"])
-            ]
+            ].reset_index(drop=True)
+
         return extractions
 
     def discretize(self, extractions: pd.DataFrame) -> pd.DataFrame:

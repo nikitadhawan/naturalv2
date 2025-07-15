@@ -284,9 +284,28 @@ def convert_enum_to_dicts(
 ) -> list[dict[str, str]]:
     return_dcts = []
     for elem in enumerated:
-        separate = [i.split(":") for i in elem.split(",")]
+        separate = _parse_key_value_pairs(elem)
         dct = {}
         for field in range(len(enum_keys)):
-            dct[enum_keys[field]] = separate[field][1][1:]
+            dct[enum_keys[field]] = separate[field][1]
         return_dcts.append(dct)
     return return_dcts
+
+
+def _parse_key_value_pairs(text: str) -> list[list[str]]:
+    """Parse a string containing key-value pairs formatted as "A<digit>: value."""
+    # Split on pattern A<digit>: but keep the delimiter
+    parts = re.split(r"(A\d+):", text)
+
+    # Remove empty strings and strip whitespace
+    parts = [part.strip() for part in parts if part.strip()]
+
+    # Group into pairs
+    result = []
+    for i in range(0, len(parts), 2):
+        if i + 1 < len(parts):
+            key = parts[i]
+            value = parts[i + 1].rstrip(",")  # Remove trailing comma
+            result.append([key, value])
+
+    return result

@@ -269,10 +269,10 @@ async def _get_xml_root(
             raise
 
         # remove api_key from params to avoid logging sensitive information
-        params.pop("api_key", None)
+        log_params = {k: v for k, v in params.items() if k != "api_key"}
         if e.status == 400:
             # Bad request, likely due to missing fulltext; expected in many cases
-            logger.debug(f"Bad request for URL {url} with params {params}: {e.message}")
+            logger.debug(f"Bad request for URL {url} with params {log_params}: {e.message}")
 
         logger.error(
             f"{client_error_msg}: {e.status} - {e.message}, URL: {url}, Params: {params}"

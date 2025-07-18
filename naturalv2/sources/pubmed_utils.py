@@ -282,8 +282,9 @@ async def _get_xml_root(
         logger.error(f"Network error: {e}")
         return None
     except tenacity.RetryError:
-        params.pop("api_key", None)
-        logger.error(f"Retry limit exceeded for URL {url} with params {params}")
+        log_params = params.copy()
+        log_params.pop("api_key", None)
+        logger.error(f"Retry limit exceeded for URL {url} with params {log_params}")
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         return None

@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import string
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -17,7 +16,12 @@ from naturalv2.models.lm import build_lm_instance_from_cfg, get_prompt_logprobs
 from naturalv2.pipeline import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
-from naturalv2.utils import convert_enum_to_dicts, enumerate_strings, get_save_path
+from naturalv2.utils import (
+    convert_enum_to_dicts,
+    enumerate_strings,
+    get_save_path,
+    sanitize_filename,
+)
 
 
 if TYPE_CHECKING:
@@ -257,14 +261,13 @@ async def extract_conditionals(
         return input_df
 
     # Generate save path
-    disallowed_chars = r"[^\w\-.]"
     file_path = get_save_path(
         save_path,
         experiment.nct_id,
         model_name,
-        re.sub(disallowed_chars, "_", f"inclusion_probs_{outcome.lower()}")
+        sanitize_filename(f"inclusion_probs_{outcome.lower()}")
         if extract_type == ConditionalsExtractType.INCLUSION
-        else re.sub(disallowed_chars, "_", f"{extract_type.value}_{outcome}".lower()),
+        else sanitize_filename(f"{extract_type.value}_{outcome}".lower()),
     )
 
     if os.path.exists(file_path):

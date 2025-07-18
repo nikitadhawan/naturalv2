@@ -1,11 +1,16 @@
+import asyncio
 import json
 import logging
 import os
 import re
+from collections.abc import Coroutine
 from itertools import product
 from string import Template
 from typing import Any, Literal
+from urllib import error
 
+import aiohttp
+import tenacity
 from pydantic import BaseModel, create_model
 
 from naturalv2.evals.clinical_trial import (
@@ -309,3 +314,27 @@ def _parse_key_value_pairs(text: str) -> list[list[str]]:
             result.append([key, value])
 
     return result
+
+
+async def concurrency_limited(coro: Coroutine, semaphore: asyncio.Semaphore) -> Any:
+    """Run a coroutine with a concurrency limit using a semaphore."""
+    async with semaphore:
+        return await coro
+
+
+def is_rate_limit_error(exception: BaseException) -> bool:
+    """Check if the exception is a rate limit error (HTTP 429)."""
+    return (
+        isinstance(exception, (error.HTTPError, aiohttp.ClientResponseError))
+        and exception.code == 429
+    )
+
+
+def fallback_return(retry_state: "tenacity.RetryCallState") -> dict[str, Any]:
+    """Returns a dictionary with an error message and the URL that caused the error."""
+    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename by replacing disallowed characters with underscores."""
+    return re.sub(r"[^\w\-.]", "_", filename)

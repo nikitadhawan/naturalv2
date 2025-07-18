@@ -16,8 +16,8 @@ from tqdm.contrib.concurrent import process_map
 from naturalv2.evals.experiment import Experiment
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
-    _get_context_post_df,
     download_sub_data,
+    get_context_post_df,
     get_sub_about_info,
     rule_based_filter,
 )
@@ -464,4 +464,4 @@ def _clean_sub_data(data_path: str, sub: str) -> pd.DataFrame:
     )
     comments = rule_based_filter(comments, "body")
 
-    return _get_context_post_df(submissions, comments)
+    return get_context_post_df(submissions, comments)

@@ -12,7 +12,6 @@ from typing import Any, Generator, Literal, Optional
 from urllib import error, request
 
 import pandas as pd
-import tenacity
 import wget
 import zstandard
 from tenacity import (
@@ -25,6 +24,7 @@ from tenacity import (
 from tqdm.contrib.concurrent import process_map
 
 from naturalv2.sources.anonymizer import Anonymizer
+from naturalv2.utils import fallback_return, is_rate_limit_error
 
 
 warnings.simplefilter("ignore", UserWarning)
@@ -47,21 +47,11 @@ def _get_sub_desc(data: dict[str, Any]) -> Optional[dict[str, str]]:
     return None
 
 
-def _is_rate_limit_error(exception: Exception) -> bool:
-    """Check if the exception is a rate limit error (HTTP 429)."""
-    return isinstance(exception, error.HTTPError) and exception.code == 429
-
-
-def _fallback_return(retry_state: "tenacity.RetryCallState") -> dict[str, Any]:
-    """Returns a dictionary with an error message and the URL that caused the error."""
-    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
-
-
 @retry(
     wait=wait_exponential(multiplier=2.4, min=60, max=120),
     stop=stop_after_attempt(5),
-    retry=retry_if_exception(_is_rate_limit_error),
-    retry_error_callback=_fallback_return,
+    retry=retry_if_exception(is_rate_limit_error),
+    retry_error_callback=fallback_return,
     before_sleep=before_sleep_log(logger, logging.DEBUG),
 )
 def _download_from_url(url_str: str) -> dict[str, Any]:
@@ -495,7 +485,7 @@ def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
     return post_df
 
 
-def _get_context_post_df(
+def get_context_post_df(
     submissions: pd.DataFrame, comments: pd.DataFrame
 ) -> pd.DataFrame:
     """Join submissions and comments DataFrames to create a context post DataFrame."""

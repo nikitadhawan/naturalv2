@@ -217,7 +217,7 @@ def _filter_by_date(adf: pd.DataFrame, date: str, date_col: str) -> pd.DataFrame
     try:
         date_obj = parse(date)
     except Exception as e:
-        logging.error(f"Error parsing date cutoff '{date}': {e}")
+        logger.error(f"Error parsing date cutoff '{date}': {e}")
         return pd.DataFrame()
 
     cutoff_ts = pd.Timestamp(date_obj).timestamp()

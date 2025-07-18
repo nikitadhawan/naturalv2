@@ -142,7 +142,7 @@ class PubMedSet:
             valid_mask = has_treatment & has_outcome
 
             if not valid_mask.any():
-                return save_path, pd.DataFrame()
+                return save_path, 0
 
             # Get valid rows and find specific matches
             result = df[valid_mask].copy()

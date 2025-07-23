@@ -34,6 +34,8 @@ from naturalv2.utils import (
 
 logger = logging.getLogger(__name__)
 
+pd.set_option("future.no_silent_downcasting", True)
+
 
 class Experiment:
     def __init__(
@@ -113,14 +115,14 @@ class Experiment:
             "Duration"
         ] = """The duration of the treatment, represented as an ISO 8601 duration string.
 
-            Format: P[n]W or P[n]DT[n]H[n]M[n]S, where
-                P: Period designator (required).
-                [n]W: Number of weeks.
-                [n]D: Number of days.
-                T: Time designator (required to introduce time components).
-                [n]H: Number of hours.
-                [n]M: Number of minutes.
-                [n]S: Number of seconds.
+            \nFormat: P[n]W or P[n]DT[n]H[n]M[n]S, where
+                \nP: Period designator (required).
+                \n[n]W: Number of weeks.
+                \n[n]D: Number of days.
+                \nT: Time designator (required to introduce time components).
+                \n[n]H: Number of hours.
+                \n[n]M: Number of minutes.
+                \n[n]S: Number of seconds.
             """
         self.extended_covariate_names: list[str] = [
             INCLUSION_COL_NAME  # , "Dosage"
@@ -393,9 +395,12 @@ class Experiment:
         if covariate not in extractions.columns:
             raise ValueError(f"`{covariate}` column is missing from extractions.")
 
-        covariate_data = extractions[covariate]
         if covariate == "Duration":
-            covariate_data = pd.to_timedelta(covariate_data, errors="coerce")
+            extractions[covariate] = pd.to_timedelta(
+                extractions[covariate], errors="coerce"
+            ).astype(str)
+
+        covariate_data = extractions[covariate]
 
         all_answers = covariate_data.unique()
 
@@ -407,7 +412,7 @@ class Experiment:
     def _discretize_many_unique(
         self, extractions: pd.DataFrame, covariate: str, covariate_data: pd.Series
     ) -> None:
-        if pd.api.types.is_timedelta64_dtype(covariate_data):
+        if covariate == "Duration":
             numeric_series = covariate_data
         else:
             numeric_series = pd.to_numeric(covariate_data, errors="coerce")
@@ -416,6 +421,7 @@ class Experiment:
             quant_50 = numeric_series.describe()["50%"]
             binary_codes = (numeric_series > quant_50).astype(int)
             extractions[covariate] = binary_codes
+
             self.options.update(
                 {
                     covariate: [
@@ -429,27 +435,17 @@ class Experiment:
             top_values = value_counts.head(9).index.tolist()
             extractions.loc[~covariate_data.isin(top_values), covariate] = "Other"
             updated_answers = covariate_data.unique()
-            cov_map = {str(name): i for (i, name) in enumerate(updated_answers)}
-            extractions[covariate] = extractions[covariate].replace(cov_map)
 
-            # updated_answers could be string or timedelta64 dtype
-            if pd.api.types.is_timedelta64_dtype(updated_answers):
-                updated_answers = [str(td) for td in updated_answers if pd.notna(td)]
-
-            if pd.api.types.is_string_dtype(updated_answers):
-                self.options.update({covariate: updated_answers.tolist()})
+            cov_map = {name: i for (i, name) in enumerate(updated_answers)}
+            extractions[covariate] = extractions[covariate].replace(cov_map).astype(int)
+            self.options.update({covariate: [str(name) for name in updated_answers]})
 
     def _discretize_few_unique(
         self, extractions: pd.DataFrame, covariate: str, all_answers: np.ndarray
     ) -> None:
-        cov_map = {str(name): i for (i, name) in enumerate(all_answers)}
-        extractions[covariate] = extractions[covariate].replace(cov_map)
-
-        if pd.api.types.is_timedelta64_dtype(all_answers):
-            all_answers = [str(td) for td in all_answers if pd.notna(td)]
-
-        if pd.api.types.is_string_dtype(all_answers):
-            self.options.update({covariate: [str(name) for name in all_answers]})
+        cov_map = {name: i for (i, name) in enumerate(all_answers)}
+        extractions[covariate] = extractions[covariate].replace(cov_map).astype(int)
+        self.options.update({covariate: [str(name) for name in all_answers]})
 
     def _discretize_binary_columns(self, extractions: pd.DataFrame) -> None:
         binary_map_num = {"No": 0, "Yes": 1}
@@ -464,8 +460,8 @@ class Experiment:
                 f"`{TREATMENT_COL_NAME}` column is missing from extractions."
             )
         treatment_map = {name: i for (i, name) in enumerate(self.treatment_names)}
-        extractions[TREATMENT_COL_NAME] = extractions[TREATMENT_COL_NAME].replace(
-            treatment_map
+        extractions[TREATMENT_COL_NAME] = (
+            extractions[TREATMENT_COL_NAME].replace(treatment_map).astype(int)
         )
 
     def apply_transform(

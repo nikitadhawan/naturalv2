@@ -64,3 +64,5 @@ pipeline_stages:
   - _target_: naturalv2.pipeline.conditional_extraction.ConditionalExtractionStage
     model_cfg: ${probs_model}
     max_concurrent_workers: 8
+
+use_imputed_nones: True

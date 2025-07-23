@@ -26,6 +26,29 @@ def load_prompt(
     return_format: Literal["messages", "prompt"] | None = None,
     **user_prompt_format_kwargs: Any,
 ) -> str | list[dict[str, str]]:
+    """Load a prompt from a YAML file and format it with Jinja2.
+
+    Parameters
+    ----------
+    base_dir : str
+        The base directory where the prompt YAML files are located.
+    prompt_type : str
+        The type of prompt to load. This is the filename without the .yaml extension.
+    return_format : str, optional, default=None
+        The format to return the prompt in. Can be 'messages' for a list of dictionaries
+        with 'role' and 'content' keys, 'prompt' for a single string, or None for just the
+        user prompt template.
+    user_prompt_format_kwargs : Any
+        Additional keyword arguments to format the user prompt template with Jinja2.
+
+    Returns
+    -------
+    str | list[dict[str, str]]
+        If return_format is 'messages', returns a list of dictionaries with 'role' and
+        'content' keys. If return_format is 'prompt', returns a single formatted string.
+        If return_format is None, returns just the user prompt template as a string.
+
+    """
     if return_format not in ["messages", "prompt", None]:
         raise ValueError("return_format must be either 'messages', 'prompt', or None.")
 
@@ -89,3 +112,39 @@ def load_prompt(
     logger.debug(f"Returning user prompt template as a string: {user_prompt_template}")
 
     return user_prompt_template
+
+
+def get_common_name_prompts(
+    attribute: Literal["treatment", "outcome"],
+    source: str,
+    **prompt_format_kwargs: Any,
+) -> list[dict[str, str]]:
+    """Get common name prompts based on the attribute.
+
+    Parameters
+    ----------
+    attribute : Literal["treatment", "outcome"]
+        The attribute for which to get the common name prompts.
+    source : str
+        The source/dataset of the prompts, used for loading the correct template.
+    prompt_format_kwargs : Any
+        Additional keyword arguments to format the prompt with Jinja2.
+
+    Returns
+    -------
+    list[dict[str, str]]
+        A list of dictionaries with 'role' and 'content' keys for the common name prompts.
+    """
+    base_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "prompts",
+        "templates",
+    )
+
+    return load_prompt(
+        base_dir,
+        "common_name_treatment" if attribute == "treatment" else "common_name_outcome",
+        return_format="messages",
+        source=source,
+        **prompt_format_kwargs,
+    )

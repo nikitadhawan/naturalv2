@@ -4,7 +4,6 @@ system_prompt: |-
 user_prompt_template: |-
   Based on the clinical trial treatment described below, identify the most common brand names, colloquial terms, common misspellings or alternative names used to refer to this treatment in {{ source }} content.
 
-
   Clinical Trial Title: {{ trial_title }}
   Clinical Trial Treatment and Description:
     {{ keyword }} : {{ treatment_desc[keyword] }}

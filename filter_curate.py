@@ -1,7 +1,6 @@
 """Pipeline for filtering and curating experiments using LLMs."""
 
 import asyncio
-import copy
 import logging
 import os
 from collections import defaultdict
@@ -21,7 +20,7 @@ from tqdm import tqdm
 from create_study import Study
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
-from naturalv2.prompts.utils import jinja_env, load_prompt
+from naturalv2.prompts.utils import get_common_name_prompts, load_prompt
 from naturalv2.sources.pubmed import PubMedSet
 from naturalv2.sources.reddit import RedditSource
 from naturalv2.utils import ListResponse
@@ -231,8 +230,6 @@ class _DataCurator:
         self, experiment_tasks: list[ExperimentTask], source_name: str
     ) -> Iterator[LLMTask]:
         """Generator that yields LLM tasks on demand to save memory"""
-        prompt_dct = self.source_dataset.get_common_name_prompts()
-
         for exp_task in experiment_tasks:
             exp = exp_task.experiment_instance
             nct_id = exp_task.nct_id
@@ -254,19 +251,15 @@ class _DataCurator:
                     # Create unique task ID
                     task_id = f"{nct_id}_{attribute}_{i}_{abs(hash(name)) % 10000}"
 
-                    str_substitutes = {
-                        "keyword": name,
-                        "trial_title": exp.title,
-                    }
+                    str_substitutes = {"keyword": name, "trial_title": exp.title}
                     if attribute == "treatment":
                         str_substitutes["treatment_desc"] = exp.treatment_desc[name]
                     elif attribute == "outcome":
                         str_substitutes["outcome_desc"] = exp.outcome_desc[name]
 
                     # Prepare messages
-                    messages = copy.deepcopy(prompt_dct[attribute])
-                    messages[0]["content"] = jinja_env(messages[0]["content"]).render(
-                        str_substitutes
+                    messages = get_common_name_prompts(
+                        attribute, source_name, str_substitutes
                     )
 
                     yield LLMTask(

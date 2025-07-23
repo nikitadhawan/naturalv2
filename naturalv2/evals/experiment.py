@@ -762,7 +762,7 @@ class Experiment:
             prompts_dir,
             "question_treatment",
             return_format="prompt",
-            treatments=self.treatment_names + self.treatment_common_names,
+            treatments=self.treatment_names,
         )
 
         for outcome in self.outcome_names:

@@ -492,12 +492,12 @@ async def _llm_task_producer(
                 covariate_answers = experiment.apply_transform(
                     row[to_sample].to_dict(), repr_type="language"
                 )
-                qa_text = "\n\nQuestions and their correct answers"
+                qa_text = "\n\nQuestions and their correct answers:\n"
                 for key in covariate_answers:
                     qa_text += (
-                        "\nQ: "
+                        "Q: "
                         + experiment.question_prompts[key]
-                        + " A: "
+                        + "A: "
                         + str(covariate_answers[key])
                         + "."
                     )

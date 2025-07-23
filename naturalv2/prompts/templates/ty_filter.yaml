@@ -1,0 +1,97 @@
+system_prompt: |-
+  You are an expert medical data analyst specializing in treatment outcome extraction from patient reports.
+
+  Your task is to analyze patient reports and identify:
+  1. Whether specific treatments from a predefined list are mentioned.
+  2. Whether treatment outcomes or effects are described.
+
+  You must respond ONLY with a valid JSON object containing your analysis.
+user_prompt_template: |-
+  Analyze the following patient report for treatment and outcome information.
+
+  **Study Context:**
+  - Target Conditions:
+    {%- if conditions is defined %}
+      {%- for condition in conditions %}
+        - {{ condition }}
+      {%- endfor %}
+    {%- else %}
+    {%- raw %}
+      {%- for condition in conditions %}
+        - {{ condition }}
+      {%- endfor %}
+    {%- endraw %}
+    {%- endif %}
+
+  - Target Treatments:
+    {%- if treatments is defined and treatment_desc is defined %}
+      {%- for treatment in treatments %}
+        {%- if treatment in treatment_desc %}
+          - Treatment: {{ treatment }}
+            Description: {{ treatment_desc[treatment] }}
+        {%- else %}
+          - Treatment: {{ treatment }}
+            Description: Standard clinical definition applies
+        {%- endif %}
+      {%- endfor %}
+    {%- else %}
+    {%- raw %}
+      {%- for treatment in treatments %}
+        {%- if treatment in treatment_desc %}
+          - Treatment: {{ treatment }}
+            Description: {{ treatment_desc[treatment] }}
+        {%- else %}
+          - Treatment: {{ treatment }}
+            Description: Standard clinical definition applies
+        {%- endif %}
+      {%- endfor %}
+    {%- endraw %}
+    {%- endif %}
+
+  - Outcome(s) of Interest:
+    {%- if outcome_desc is defined %}
+      {%- for key, value in outcome_desc.items() %}
+        - Outcome: {{ key }}
+          Description: {{ value }}
+      {%- endfor %}
+    {%- else %}
+    {%- raw %}
+      {%- for key, value in outcome_desc.items() %}
+        - Outcome: {{ key }}
+          Description: {{ value }}
+      {%- endfor %}
+    {%- endraw %}
+    {%- endif %}
+
+  - Common Outcome Terms: {{ outcome_common_names }}
+
+  **Report:**
+  ```
+  {{ report }}
+  ```
+
+  Based on the above report and context, extract information about treatments and their outcomes. Consider:
+  - Common names, brand names, and colloquial terms for treatments
+  - Direct statements and reasonable inferences about outcomes
+  - Treatment effects may be described as improvements, worsening, side effects, or lack of change
+  - Outcomes may be mentioned in relation to symptoms, quality of life, or measurable parameters
+
+  **Response Format:**
+  Respond only with a valid JSON object containing the following keys:
+  ```json
+  {
+    "treatment_taken": "[value]",
+    "is_outcome_mentioned": "[value]"
+  }
+  ```
+
+  **Key Definitions and Guidelines:**
+  treatment_taken - The treatment mentioned in the report.
+    - Use exact treatment name from Target Treatments list.
+    - If a common name is mentioned in the report or the treatment name is misspelled, map it to one of the target treatments.
+    - If the report strongly suggests a target treatment was used but doesn't explicitly name it, AND there are contextual clues that make one of the target treatments highly likely, use that treatment name.
+    - Use "None" if no treatment is mentioned and cannot be reasonably inferred.
+
+  is_outcome_mentioned - Does the report describe any effects of the treatment?
+    - "Yes" = There is a mention, description or indicators of the treatment effects (positive, negative, neutral, or mixed) in the report
+    - "No" = No treatment effects are mentioned at all, or only general health status unrelated to treatment is described, or the report does not provide sufficient information to determine treatment effects

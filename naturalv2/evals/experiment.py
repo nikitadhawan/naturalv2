@@ -6,6 +6,7 @@ from ast import literal_eval
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -22,12 +23,12 @@ from naturalv2.evals.clinical_trial import (
     Reference,
 )
 from naturalv2.pipeline import INCLUSION_COL_NAME, OUTCOME_COL_NAME, TREATMENT_COL_NAME
+from naturalv2.prompts.utils import load_prompt
 from naturalv2.utils import (
     check_binary_endpoint,
     check_noncontrol,
     check_nonplacebo,
     get_nested_value,
-    load_prompt,
 )
 
 
@@ -108,9 +109,19 @@ class Experiment:
                     if covariate.description
                 }
             )
-        self.covariate_desc["Duration"] = (
-            "The number of days that the treatment was taken (rounded to the nearest integer)."
-        )
+        self.covariate_desc[
+            "Duration"
+        ] = """The duration of the treatment, represented as an ISO 8601 duration string.
+
+            Format: P[n]W or P[n]DT[n]H[n]M[n]S, where
+                P: Period designator (required).
+                [n]W: Number of weeks.
+                [n]D: Number of days.
+                T: Time designator (required to introduce time components).
+                [n]H: Number of hours.
+                [n]M: Number of minutes.
+                [n]S: Number of seconds.
+            """
         self.extended_covariate_names: list[str] = [
             INCLUSION_COL_NAME  # , "Dosage"
         ]  # inclusion-related binary variables
@@ -350,15 +361,7 @@ class Experiment:
 
         This method converts continuous covariates into binary or categorical
         representations based on the number of unique values. It also converts
-        treatment and outcome columns into numerical encodings. If more than
-        half of the values in a covariate are numeric, it will be discretized
-        into binary based on the median value. If a covariate has more than 10
-        unique values, it will be converted to binary or categorical based on
-        the frequency of values. If a covariate has fewer than 10 unique values,
-        it will be converted to categorical encoding.
-        The method also updates the `self.options` dictionary with the unique
-        string values for each covariate and sets the numerical and language
-        representations for the covariates, treatments, and outcomes.
+        treatment and outcome columns into numerical encodings.
 
         Parameters
         ----------
@@ -377,83 +380,93 @@ class Experiment:
             If the extractions DataFrame does not contain the expected columns
             listed in `covariate_names`, `extended_covariate_names`, `OUTCOME_COL_NAME`
             or `TREATMENT_COL_NAME`.
-
         """
         for covariate in self.covariate_names:
-            if covariate not in extractions.columns:
-                raise ValueError(f"`{covariate}` column is missing from extractions.")
+            self._discretize_covariate(extractions, covariate)
 
-            covariate_data = extractions[covariate]
-            all_answers = extractions[covariate].unique()
+        self._discretize_binary_columns(extractions)
+        self._discretize_treatment_column(extractions)
+        self._set_transforms()
+        return extractions
 
-            if len(all_answers) > 10:  # many unique values, convert to binary
-                # Try to convert to numeric first
-                numeric_series = pd.to_numeric(covariate_data, errors="coerce")
+    def _discretize_covariate(self, extractions: pd.DataFrame, covariate: str) -> None:
+        if covariate not in extractions.columns:
+            raise ValueError(f"`{covariate}` column is missing from extractions.")
 
-                if (
-                    numeric_series.notna().sum() > len(extractions) * 0.5
-                ):  # mostly numeric
-                    quant_50 = numeric_series.describe()["50%"]
-                    binary_codes = (numeric_series > quant_50).astype(int)
-                    extractions[covariate] = binary_codes
+        covariate_data = extractions[covariate]
+        if covariate == "Duration":
+            covariate_data = pd.to_timedelta(covariate_data, errors="coerce")
 
-                    self.options.update(
-                        {
-                            covariate: [
-                                f"Less than or equal to {quant_50}",
-                                f"Greater than {quant_50}",
-                            ]
-                        }
-                    )
-                else:  # mostly non-numeric strings, use frequency-based approach
-                    # Get top N most frequent values and group rest as "Other"
-                    value_counts = covariate_data.value_counts()
-                    top_values = value_counts.head(9).index.tolist()
+        all_answers = covariate_data.unique()
 
-                    # Replace infrequent values with "Other"
-                    extractions.loc[~covariate_data.isin(top_values), covariate] = (
-                        "Other"
-                    )
+        if len(all_answers) > 10:
+            self._discretize_many_unique(extractions, covariate, covariate_data)
+        else:
+            self._discretize_few_unique(extractions, covariate, all_answers)
 
-                    # Convert to categorical
-                    updated_answers = covariate_data.unique()
-                    cov_map = {name: i for (i, name) in enumerate(updated_answers)}
-                    extractions[covariate] = extractions[covariate].replace(cov_map)
+    def _discretize_many_unique(
+        self, extractions: pd.DataFrame, covariate: str, covariate_data: pd.Series
+    ) -> None:
+        if pd.api.types.is_timedelta64_dtype(covariate_data):
+            numeric_series = covariate_data
+        else:
+            numeric_series = pd.to_numeric(covariate_data, errors="coerce")
 
-                    # Only update the options if the covariate values are strings
-                    # and not numeric. When this method is called multiple times,
-                    # this prevents overwriting the options with numeric values.
-                    if pd.api.types.is_string_dtype(updated_answers):
-                        self.options.update({covariate: updated_answers.tolist()})
-            else:  # few unique values, convert to categorical
-                cov_map = {name: i for (i, name) in enumerate(all_answers)}
-                extractions[covariate] = extractions[covariate].replace(cov_map)
+        if numeric_series.notna().sum() > len(extractions) * 0.5:
+            quant_50 = numeric_series.describe()["50%"]
+            binary_codes = (numeric_series > quant_50).astype(int)
+            extractions[covariate] = binary_codes
+            self.options.update(
+                {
+                    covariate: [
+                        f"Less than or equal to {quant_50}",
+                        f"Greater than {quant_50}",
+                    ]
+                }
+            )
+        else:
+            value_counts = covariate_data.value_counts()
+            top_values = value_counts.head(9).index.tolist()
+            extractions.loc[~covariate_data.isin(top_values), covariate] = "Other"
+            updated_answers = covariate_data.unique()
+            cov_map = {str(name): i for (i, name) in enumerate(updated_answers)}
+            extractions[covariate] = extractions[covariate].replace(cov_map)
 
-                if pd.api.types.is_string_dtype(all_answers):
-                    self.options.update({covariate: all_answers.tolist()})
+            # updated_answers could be string or timedelta64 dtype
+            if pd.api.types.is_timedelta64_dtype(updated_answers):
+                updated_answers = [str(td) for td in updated_answers if pd.notna(td)]
 
-        # Convert binary columns to numerical encoding
+            if pd.api.types.is_string_dtype(updated_answers):
+                self.options.update({covariate: updated_answers.tolist()})
+
+    def _discretize_few_unique(
+        self, extractions: pd.DataFrame, covariate: str, all_answers: np.ndarray
+    ) -> None:
+        cov_map = {str(name): i for (i, name) in enumerate(all_answers)}
+        extractions[covariate] = extractions[covariate].replace(cov_map)
+
+        if pd.api.types.is_timedelta64_dtype(all_answers):
+            all_answers = [str(td) for td in all_answers if pd.notna(td)]
+
+        if pd.api.types.is_string_dtype(all_answers):
+            self.options.update({covariate: [str(name) for name in all_answers]})
+
+    def _discretize_binary_columns(self, extractions: pd.DataFrame) -> None:
         binary_map_num = {"No": 0, "Yes": 1}
         for feat in self.extended_covariate_names + [OUTCOME_COL_NAME]:
             if feat not in extractions.columns:
                 raise ValueError(f"`{feat}` column is missing from extractions.")
-
             extractions[feat] = extractions[feat].replace(binary_map_num)
 
-        # Convert treatment column to categorical encoding
+    def _discretize_treatment_column(self, extractions: pd.DataFrame) -> None:
         if TREATMENT_COL_NAME not in extractions.columns:
             raise ValueError(
                 f"`{TREATMENT_COL_NAME}` column is missing from extractions."
             )
-
         treatment_map = {name: i for (i, name) in enumerate(self.treatment_names)}
         extractions[TREATMENT_COL_NAME] = extractions[TREATMENT_COL_NAME].replace(
             treatment_map
         )
-
-        self._set_transforms()
-
-        return extractions
 
     def apply_transform(
         self,
@@ -532,26 +545,19 @@ class Experiment:
             on the `return_format` parameter.
 
         """
-        prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts")
+        prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts" / "templates")
 
         outcome_desc = {outcome: self.outcome_desc[outcome]}
         format_inputs = {
-            "conditions": str(self._conditions),
-            "treatments": str(
-                self.treatment_names + self.treatment_common_names[source_name]
-            ),
+            "conditions": self._conditions,
+            "treatments": self.treatment_names
+            + self.treatment_common_names[source_name],
             "outcome": outcome,
             "outcome_common_names": self.outcome_common_names.get(source_name, []),
-            "covariates": str(self.covariate_names + self.extended_covariate_names),
-            "ty_desc": "".join(
-                [
-                    f"\n{k}: {v}"
-                    for k, v in {**self.treatment_desc, **outcome_desc}.items()
-                ]
-            ),
-            "covariate_desc": "".join(
-                [f"\n{k}: {v}" for k, v in self.covariate_desc.items()]
-            ),
+            "covariates": self.covariate_names + self.extended_covariate_names,
+            "treatment_desc": self.treatment_desc,
+            "outcome_desc": outcome_desc,
+            "covariate_desc": self.covariate_desc,
             "inclusion_criteria": self.inclusion_criteria,
             "report": report,
         }
@@ -742,7 +748,7 @@ class Experiment:
 
     def _set_questions(self) -> None:
         """Set the prompts for each feature in the experiment."""
-        prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts")
+        prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts" / "templates")
 
         self.question_prompts[INCLUSION_COL_NAME] = load_prompt(
             prompts_dir,
@@ -757,7 +763,10 @@ class Experiment:
             )
 
         self.question_prompts[TREATMENT_COL_NAME] = load_prompt(
-            prompts_dir, "question_treatment", return_format="prompt"
+            prompts_dir,
+            "question_treatment",
+            return_format="prompt",
+            treatments=self.treatment_names + self.treatment_common_names,
         )
 
         for outcome in self.outcome_names:

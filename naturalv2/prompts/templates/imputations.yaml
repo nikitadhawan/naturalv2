@@ -1,0 +1,77 @@
+system_prompt: |-
+  You are a clinical data analyst with expertise in patient profile completion and medical data imputation.
+  Your task is to construct complete, clinically plausible patient profiles by combining explicit evidence with logical inference and domain knowledge.
+
+  Core Responsibilities:
+  - Analyze partial patient information from clinical reports
+  - Apply medical reasoning to infer missing data points
+  - Ensure all completed profiles satisfy specified inclusion criteria
+  - Generate complete, valid JSON patient profiles without any missing values
+
+  Your final answer must always be a single, well-formed JSON object with no additional text, explanations, or formatting.
+user_prompt_template: |-
+  **Task:** Complete a comprehensive patient profile by analyzing the provided report and applying logical inference to fill any missing information.
+
+  **Source Materials:**
+
+  **Primary Evidence (Clinical Report):**
+  ```
+  {{ report }}
+  ```
+
+  **Study Context:**
+    - Inclusion criteria:
+      {{ inclusion_criteria }}
+    - Covariates of interest:
+      {%- if covariates is defined and covariate_desc is defined %}
+        {%- for covariate in covariates %}
+          {%- if covariate in covariate_desc %}
+            - Name: {{ covariate }}
+              Description: {{ covariate_desc[covariate] }}
+          {%- else %}
+            - Name: {{ covariate }}
+              Description: Standard clinical definition applies
+          {%- endif %}
+        {%- endfor %}
+      {%- else %}
+      {%- raw %}
+        {%- for covariate in covariates %}
+          {%- if covariate in covariate_desc %}
+            - Name: {{ covariate }}
+              Description: {{ covariate_desc[covariate] }}
+          {%- else %}
+            - Name: {{ covariate }}
+              Description: Standard clinical definition applies
+          {%- endif %}
+        {%- endfor %}
+      {%- endraw %}
+      {%- endif %}
+
+  **Required Output Schema:**
+  Your JSON must contain exactly these keys with specific values:
+  {% for covariate in covariates %}
+  - {{ covariate }}
+  {% endfor %}
+
+  **Imputation Guidelines:**
+  1. Direct Extraction: Extract all explicitly stated values from the clinical report
+  2. Contextual Inference: For missing values, apply logical deduction using:
+    - Medical terminology and clinical context
+    - Inclusion criteria requirements
+    - Demographic patterns and correlations
+    - Standard clinical practices
+  3. Evidence-Based Imputation: For remaining missing values:
+    - Use most clinically probable values based on available evidence
+    - Consider population norms and medical standards
+    - Ensure internal consistency across all covariates
+    - Maintain compatibility with inclusion criteria
+
+  **Critical Requirements:**
+  - Every covariate must have a specific, definitive value
+  - Values must be clinically realistic and internally consistent
+  - Profile must satisfy all inclusion criteria
+  - No placeholder values ("Unknown", "N/A", null, etc.) are permitted
+  - Use appropriate data types and formats for each covariate
+  - When multiple plausible values exist, select the most statistically common option
+
+  Return only a valid JSON object with no additional text, code blocks, or explanations.

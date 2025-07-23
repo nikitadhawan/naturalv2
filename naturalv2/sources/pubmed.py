@@ -6,7 +6,7 @@ import pandas as pd
 from omegaconf import DictConfig
 
 from naturalv2.evals.experiment import Experiment
-from naturalv2.utils import load_prompt
+from naturalv2.prompts.utils import load_prompt
 
 from .pubmed_utils import fetch_articles, search_pubmed
 
@@ -66,9 +66,7 @@ class PubMedSet:
         clean_data_path: str,
     ) -> tuple[str, int]:
         rule_filtered_df = pd.DataFrame()
-        save_path = os.path.join(
-            self.data_path, f"{experiment.nct_id}_pubmed_rule_based.csv"
-        )
+        save_path = os.path.join(self.data_path, f"{experiment.nct_id}_pubmed.csv")
 
         if not os.path.exists(save_path):
             # TODO: curate experiment data
@@ -79,14 +77,29 @@ class PubMedSet:
         return save_path, len(rule_filtered_df)
 
     @staticmethod
-    def get_common_name_prompts() -> dict[str, list[dict[str, str]]]:
+    def get_common_name_prompts(
+        experiment: Experiment,
+    ) -> dict[str, list[dict[str, str]]]:
         base_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "prompts",
+            "templates",
         )
-        t_prompt = load_prompt(
-            base_dir, "common_name_treatment", return_format="messages", source="PubMed"
+
+        t_prompt: list[dict[str, str]] = load_prompt(
+            base_dir,
+            "common_name_treatment",
+            return_format="messages",
+            source="PubMed",
+            trial_title=experiment.title,
+            treatment_desc=experiment.treatment_desc,
         )
-        o_prompt = load_prompt(
-            base_dir, "common_name_outcome", return_format="messages", source="PubMed"
+        o_prompt: list[dict[str, str]] = load_prompt(
+            base_dir,
+            "common_name_outcome",
+            return_format="messages",
+            source="PubMed",
+            trial_title=experiment.title,
+            outcome_desc=experiment.outcome_desc,
         )
         return {"treatment": t_prompt, "outcome": o_prompt}

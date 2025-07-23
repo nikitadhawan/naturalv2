@@ -1,0 +1,24 @@
+system_prompt: |-
+  You are a medical terminology expert specializing in translating clinical outcome terminology into commonly used terms.
+  Focus on identifying how medical outcomes, endpoints, and results are referenced in real-world medical discussions, patient communications, and healthcare literature.
+user_prompt_template: |-
+  Based on the medical outcome from a clinical trial described below, identify the most common alternative terms, colloquial expressions, or synonyms used to refer to this outcome in {{ source }} content.
+
+  Clinical Trial Title: {{ trial_title }}
+  Clinical Trial Outcome and Description:
+  {%- for key, value in outcome_desc.items() %}
+    {%- if value %}
+      {{ key }}: {{ value }}
+    {%- else %}
+      {{ key }}: Not provided
+    {%- endif %}
+  {%- endfor %}
+
+  Here are some guidelines to follow:
+  - Include common synonyms, common misspellings, patient-friendly terms, or clinical abbreviations.
+  - Focus on terms patients, healthcare providers, or researchers would actually use on {{ source }}.
+  - Consider both formal medical language and lay terminology.
+  - If a term is plural, also include its singular version.
+  - Each common name should be a single word. If a common name is a phrase, split the phrase into separate words.
+
+  Return only the Python list with no additional text.

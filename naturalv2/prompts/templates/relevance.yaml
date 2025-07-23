@@ -1,0 +1,81 @@
+system_prompt: |-
+  You are an expert medical researcher interested in reported effects of a treatment on a patient who actually took the treatment.
+  You will be given reports about patients' experiences with treatments, which may or may not be relevant to your study. You may also be given other contextual information related to the report.
+  Your task is to determine the relevance of the reports to your study based on whether they contain information that can answer a set of specific questions.
+  Answer only with Yes or No.
+user_prompt_template: |-
+  Is the following report relevant to your study?
+
+  A given report is relevant to your study if you can use it to answer questions 1, 2 and 3 completely, and ideally, enough information to infer the answer to question 4.
+  1. Is the patient dealing with one the following conditions or related conditions?
+  {%- if conditions is defined %}
+    {%- for condition in conditions %}
+      - {{ condition }}
+    {%- endfor %}
+  {%- else %}
+  {%- raw %}
+    {%- for condition in conditions %}
+      - {{ condition }}
+    {%- endfor %}
+  {%- endraw %}
+  {%- endif %}
+  Related conditions may include subtypes, comorbidities, and clinically similar presentations of the conditions listed above.
+
+  2. Did the patient take one of the following treatments?
+  {%- if treatments is defined and treatment_desc is defined %}
+    {%- for treatment in treatments %}
+      {%- if treatment in treatment_desc %}
+        - Treatment: {{ treatment }}
+          Description: {{ treatment_desc[treatment] }}
+      {%- else %}
+        - Treatment: {{ treatment }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- else %}
+  {%- raw %}
+    {%- for treatment in treatments %}
+      {%- if treatment in treatment_desc %}
+        - Treatment: {{ treatment }}
+          Description: {{ treatment_desc[treatment] }}
+      {%- else %}
+        - Treatment: {{ treatment }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- endraw %}
+  {%- endif %}
+  Consider common names, colloquial terms, and alternative names for the treatments listed above.
+
+  3. Does the report contain information relevant to the following outcome?
+  `{{ outcome }}`
+
+  4. Does the report contain specific information about all of the following patient attributes (either stated directly or reasonably inferable from the text)?
+  {%- if covariates is defined and covariate_desc is defined %}
+    {%- for covariate in covariates %}
+      {%- if covariate in covariate_desc %}
+        - Attribute: {{ covariate }}
+          Description: {{ covariate_desc[covariate] }}
+      {%- else %}
+        - Attribute: {{ covariate }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- else %}
+  {%- raw %}
+    {%- for covariate in covariates %}
+      {%- if covariate in covariate_desc %}
+        - Attribute: {{ covariate }}
+          Description: {{ covariate_desc[covariate] }}
+      {%- else %}
+        - Attribute: {{ covariate }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- endraw %}
+  {%- endif %}
+
+  Report:
+  ```
+  {{ report }}
+  ```

@@ -1,0 +1,66 @@
+system_prompt: |-
+  You are an expert medical data extraction specialist with deep experience in clinical report analysis.
+  Your core task is to extract the specified patient attributes (covariates) from reports, while handling missing, ambiguous, or incomplete data according to strict protocols.
+  Never invent or assume information not present in the source text. You must respond ONLY with a valid JSON object.
+user_prompt_template: |-
+  **Task:** Extract patient covariate values from the report below and structure them into a JSON object.
+
+  **Study Context:**
+  - Target Condition(s):
+    {%- if conditions is defined %}
+      {%- for condition in conditions %}
+        - {{ condition }}
+      {%- endfor %}
+    {%- else %}
+    {%- raw %}
+      {%- for condition in conditions %}
+        - {{ condition }}
+      {%- endfor %}
+    {%- endraw %}
+    {%- endif %}
+
+  - Inclusion Criteria:
+    {{ inclusion_criteria }}
+
+  **Report:**
+  ```
+  {{ report }}
+  ```
+
+  For each of the following covariates, extract the value from the report if it is explicitly stated.
+  {%- if covariates is defined and covariate_desc is defined %}
+    {%- for covariate in covariates %}
+      {%- if covariate in covariate_desc %}
+        - Name: {{ covariate }}
+          Description: {{ covariate_desc[covariate] }}
+      {%- else %}
+        - Name: {{ covariate }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- else %}
+  {%- raw %}
+    {%- for covariate in covariates %}
+      {%- if covariate in covariate_desc %}
+        - Name: {{ covariate }}
+          Description: {{ covariate_desc[covariate] }}
+      {%- else %}
+        - Name: {{ covariate }}
+          Description: Standard clinical definition applies
+      {%- endif %}
+    {%- endfor %}
+  {%- endraw %}
+  {%- endif %}
+
+  **Extraction Rules:**
+  - Evidence-Based Assignment:
+    - Only assign definitive values when there is clear, explicit evidence in the report
+    - Look for direct statements, measurements, or unambiguous descriptions
+    - Consider common names, misspellings, synonyms, medical abbreviations, and alternative terminology
+
+  - Handle Missing Information:
+    - Use "Unknown" when the report contains indirect indicators or contextual clues that strongly suggest a specific value for the covariate, but the value is not explicitly stated. (Example: "I am an Uncle" strongly suggests male sex, but doesn't explicitly state it)
+    - Use "None", or "No" where appropriate, when there is no information in the report - either explicit or inferential - that relates to the covariate at all.
+
+  Return ONLY a valid JSON object with all the covariates as keys and their extracted values as values.
+  Ensure the JSON is well-formed, with no additional text or formatting.

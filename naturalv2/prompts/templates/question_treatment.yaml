@@ -1,0 +1,3 @@
+user_prompt_template: |-
+  Which of the following treatments did the individual described in the report take?
+  {{ treatments }}

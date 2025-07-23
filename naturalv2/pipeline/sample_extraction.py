@@ -215,14 +215,14 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
         treatment_options = (
             context.experiment.treatment_names
             + context.experiment.treatment_common_names[context.source_name]
-            + ["Unknown"]
+            + ["None"]
         )
         response_format = create_response_format(
             "TYFilterResponse",
             [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
             types={
                 TREATMENT_COL_NAME: Literal[*treatment_options],
-                OUTCOME_COL_NAME: Literal["Yes", "No", "Unknown"],
+                OUTCOME_COL_NAME: Literal["Yes", "No"],
             },
         )
         ty_samples = await extract_covariates(
@@ -299,10 +299,10 @@ class KnownsStage(SampleExtractionStage):
         """
         response_format = create_response_format(
             "KnownsResponse",
-            context.experiment.covariate_names
+            keys=context.experiment.covariate_names
             + context.experiment.extended_covariate_names,
-            {
-                "Duration": int | Literal["Unknown"],
+            types={
+                "Duration": str | Literal["Unknown", "None"],
                 INCLUSION_COL_NAME: Literal["Yes", "No", "Unknown"],
             },
         )
@@ -361,7 +361,7 @@ class ImputationsStage(SampleExtractionStage):
         response_format = create_response_format(
             "ImputationsResponse",
             keys=context.experiment.covariate_names,
-            types={"Duration": int},
+            types={"Duration": str},
         )
         self.data = await extract_covariates(
             input_df=data,

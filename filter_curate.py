@@ -8,7 +8,6 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
-from string import Template
 from typing import Iterator, Optional, Union
 
 import hydra
@@ -22,9 +21,10 @@ from tqdm import tqdm
 from create_study import Study
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
+from naturalv2.prompts.utils import jinja_env, load_prompt
 from naturalv2.sources.pubmed import PubMedSet
 from naturalv2.sources.reddit import RedditSource
-from naturalv2.utils import ListResponse, load_prompt
+from naturalv2.utils import ListResponse
 
 
 load_dotenv(".env")
@@ -265,9 +265,9 @@ class _DataCurator:
 
                     # Prepare messages
                     messages = copy.deepcopy(prompt_dct[attribute])
-                    messages[0]["content"] = Template(
-                        messages[0]["content"]
-                    ).safe_substitute(str_substitutes)
+                    messages[0]["content"] = jinja_env(messages[0]["content"]).render(
+                        str_substitutes
+                    )
 
                     yield LLMTask(
                         nct_id=nct_id,
@@ -613,7 +613,7 @@ def _get_keywords_from_llm(
     condition = study.conditions[0]
 
     messages: list[dict[str, str]] = load_prompt(
-        base_dir="naturalv2/prompts",
+        base_dir="naturalv2/prompts/templates",
         prompt_type="conditions_keywords_reddit"
         if source_name.lower() == "reddit"
         else "conditions_keywords_pubmed",

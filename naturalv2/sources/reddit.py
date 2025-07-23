@@ -14,6 +14,7 @@ from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
 from naturalv2.evals.experiment import Experiment
+from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     _get_context_post_df,
@@ -21,7 +22,6 @@ from naturalv2.sources.reddit_utils import (
     get_sub_about_info,
     rule_based_filter,
 )
-from naturalv2.utils import load_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -402,7 +402,9 @@ class RedditSource:
         return result.reset_index(drop=True)
 
     @staticmethod
-    def get_common_name_prompts() -> dict[str, list[dict[str, str]]]:
+    def get_common_name_prompts(
+        experiment: Experiment,
+    ) -> dict[str, list[dict[str, str]]]:
         """Retrieve common name prompts for Reddit.
 
         Returns
@@ -411,13 +413,25 @@ class RedditSource:
             Dictionary containing treatment and outcome prompts for Reddit.
         """
         base_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prompts"
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "prompts",
+            "templates",
         )
         t_prompt: list[dict[str, str]] = load_prompt(
-            base_dir, "common_name_treatment", return_format="messages", source="Reddit"
+            base_dir,
+            "common_name_treatment",
+            return_format="messages",
+            source="Reddit",
+            trial_title=experiment.title,
+            treatment_desc=experiment.treatment_desc,
         )
         o_prompt: list[dict[str, str]] = load_prompt(
-            base_dir, "common_name_outcome", return_format="messages", source="Reddit"
+            base_dir,
+            "common_name_outcome",
+            return_format="messages",
+            source="Reddit",
+            trial_title=experiment.title,
+            outcome_desc=experiment.outcome_desc,
         )
         return {"treatment": t_prompt, "outcome": o_prompt}
 

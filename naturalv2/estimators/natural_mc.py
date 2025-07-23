@@ -35,6 +35,7 @@ class NaturalMC:
         self.experiment = experiment
         self.estimator_type = estimator_type
 
+        self._covariate_names = experiment.covariate_names
         self._num_treat = len(experiment.treatment_names)
         self._causal_models: dict[str, type[IPSW] | type[OutcomeImputation]] = {
             "ipw": IPSW,
@@ -65,7 +66,6 @@ class NaturalMC:
             If the treatment column or covariates are not present in the data.
 
         """
-        print(observational_data.columns)
         if TREATMENT_COL_NAME not in observational_data.columns:
             raise ValueError(
                 f"{TREATMENT_COL_NAME} must be in ``observational_data`` columns."
@@ -73,10 +73,10 @@ class NaturalMC:
 
         if not all(
             covariate in observational_data.columns
-            for covariate in self.experiment.covariate_names
+            for covariate in self._covariate_names
         ):
             raise ValueError(
-                f"All covariates {self.experiment.covariate_names} must be in "
+                f"All covariates {self._covariate_names} must be in "
                 "``observational_data`` columns."
             )
 
@@ -84,7 +84,7 @@ class NaturalMC:
         model = self._causal_models[self.estimator_type]()
 
         data = CausalData(
-            X=observational_data[self.experiment.covariate_names].copy(),  # covariates
+            X=observational_data[self._covariate_names].copy(),  # covariates
             T=observational_data[f"{TREATMENT_COL_NAME}_sampled"].copy(),  # treatment
             Y=observational_data[f"{outcome}_sampled"].copy(),  # outcome
         )

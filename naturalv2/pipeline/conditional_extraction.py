@@ -237,7 +237,7 @@ class InclusionProbStage(ConditionalExtractionStage):
         return self.data
 
 
-async def extract_conditionals(
+async def extract_conditionals(  # noqa: PLR0912
     input_df: pd.DataFrame,
     experiment: Experiment,
     source_name: str,

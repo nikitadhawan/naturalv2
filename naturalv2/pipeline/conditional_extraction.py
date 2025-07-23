@@ -271,8 +271,12 @@ async def extract_conditionals(
         logging.info(f"File {file_path} already exists. Loading existing results.")
         return pd.read_csv(file_path, index_col=0)
 
-    # Discretize input dataframe
-    input_df = experiment.discretize(input_df)
+    # NOTE: We only need to discretize the input once when the first conditional
+    # extraction stage is run. Here we assume that the inclusion stage is run
+    # first, which may not always be the case.
+    if extract_type == ConditionalsExtractType.INCLUSION:
+        # Discretize input dataframe
+        input_df = experiment.discretize(input_df)
 
     # Features to enumerate based on extraction type
     conditional_feature_mapping = {

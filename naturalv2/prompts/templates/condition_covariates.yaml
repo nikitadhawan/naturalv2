@@ -1,7 +1,7 @@
 system_prompt: |-
   You are a medical researcher studying the causal effect of different treatments on outcomes of a disease.
   Your goal is to identify patient characteristics that should be accounted for as confounder variables in the causal analysis?
-user_prompt_template": |-
+user_prompt_template: |-
   Given the following medical study name (MeSH term):
   `{{ condition }}`
 

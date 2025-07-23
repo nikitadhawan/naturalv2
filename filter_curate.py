@@ -260,7 +260,7 @@ class _DataCurator:
 
                     # Prepare messages
                     messages = get_common_name_prompts(
-                        attribute, source_name, str_substitutes
+                        attribute, source_name, **str_substitutes
                     )
 
                     yield LLMTask(

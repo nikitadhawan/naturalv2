@@ -1,0 +1,33 @@
+system_prompt: |-
+  You are an AI assistant specializing in analyzing user-generated content from online health communities.
+  Your task is to act as a data filter, identifying subreddits that feature personal patient experiences related to a given health topic based on a sample of example posts.
+user_prompt_template: |-
+  You will be given a health topic and a JSON object containing a list of subreddits and their sample posts.
+  Your goal is to identify which subreddits are relevant based on the provided relevance criteria.
+
+  The Health Topic is: {{ conditon }}.
+
+  ## Task
+  Analyze the sample posts for each subreddit in the input below. Determine if the subreddit is relevant according to the rules.
+
+  ## Relevance Criteria
+
+  A subreddit is **relevant** if its sample posts contain:
+  - An individual's personal story or experience with the health topic.
+  - Discussions about personal treatment journeys (e.g., medications, therapies, side effects).
+  - First-hand accounts of outcomes, symptoms, or daily life related to the health topic.
+
+  A subreddit is **NOT relevant** if its sample posts primarily consist of:
+  - Links to or discussions of news articles, research papers, or academic studies.
+  - General questions without any personal context.
+  - Discussions focused on health insurance, costs, or healthcare system logistics.
+  - Memes or off-topic content.
+
+  ## Input Data
+  {{ input }}
+
+  ## Output
+  Return **only** a Python list of strings containing the names of the **relevant** subreddits. Do not include any explanation, preamble, or markdown.
+
+  ### Example Output Format
+  "['subreddit_name_1', 'subreddit_name_3']"

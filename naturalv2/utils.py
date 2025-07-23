@@ -1,9 +1,14 @@
+import ast
+import gzip
+import json
 import logging
 import os
 import re
+import xml.etree.ElementTree as ET
 from itertools import product
 from typing import Any
 
+import pandas as pd
 from pydantic import BaseModel, create_model
 
 from naturalv2.evals.clinical_trial import (
@@ -186,6 +191,90 @@ def get_nested_value(data: Any, path: str) -> Any | None:
             return None  # path doesn't exist
 
     return current
+
+
+def _parse_drugbank_xml(file_path: str):
+    with gzip.open(file_path, "rt") as xml_file:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        ns = "{http://www.drugbank.ca}"
+        aliases_dicts = []
+        index_mapping = {}
+
+        # Helper to extract and append text if present
+        def append_text(elem, aliases):
+            if elem is not None and elem.text:
+                aliases.append(elem.text.strip().lower())
+
+        for index, drug in enumerate(root.findall(ns + "drug")):
+            aliases = []
+
+            append_text(drug.find(ns + "name"), aliases)
+
+            synonyms_elem = drug.find(ns + "synonyms")
+            if synonyms_elem is not None:
+                for syn_elem in synonyms_elem.findall(ns + "synonym"):
+                    append_text(syn_elem, aliases)
+
+            products_elem = drug.find(ns + "products")
+            if products_elem is not None:
+                for product_elem in products_elem.findall(ns + "product"):
+                    append_text(product_elem.find(ns + "name"), aliases)
+
+            intl_brands_elem = drug.find(ns + "international-brands")
+            if intl_brands_elem is not None:
+                for intl_brand_elem in intl_brands_elem.findall(
+                    ns + "international-brand"
+                ):
+                    append_text(intl_brand_elem.find(ns + "name"), aliases)
+
+            aliases = list(set(aliases))
+            aliases_dicts.append({"index": index, "alias_list": str(aliases)})
+            for alias in aliases:
+                index_mapping[alias] = index
+
+    return aliases_dicts, index_mapping
+
+
+def get_drugbank_aliases(data_path: str, drug_name: str) -> list[str]:
+    alias_path = os.path.join(data_path, "drugbank_aliases.csv")
+    index_path = os.path.join(data_path, "drugbank_indices.csv")
+    if os.path.exists(alias_path) and os.path.exists(index_path):
+        aliases_df = pd.read_csv(alias_path, index_col=0)
+        with open(index_path, "r") as f:
+            index_mapping = json.load(f)
+    else:
+        file_path = os.path.join(data_path, "full_database.xml.gz")
+        aliases_dicts, index_mapping = _parse_drugbank_xml(file_path)
+        aliases_df = pd.DataFrame(aliases_dicts)
+        aliases_df.to_csv(alias_path)
+        with open(index_path, "w") as f:
+            json.dump(index_mapping, f)
+
+    drug_name = drug_name.lower()
+    drug_index = index_mapping.get(drug_name)
+    aliases = aliases_df.loc[aliases_df["index"] == drug_index]["alias_list"]
+    all_aliases = []
+    for alias_list in aliases:
+        all_aliases += ast.literal_eval(alias_list)
+    return all_aliases
+
+
+def qa_interleaved_enum(q_dct, options_dct, a_enum, to_enum):
+    all_interleaved_options = []
+    alph = ["a) ", "b) ", "c) ", "d) "]
+    for option in a_enum:
+        interleaved_enum = " \n\nMultiple Choice Questions"
+        for num in range(len(to_enum)):
+            key = to_enum[num]
+            interleaved_enum += " \n\nQ: " + q_dct[key]
+            interleaved_enum += " \nOptions: "
+            for i in range(len(options_dct[key])):
+                interleaved_enum += alph[i] + options_dct[key][i] + " "
+            split_option = [i.split(":") for i in option.split(",")]
+            interleaved_enum += " \nA: " + split_option[num][1][1:]
+        all_interleaved_options.append(interleaved_enum)
+    return all_interleaved_options
 
 
 def concatenate_q(dct):

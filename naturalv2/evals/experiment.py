@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from ast import literal_eval
 from pathlib import Path
 from typing import Literal
@@ -28,6 +29,7 @@ from naturalv2.utils import (
     check_binary_endpoint,
     check_noncontrol,
     check_nonplacebo,
+    get_drugbank_aliases,
     get_nested_value,
 )
 
@@ -44,6 +46,7 @@ class Experiment:
         nct_id: str,
         status: Literal["completed", "active"] = "completed",
     ) -> None:
+        self.data_path = data_path
         if status == "active":
             self.trial_path = os.path.join(data_path, f"nct_reports_test/{nct_id}.json")
         else:
@@ -564,137 +567,148 @@ class Experiment:
 
     def _set_outcome_treatment_effects(self, trial: ClinicalTrial) -> None:
         """Set variables related to outcomes, treatments and their effect sizes."""
-        # NOTE: we use lists instead of tuples in _outcome_treatement because
-        # of YAML serialization issues with tuples
         self._outcome_treatment: list[list[str, list[str, str]]] = []
         self._treatment_desc, self._outcome_desc = {}, {}
 
-        if (
-            self.status == "active"
-        ):  # use arm information to find outcome-treatment pairs
-            primary_outcomes: list[Outcome] | None = get_nested_value(
-                trial, "protocolSection.outcomesModule.primaryOutcomes"
-            )
-            arm_groups: list[ArmGroup] | None = get_nested_value(
-                trial, "protocolSection.armsInterventionsModule.armGroups"
-            )
-
-            outcomes: list[Outcome] = [
-                outcome
-                for outcome in primary_outcomes or []
-                if check_binary_endpoint(outcome.measure)
-            ]
-            treatments: list[ArmGroup] = [
-                arm
-                for arm in arm_groups or []
-                if check_noncontrol(arm.type)
-                and check_nonplacebo(arm.interventionNames)
-            ]
-
-            for outcome in outcomes:
-                for i, arm1 in enumerate(treatments):
-                    for j, arm2 in enumerate(treatments):
-                        if i < j:
-                            self._outcome_treatment.append(
-                                [outcome.measure, [arm1.label, arm2.label]]
-                            )
-        else:  # use outcome information to find outcome-treatment pairs
-            trial_outcome_measures: list[OutcomeMeasure] | None = get_nested_value(
-                trial,
-                "resultsSection.outcomeMeasuresModule.outcomeMeasures",
-            )
-            outcomes: list[OutcomeMeasure] = [
-                outcome
-                for outcome in trial_outcome_measures or []
-                if outcome.type == OutcomeMeasureType.PRIMARY
-                and check_binary_endpoint(outcome.title)
-            ]
-
-            treatments: list[MeasureGroup] = []
-            self._effect_sizes: list[float] = []
-
-            for outcome in outcomes:
-                measure_groups: list[MeasureGroup] = [
-                    cohort
-                    for cohort in outcome.groups or []
-                    if check_nonplacebo([cohort.title])
-                ]
-                treatments.extend(measure_groups)
-
-                for i, cohort1 in enumerate(measure_groups):
-                    for j, cohort2 in enumerate(measure_groups):
-                        if i < j:
-                            measure1: Measurement | None = outcome.get_group_stats(
-                                cohort1
-                            )
-                            measure2: Measurement | None = outcome.get_group_stats(
-                                cohort2
-                            )
-
-                            denom1 = literal_eval(
-                                cohort1.extract_denom_value_by_id(outcome.denoms)
-                            )
-                            denom2 = literal_eval(
-                                cohort2.extract_denom_value_by_id(outcome.denoms)
-                            )
-
-                            if (
-                                (measure1 is not None and measure1.value != "None")
-                                and (measure2 is not None and measure2.value != "None")
-                                and (denom1 is not None and denom1 > 0)
-                                and (denom2 is not None and denom2 > 0)
-                            ):
-                                effect1: float = literal_eval(measure1.value)
-                                effect2: float = literal_eval(measure2.value)
-                            else:
-                                continue
-
-                            # divide by cohort size or 100 if result is a percentage
-                            unit = (
-                                outcome.unitOfMeasure.lower()
-                                if outcome.unitOfMeasure
-                                else ""
-                            )
-                            effect1 = (
-                                effect1 / 100 if "percent" in unit else effect1 / denom1
-                            )
-                            effect2 = (
-                                effect2 / 100 if "percent" in unit else effect2 / denom2
-                            )
-                            effect_size = effect2 - effect1  # always cohort2 - cohort1
-
-                            self._outcome_treatment.append(
-                                [outcome.title, [cohort1.title, cohort2.title]]
-                            )
-                            self._effect_sizes.append(effect_size)
+        if self.status == "active":
+            outcomes, treatments = self._get_active_outcomes_treatments(trial)
+            self._build_active_outcome_treatment(outcomes, treatments)
+        else:
+            outcomes, treatments = self._get_completed_outcomes_treatments(trial)
+            self._build_completed_outcome_treatment(outcomes)
 
         self._treatment_names: list[str] = [
-            treatment.title if isinstance(treatment, MeasureGroup) else treatment.label
+            treatment.title if hasattr(treatment, "title") else treatment.label
             for treatment in treatments
         ]
         self._outcome_names: list[str] = [
-            outcome.title if isinstance(outcome, OutcomeMeasure) else outcome.measure
+            outcome.title if hasattr(outcome, "title") else outcome.measure
             for outcome in outcomes
         ]
-        # TODO: maybe use timeframes in question_prompts, e.g.
-        # outcome_q = "What was the patient's reported {out.title}?"
-        # if out.timeFrame: outcome_q.replace("?", "after a duration of {out.timeFrame.split(",")[-1]}?")
+
+        self.drugbank_names: dict[str, list[str]] = {}
+        for drug_name in self._treatment_names:
+            drug_name_stripped = re.sub(
+                r"\s+\d+([./]\d+)*\s*(mg|g|mcg|ug|ml|iu|units|tablets?|capsules?)?\b.*$",
+                "",
+                drug_name,
+                flags=re.IGNORECASE,
+            ).strip()
+            self.drugbank_names[drug_name] = get_drugbank_aliases(
+                self.data_path, drug_name_stripped
+            )
         self._outcome_timeframes: list[str | None] = [
-            outcome.timeFrame for outcome in outcomes
+            getattr(outcome, "timeFrame", None) for outcome in outcomes
         ]
 
         self._treatment_desc = {
-            treatment.title
-            if isinstance(treatment, MeasureGroup)
-            else treatment.label: treatment.description
+            (
+                treatment.title if hasattr(treatment, "title") else treatment.label
+            ): getattr(treatment, "description", None)
             for treatment in treatments
         }
         self._outcome_desc = {
-            outcome.title
-            if isinstance(outcome, OutcomeMeasure)
-            else outcome.measure: outcome.description
+            (outcome.title if hasattr(outcome, "title") else outcome.measure): getattr(
+                outcome, "description", None
+            )
             for outcome in outcomes
         }
+
+    def _get_active_outcomes_treatments(self, trial: ClinicalTrial):
+        primary_outcomes: list[Outcome] | None = get_nested_value(
+            trial, "protocolSection.outcomesModule.primaryOutcomes"
+        )
+        arm_groups: list[ArmGroup] | None = get_nested_value(
+            trial, "protocolSection.armsInterventionsModule.armGroups"
+        )
+        outcomes: list[Outcome] = [
+            outcome
+            for outcome in primary_outcomes or []
+            if check_binary_endpoint(outcome.measure)
+        ]
+        treatments: list[ArmGroup] = [
+            arm
+            for arm in arm_groups or []
+            if check_noncontrol(arm.type) and check_nonplacebo(arm.interventionNames)
+        ]
+        return outcomes, treatments
+
+    def _build_active_outcome_treatment(self, outcomes, treatments):
+        for outcome in outcomes:
+            for i, arm1 in enumerate(treatments):
+                for j, arm2 in enumerate(treatments):
+                    if i < j:
+                        self._outcome_treatment.append(
+                            [outcome.measure, [arm1.label, arm2.label]]
+                        )
+
+    def _get_completed_outcomes_treatments(self, trial: ClinicalTrial):
+        trial_outcome_measures: list[OutcomeMeasure] | None = get_nested_value(
+            trial,
+            "resultsSection.outcomeMeasuresModule.outcomeMeasures",
+        )
+        outcomes: list[OutcomeMeasure] = [
+            outcome
+            for outcome in trial_outcome_measures or []
+            if outcome.type == OutcomeMeasureType.PRIMARY
+            and check_binary_endpoint(outcome.title)
+        ]
+        treatments: list[MeasureGroup] = []
+        self._effect_sizes: list[float] = []
+        for outcome in outcomes:
+            measure_groups: list[MeasureGroup] = [
+                cohort
+                for cohort in outcome.groups or []
+                if check_nonplacebo([cohort.title])
+            ]
+            treatments.extend(measure_groups)
+        return outcomes, treatments
+
+    def _build_completed_outcome_treatment(self, outcomes):
+        self._effect_sizes: list[float] = []
+        for outcome in outcomes:
+            measure_groups: list[MeasureGroup] = [
+                cohort
+                for cohort in getattr(outcome, "groups", []) or []
+                if check_nonplacebo([cohort.title])
+            ]
+            for i, cohort1 in enumerate(measure_groups):
+                for j, cohort2 in enumerate(measure_groups):
+                    if i < j:
+                        measure1: Measurement | None = outcome.get_group_stats(cohort1)
+                        measure2: Measurement | None = outcome.get_group_stats(cohort2)
+                        denom1 = literal_eval(
+                            cohort1.extract_denom_value_by_id(outcome.denoms)
+                        )
+                        denom2 = literal_eval(
+                            cohort2.extract_denom_value_by_id(outcome.denoms)
+                        )
+                        if (
+                            (measure1 is not None and measure1.value != "None")
+                            and (measure2 is not None and measure2.value != "None")
+                            and (denom1 is not None and denom1 > 0)
+                            and (denom2 is not None and denom2 > 0)
+                        ):
+                            effect1: float = literal_eval(measure1.value)
+                            effect2: float = literal_eval(measure2.value)
+                        else:
+                            continue
+                        unit = (
+                            outcome.unitOfMeasure.lower()
+                            if getattr(outcome, "unitOfMeasure", None)
+                            else ""
+                        )
+                        effect1 = (
+                            effect1 / 100 if "percent" in unit else effect1 / denom1
+                        )
+                        effect2 = (
+                            effect2 / 100 if "percent" in unit else effect2 / denom2
+                        )
+                        effect_size = effect2 - effect1
+                        self._outcome_treatment.append(
+                            [outcome.title, [cohort1.title, cohort2.title]]
+                        )
+                        self._effect_sizes.append(effect_size)
 
     def _set_transforms(self) -> None:
         """Set the numerical and language representations for the features.

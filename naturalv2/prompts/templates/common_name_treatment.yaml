@@ -7,11 +7,13 @@ user_prompt_template: |-
   Clinical Trial Title: {{ trial_title }}
   Clinical Trial Treatment and Description:
     {{ keyword }} : {{ treatment_desc[keyword] }}
+  Names found in DrugBank: {{ drugbank_names }}
 
   Here are some guidelines to follow:
   - Include brand names, common misspellings, common abbreviations, or colloquial terms.
   - Focus on terms patients on {{ source }} would actually use.
-  - Each common name should be a single word.
-  - Return at most 10 terms as a Python list.
+  - If a term is plural, also include its singular version.
+  - Each common name should be a single word. If a common name is a phrase, split the phrase into separate words.
+  - Avoid single letters or abbreviations that may be confused with other unrelated words, to minimize false positives.
 
   Return only the Python list with no additional text.

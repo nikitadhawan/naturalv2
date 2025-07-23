@@ -208,12 +208,12 @@ def get_sub_about_info(data_path: str) -> pd.DataFrame:
     if len(subs_list) == 0:
         if os.path.exists(about_csv_path):
             logger.info(
-                "All subreddits already downloaded. Loading existing about CSV file."
+                "All subreddits' about info already downloaded. Loading existing about CSV file."
             )
             return pd.read_csv(about_csv_path, index_col=0)
 
         logger.warning(
-            "All subreddits already downloaded, but no CSV file found. "
+            "All subreddits' about info already downloaded, but no CSV file found. "
             "Creating a new CSV file from the existing JSON files."
         )
         df = _create_about_csv_from_json_files()

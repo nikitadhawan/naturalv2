@@ -20,7 +20,7 @@ from tqdm import tqdm
 from create_study import Study
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
-from naturalv2.prompts.utils import get_common_name_prompts, load_prompt
+from naturalv2.prompts.utils import get_common_name_prompts
 from naturalv2.sources.pubmed import PubMedSet
 from naturalv2.sources.reddit import RedditSource
 from naturalv2.utils import ListResponse
@@ -84,7 +84,7 @@ class StudyDataset:
         sources: list[str],
     ) -> None:
         self.conditions = list(conditions)
-        self.sources = list(sources)
+        self.sources = {source: {} for source in sources}
         self.data_sizes = {}
         self.data_paths = {}
 
@@ -136,7 +136,7 @@ class _DataCurator:
         The source dataset from which experiments are curated.
     study_dataset : StudyDataset
         The dataset for the study containing conditions and sources.
-    clean_path : str
+    clean_paths : list[str]
         Path to the cleaned data directory.
     language_model : LM
         Language model instance used for LLM calls.
@@ -149,14 +149,14 @@ class _DataCurator:
         study: Study,
         source_dataset: Union[RedditSource, PubMedSet],
         study_dataset: StudyDataset,
-        clean_path: str,
+        clean_paths: list[str],
         language_model: LM,
     ):
         self.cfg = cfg
         self.study = study
         self.source_dataset = source_dataset
         self.study_dataset = study_dataset
-        self.clean_path = clean_path
+        self.clean_paths = clean_paths
         self.language_model = language_model
 
         # Simple in-memory tracking
@@ -254,6 +254,7 @@ class _DataCurator:
                     str_substitutes = {"keyword": name, "trial_title": exp.title}
                     if attribute == "treatment":
                         str_substitutes["treatment_desc"] = exp.treatment_desc[name]
+                        str_substitutes["drugbank_names"] = exp.drugbank_names[name]
                     elif attribute == "outcome":
                         str_substitutes["outcome_desc"] = exp.outcome_desc[name]
 
@@ -402,7 +403,9 @@ class _DataCurator:
 
         for result in llm_results.values():
             if result.success and result.common_names:
-                grouped[result.nct_id][result.attribute].extend(result.common_names)
+                grouped[result.nct_id][result.attribute].extend(
+                    result.common_names + [result.name]
+                )  # include original attribute name
 
         # Remove duplicates and convert to regular dict
         final_grouped: dict[str, dict[str, list[str]]] = {}
@@ -426,7 +429,7 @@ class _DataCurator:
             source_dataset,
             study_condition_0,
             cfg_filter_by_date,
-            clean_path,
+            clean_paths,
             experiment_dir,
         ) = args_bundle
 
@@ -436,7 +439,7 @@ class _DataCurator:
         source_dataset: Union[RedditSource, PubMedSet]
         study_condition_0: str
         cfg_filter_by_date: bool
-        clean_path: str
+        clean_paths: list[str]
         experiment_dir: str
 
         experiment_id = f"{exp_task.source_name}_{exp_task.nct_id}"
@@ -451,12 +454,16 @@ class _DataCurator:
                             exp_task.experiment_instance, f"{attribute}_common_names"
                         ).update({exp_task.source_name: common_names})
 
+            # Save the modified experiment object to YAML
+            exp_file = os.path.join(experiment_dir, f"{exp_task.nct_id}.yaml")
+            exp_task.experiment_instance.to_yaml(exp_file)
+
             # Run experiment data curation using the source_dataset instance
             exp_data_path, exp_data_size = source_dataset.curate_experiment_data(
                 exp_task.experiment_instance,
                 study_condition_0,
                 cfg_filter_by_date,
-                clean_path,
+                clean_paths,
             )
 
             # Update experiment source paths on the copied experiment instance
@@ -468,7 +475,6 @@ class _DataCurator:
             )
 
             # Save the modified experiment object to YAML
-            exp_file = os.path.join(experiment_dir, f"{exp_task.nct_id}.yaml")
             exp_task.experiment_instance.to_yaml(exp_file)
 
             return {
@@ -523,7 +529,7 @@ class _DataCurator:
                 self.source_dataset,
                 self.study.conditions[0],
                 self.cfg.filter_by_date,
-                self.clean_path,
+                self.clean_paths,
                 self._experiment_dir,
             )
             tasks_args_bundles.append(args_bundle)
@@ -578,62 +584,12 @@ class _DataCurator:
         return final_results_list
 
 
-def _get_keywords_from_llm(
-    study: Study, source_name: str, lm_cfg: DictConfig
-) -> list[str]:
-    """Extract keywords for a condition using an LLM.
-
-    Parameters
-    ----------
-    study : Study
-        The study object containing conditions.
-    source_name : str
-        Name of the source dataset (e.g., "pubmed", "reddit").
-    lm_cfg : DictConfig
-        Configuration for the language model to use.
-
-    Returns
-    -------
-    list[str]
-        List of keywords extracted by the LLM for the specified condition.
-
-    Raises
-    ------
-    ValueError
-        If the LLM does not return any keywords.
-    """
-    lm = build_lm_instance_from_cfg(lm_cfg)
-    condition = study.conditions[0]
-
-    messages: list[dict[str, str]] = load_prompt(
-        base_dir="naturalv2/prompts/templates",
-        prompt_type="conditions_keywords_reddit"
-        if source_name.lower() == "reddit"
-        else "conditions_keywords_pubmed",
-        return_format="messages",
-        condition=condition,
-    )
-
-    response = lm.call_sync(messages=messages, response_format=ListResponse)
-    keywords = extract_list_response(response)
-    if keywords:
-        final_keywords = keywords[0]
-        logger.info(
-            f"LLM extracted the following keywords for {condition}: {final_keywords}"
-        )
-        return final_keywords
-
-    raise ValueError(
-        "The LLM did not return any keywords. Please check the model and the prompt."
-    )
-
-
 async def _curate_experiments(
     cfg: DictConfig,
     study: Study,
     source_dataset: Union[RedditSource, PubMedSet],
     study_dataset: StudyDataset,
-    clean_path: str,
+    clean_paths: list[str],
     language_model: LM,
     source_name: str,
     train_ncts: list[str],
@@ -642,7 +598,7 @@ async def _curate_experiments(
 ) -> None:
     """Main async function to curate experiments in parallel"""
     curator = _DataCurator(
-        cfg, study, source_dataset, study_dataset, clean_path, language_model
+        cfg, study, source_dataset, study_dataset, clean_paths, language_model
     )
 
     # prepare NCT IDs and splits
@@ -694,7 +650,7 @@ async def _curate_experiments(
 
 @hydra.main(config_path="conf/", config_name="config.yaml", version_base="1.2")
 def main(cfg: DictConfig) -> None:
-    # load study from yaml
+    # Load study from yaml
     study_file = os.path.join(
         cfg.save_path,
         "studies",
@@ -702,12 +658,19 @@ def main(cfg: DictConfig) -> None:
     )
     study = Study.from_yaml(study_file)
 
-    # extract train, val, and test NCT IDs
+    # Extract train, val, and test NCT IDs
     train_ncts = [list(trial.keys())[0] for trial in study.train_trials]
     val_ncts = [list(trial.keys())[0] for trial in study.val_trials]
     test_ncts = [list(trial.keys())[0] for trial in study.test_trials]
 
-    # create study dataset
+    splits = (
+        ["train"] * len(train_ncts)
+        + ["val"] * len(val_ncts)
+        + ["test"] * len(test_ncts)
+    )
+    all_ncts = train_ncts + val_ncts + test_ncts
+
+    # Create study dataset
     study_dataset_file = os.path.join(
         cfg.data_path,
         "studies",
@@ -718,31 +681,37 @@ def main(cfg: DictConfig) -> None:
     else:
         study_dataset = StudyDataset(study.conditions, cfg.sources)
 
-    # initialize sample model
-    sample_model = build_lm_instance_from_cfg(cfg.sample_model)
-
     async def process_all_sources():
         for source_name in cfg.sources:
             source_dataset: Union[RedditSource, PubMedSet] = instantiate(
                 cfg[source_name]
             )
+            study_dataset.data_paths[f"{source_name}_cleaned"] = []
 
-            if f"{source_name}_condition_filtered" not in study_dataset.data_paths:
-                keywords = _get_keywords_from_llm(
-                    study, source_name, cfg[source_name].lm_cfg
-                )
-                condition_filter_paths = source_dataset.condition_filter(keywords)
-                study_dataset.data_paths.update(
-                    {f"{source_name}_condition_filtered": condition_filter_paths}
-                )
+            all_condition_keywords = []
+            for nct_id, split in zip(all_ncts, splits):
+                status = "active" if split == "test" else "completed"
+                exp = Experiment(cfg.data_path, nct_id, status=status)
+                condition_keywords = exp.conditions if exp.conditions else []
+                all_condition_keywords.extend(condition_keywords)
+            all_condition_keywords = list(set(all_condition_keywords))
 
-            if f"{source_name}_cleaned" not in study_dataset.data_paths:
-                clean_path, data_size = source_dataset.clean_data(study.conditions[0])
-                study_dataset.data_paths.update({f"{source_name}_cleaned": clean_path})
-                study_dataset.data_sizes.update({f"{source_name}_cleaned": data_size})
+            # Filter and download data related to condition keywords
+            await source_dataset.condition_filter(
+                all_condition_keywords,
+                study_dataset,
+                study_dataset_file,
+                semaphore_limit=cfg.get("curate_max_concurrency", 100),
+            )
 
+            clean_paths = source_dataset.clean_data()
+            study_dataset.data_paths[f"{source_name}_cleaned"].extend(clean_paths)
             study_dataset.to_yaml(study_dataset_file)
-            clean_path = study_dataset.data_paths[f"{source_name}_cleaned"]
+
+            all_clean_paths = study_dataset.data_paths[f"{source_name}_cleaned"]
+
+            # Use cheap model for common names
+            cheap_model = build_lm_instance_from_cfg(cfg.cheap_model)
 
             # Process experiments in batches with async LLM calls
             await _curate_experiments(
@@ -750,8 +719,8 @@ def main(cfg: DictConfig) -> None:
                 study,
                 source_dataset,
                 study_dataset,
-                clean_path,
-                sample_model,
+                all_clean_paths,
+                cheap_model,
                 source_name,
                 train_ncts,
                 val_ncts,

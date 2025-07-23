@@ -489,6 +489,7 @@ async def extract_covariates(
                 result_queue,
                 llm,
                 worker_pbar,
+                extract_type,
                 response_format=response_format,
             ),
             name=f"Prompt-Processor-{worker_id}",
@@ -572,6 +573,7 @@ def _prompt_formatter(
 def _result_processor(
     row: pd.Series,
     response: ResponseType,
+    extract_type: ExtractType,
     response_format: BaseModel | None = None,
 ) -> dict[str, Any] | None:
     """Process the LLM response and combine it with the original row data."""
@@ -596,6 +598,10 @@ def _result_processor(
             f"Response text: '{response_text[:200]}...'"
         )
         return None  # Signal error
+
+    if extract_type == ExtractType.KNOWNS:
+        # append "_known" to each key in the parsed data
+        parsed_data = {f"{key}_known": value for key, value in parsed_data.items()}
 
     # Combine original row data with parsed LLM data
     parsed_row_data: dict[str, Any] = row.to_dict()
@@ -636,6 +642,7 @@ async def _prompt_processor(
     result_queue: asyncio.Queue,
     llm: LM,
     pbar: tqdm,
+    extract_type: ExtractType,
     response_format: BaseModel | None = None,
 ) -> int:
     """Worker function to process prompts.
@@ -665,7 +672,7 @@ async def _prompt_processor(
                 response_format=response_format or {"type": "json_object"},
             )
             processed_result = _result_processor(
-                row, result, response_format=response_format
+                row, result, extract_type, response_format=response_format
             )
 
             if processed_result is not None:

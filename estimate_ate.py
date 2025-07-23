@@ -79,6 +79,7 @@ def _calculate_treatment_effects(
     outcome: str,
     estimator: NaturalIPW | NaturalMC | NaturalOI,
     extractions: pd.DataFrame,
+    use_imputed_nones: bool = True,
 ) -> list[dict]:
     """Calculate treatment effects for all outcome-treatment pairs.
 
@@ -99,6 +100,12 @@ def _calculate_treatment_effects(
         A list of dictionaries containing the predicted and true ATEs, along with
         absolute errors if available.
     """
+    if not use_imputed_nones:
+        # Filter out rows with ``None`` in any 'known' covariate columns
+        extractions = extractions.dropna(
+            subset=[f"{cov}_known" for cov in experiment.covariate_names]
+        )
+
     result_dicts = []
 
     if isinstance(estimator, NaturalMC):
@@ -229,7 +236,11 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 # Calculate and save treatment effects
                 estimator = instantiate(cfg.estimator, experiment=experiment)
                 results = _calculate_treatment_effects(
-                    experiment, outcome, estimator, extractions
+                    experiment,
+                    outcome,
+                    estimator,
+                    extractions,
+                    cfg.get("use_imputed_nones", True),
                 )
 
                 for result in results:

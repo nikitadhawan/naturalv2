@@ -99,11 +99,11 @@ async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.Dat
             username=os.environ.get("PRAW_USERNAME"),
             user_agent=os.environ.get("PRAW_AGENT"),
         ) as reddit_client:
-            rate_limter = AsyncLimiter(api_rate_limit, 60)
+            rate_limiter = AsyncLimiter(api_rate_limit, 60)
             subreddit_fetch_tasks = [
                 asyncio.create_task(
                     _fetch_sub_about(
-                        subreddit_name, reddit_client, about_jsons_dir, rate_limter
+                        subreddit_name, reddit_client, about_jsons_dir, rate_limiter
                     )
                 )
                 for subreddit_name in remaining_subs
@@ -362,7 +362,39 @@ def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
 def get_context_post_df(
     submissions: pd.DataFrame, comments: pd.DataFrame
 ) -> pd.DataFrame:
-    """Join submissions and comments DataFrames to create a context post DataFrame."""
+    """Join submissions and comments DataFrames to create a context post DataFrame.
+
+    Parameters
+    ----------
+    submissions : pd.DataFrame
+        DataFrame containing submission data with columns:
+        - subreddit
+        - title
+        - selftext
+        - score
+        - created_utc
+        - permalink
+    comments : pd.DataFrame
+        DataFrame containing comment data with columns:
+        - permalink
+        - author
+        - body
+        - score
+        - created_utc
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing the context posts with the following columns:
+        - subreddit
+        - title
+        - initial_post
+        - report
+        - score
+        - date_created
+        - permalink
+        - author_replies (list of replies from the author)
+    """
     submissions = submissions.copy()
     submissions["date_created"] = submissions["created_utc"].astype(int).map(_get_date)
     submissions["submission_permalink"] = submissions["permalink"].map(
@@ -469,7 +501,8 @@ def filter_by_date(
     adf : pd.DataFrame
         The DataFrame to filter.
     cutoff_dt : pd.Timestamp
-        The cutoff date. Only rows with dates on or before this date will be kept.
+        The cutoff timestamp. Only rows with dates on or before this date will
+        be kept.
     date_col : str
         The name of the column in the DataFrame containing date information.
 
@@ -511,11 +544,11 @@ async def _fetch_sub_about(
     subreddit_name: str,
     reddit_client: asyncpraw.Reddit,
     save_dir: str,
-    rate_limter: AsyncLimiter,
+    rate_limiter: AsyncLimiter,
 ) -> dict[str, str | None]:
     """Fetch subreddit about information from Reddit API or local JSON file."""
     about_info = {"subreddit": "error", "description": None, "public_description": None}
-    async with rate_limter:
+    async with rate_limiter:
         try:
             subreddit = await reddit_client.subreddit(subreddit_name, fetch=True)
             if not subreddit.over18:
@@ -562,6 +595,7 @@ async def _fetch_sub_about(
 
 
 def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
+    """Read lines from a zstandard compressed file."""
     with open(file_name, "rb") as file_handle:
         buffer = ""
         reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
@@ -588,6 +622,7 @@ def _read_and_decode(
     previous_chunk: Optional[bytes] = None,
     bytes_read: int = 0,
 ) -> str:
+    """Read and decode a chunk from the zstandard stream."""
     chunk = reader.read(chunk_size)
     bytes_read += chunk_size
 
@@ -616,5 +651,6 @@ def _get_comment_permalink(permalink: str) -> str:
 
 
 def _get_date(utc_timestamp: float) -> str:
+    """Convert a UTC timestamp to a formatted date string."""
     dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
     return dt.strftime("%B %d, %Y")

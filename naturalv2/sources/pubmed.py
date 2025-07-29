@@ -54,7 +54,7 @@ class PubMedSet:
 
         return self.data_files
 
-    def clean_data(self, study_name: str) -> tuple[str, int]:
+    def clean_data(self) -> tuple[str, int]:
         pass
 
     def curate_experiment_data(

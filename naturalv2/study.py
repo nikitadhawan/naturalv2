@@ -1,3 +1,5 @@
+"""Module for managing studies in the NaturalV2 project."""
+
 import logging
 import os
 
@@ -12,26 +14,27 @@ logger = logging.getLogger(__name__)
 
 
 class Study:
+    """Represents a study with retrospective and test trials.
+
+    Parameters
+    ----------
+    retro_trials : list[tuple[str, str | None]]
+        List of tuples containing NCT IDs and their completion dates for
+        retrospective trials.
+    test_trials : list[tuple[str, str | None]]
+        List of tuples containing NCT IDs and their expected completion dates
+        for test trials.
+    cfg : DictConfig
+        Configuration object containing study parameters.
+    """
+
     def __init__(
         self,
         retro_trials: list[tuple[str, str | None]],
         test_trials: list[tuple[str, str | None]],
         cfg: DictConfig,
     ) -> None:
-        """Initialize the Study object with retrospective and test trials.
-
-        Parameters
-        ----------
-        retro_trials : list[tuple[str, str | None]]
-            List of tuples containing NCT IDs and their completion dates for
-            retrospective trials.
-        test_trials : list[tuple[str, str | None]]
-            List of tuples containing NCT IDs and their expected completion dates
-            for test trials.
-        cfg : DictConfig
-            Configuration object containing study parameters.
-
-        """
+        """Initialize the Study object with retrospective and test trials."""
         # order retro_trials by completion date and split into train/val according to train_ratio
         retro_trials.sort(key=lambda x: (x[1] is None, x[1]))
         train_size = int(len(retro_trials) * cfg.train_ratio)
@@ -118,7 +121,8 @@ class Study:
 
         self._log_study_summary()
 
-    def _log_study_summary(self):
+    def _log_study_summary(self) -> None:
+        """Log a summary of the study's configuration and data."""
         logger.info(
             """
             Study created for %s with:
@@ -205,6 +209,7 @@ class StudyDataset:
         conditions: list[str],
         sources: list[str],
     ) -> None:
+        """Initialize the StudyDataset with conditions and sources."""
         self.conditions = list(conditions)
         self.sources = {source: {} for source in sources}
         self.data_sizes = {}
@@ -244,7 +249,21 @@ class StudyDataset:
 
 
 def get_study_filepaths(base_dir: str, condition: str) -> dict[str, str]:
-    """Get file paths for the study and study dataset YAML files."""
+    """Get file paths for the study and study dataset YAML files.
+
+    Parameters
+    ----------
+    base_dir : str
+        The base directory where the study files will be stored.
+    condition : str
+        The condition for which the study files are being created.
+
+    Returns
+    -------
+    dict[str, str]
+        A dictionary containing the file paths for the study and study dataset
+        YAML files under the keys 'study' and 'study_dataset', respectively.
+    """
     # Ensure that base_dir exists
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)

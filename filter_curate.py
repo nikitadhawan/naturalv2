@@ -211,7 +211,7 @@ class _DataCurator:
             List of ``ExperimentTask`` objects to process.
         source_name : str
             Name of the source dataset (e.g., "pubmed", "reddit").
-        semaphore_limit : int
+        semaphore_limit : int, default=10
             Maximum number of concurrent LLM calls.
 
         Returns

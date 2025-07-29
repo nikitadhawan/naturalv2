@@ -1,3 +1,5 @@
+"""Conditional extraction stages of the NATURAL pipeline."""
+
 import asyncio
 import logging
 import os
@@ -70,7 +72,14 @@ class ConditionalExtractionStage(PipelineStage):
         self.max_concurrent_workers = max_concurrent_workers
 
     def get_language_model(self) -> "LM":
-        """Instantiate the language model for conditional extraction."""
+        """Instantiate the language model for conditional extraction.
+
+        Returns
+        -------
+        LM
+            An instance of the language model configured for conditional extraction.
+
+        """
         model = build_lm_instance_from_cfg(self.model_cfg)
 
         # Set mandatory parameters for conditional extraction
@@ -249,7 +258,48 @@ async def extract_conditionals(  # noqa: PLR0912
     length_norm: bool = False,
     max_concurrent_requests: int | None = None,
 ) -> pd.DataFrame:
-    """Extract conditional probabilities from input data."""
+    """Extract conditional probabilities from input data.
+
+    This function computes conditional probabilities based on the specified
+    `extract_type` using an LLM. It prepares the input data, generates prompts,
+    and processes the responses to extract the desired probabilities.
+
+    Parameters
+    ----------
+    input_df : pd.DataFrame
+        Input data containing reports and other features with which to extract
+        conditional probabilities.
+    experiment : Experiment
+        Experiment instance containing the options and methods for the experiment.
+    source_name : str
+        Name of the source from which the data was collected.
+    outcome : str
+        The outcome variable for which the conditional probabilities are computed.
+    llm : LM
+        Language model instance used to compute the conditional probabilities.
+    model_name : str
+        Name of the language model used for conditional extraction.
+    save_path : str
+        Path where the results will be saved.
+    extract_type : ConditionalsExtractType
+        Type of conditional probabilities to extract. Options are:
+        - ConditionalsExtractType.TY_GIVEN_X: P(T,Y|X)
+        - ConditionalsExtractType.Y_GIVEN_TX: P(Y|T,X)
+        - ConditionalsExtractType.INCLUSION: P(X ∈ Inclusion | report)
+        - ConditionalsExtractType.NONE: No extraction needed
+    length_norm : bool, default=False
+        Whether to normalize the log probabilities by the length of the prompt.
+    max_concurrent_requests : int | None, optional, default=None
+        Maximum number of concurrent requests to the LLM. If None, defaults to
+        the minimum of 10 or the number of samples in the input data.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing the original input data with additional columns
+        for the extracted conditional probabilities.
+
+    """
 
     # Return input if no extraction needed
     if extract_type == ConditionalsExtractType.NONE:
@@ -419,25 +469,6 @@ def _prepare_for_conditional_extraction(
     return answer_combinations, interleaved_mcqa, index_to_features
 
 
-def _get_alphabet_labels(n: int) -> list[str]:
-    """Generate alphabet labels for multiple choice options.
-
-    For a given number n, generate labels like a), b), ..., z), aa), ab), etc.
-    """
-    labels = []
-    alphabet = string.ascii_lowercase
-    for i in range(n):
-        label = ""
-        idx = i
-        while True:  # allow for more than 26 labels
-            label = alphabet[idx % 26] + label
-            idx = idx // 26 - 1
-            if idx < 0:
-                break
-        labels.append(f"{label}) ")
-    return labels
-
-
 def _build_interleaved_multiple_choice_questions(
     question_lookup: dict[str, str],
     answer_choices: dict[str, list[str]],
@@ -483,6 +514,13 @@ async def _llm_task_producer(
     source_name: str,
     pbar: tqdm,
 ) -> None:
+    """Produce prompts for the LLM based on the input DataFrame.
+
+    This function formats the input data into prompts for the LLM, including
+    the report text and any relevant covariates or treatment information based on
+    the specified `extract_type`. It handles exceptions during prompt formatting
+    and puts the prompts into the queue for processing by workers.
+    """
     for idx, row in input_df.iterrows():
         try:
             report = row["report"]
@@ -648,3 +686,22 @@ def _result_processor(
     parsed_row_data[f"{extract_type.value}_probs"] = probs.tolist()
 
     return parsed_row_data
+
+
+def _get_alphabet_labels(n: int) -> list[str]:
+    """Generate alphabet labels for multiple choice options.
+
+    For a given number n, generate labels like a), b), ..., z), aa), ab), etc.
+    """
+    labels = []
+    alphabet = string.ascii_lowercase
+    for i in range(n):
+        label = ""
+        idx = i
+        while True:  # allow for more than 26 labels
+            label = alphabet[idx % 26] + label
+            idx = idx // 26 - 1
+            if idx < 0:
+                break
+        labels.append(f"{label}) ")
+    return labels

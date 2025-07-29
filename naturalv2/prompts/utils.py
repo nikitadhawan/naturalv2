@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 class PreserveUndefined(jinja2.Undefined):
     """A custom Jinja2 Undefined class that preserves the name of the undefined variable."""
 
-    def __str__(self):
+    def __str__(self) -> str:
+        """Return a string representation of the undefined variable."""
         return f"{{{{ {self._undefined_name} }}}}"
 
 

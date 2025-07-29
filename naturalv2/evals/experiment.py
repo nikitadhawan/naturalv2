@@ -45,6 +45,104 @@ DRUG_NAME_SANITIZER = re.compile(
 
 
 class Experiment:
+    """Class representing an experiment based on a clinical trial.
+
+    This class encapsulates the details of a clinical trial, including its
+    identification, conditions, treatments, outcomes, and other relevant
+    information. It provides methods to load experiment details from a YAML file,
+    filter extractions based on treatment and outcome, discretize features,
+    apply transformations, and build prompts for reports.
+
+    Parameters
+    ----------
+    data_path : str
+        Path to the directory containing clinical trial JSON files.
+    nct_id : str
+        National Clinical Trial (NCT) ID of the clinical trial.
+    status : Literal["completed", "active"], default="completed"
+        Status of the clinical trial, either "completed" or "active". If "active",
+        the trial is expected to be in progress, and the relevant JSON file will be
+        loaded from the `nct_reports_test` directory. If "completed", it will be
+        loaded from the `nct_reports` directory.
+
+    Attributes
+    ----------
+    data_path : str
+        Path to the directory containing clinical trial JSON files.
+    trial_path : str
+        Path to the JSON file for the clinical trial based on the NCT ID and status.
+    status : Literal["completed", "active"]
+        Status of the clinical trial, either "completed" or "active".
+    studies : list[list[str]]
+        List of studies associated with the clinical trial.
+    nct_id : str
+        National Clinical Trial (NCT) ID of the clinical trial.
+    title : str | None
+        Official title of the clinical trial, or None if not available.
+    date : str | None
+        Completion or results first post date of the clinical trial, or None if not
+        available.
+    trial_keywords : list[str] | None
+        List of keywords associated with the clinical trial, or None if not available.
+    conditions : list[str]
+        List of disease conditions that the clinical trial is focused on.
+    trial_disease_mesh : list[str]
+        List of MeSH terms associated with the disease in the clinical trial.
+    trial_disease_ancestors : list[str]
+        List of MeSH terms that are ancestors of the trial disease.
+    references : list[str]
+        List of references associated with the clinical trial for the experiment.
+    inclusion_criteria : str | None
+        Inclusion/exclusion criteria for the experiment, or None if not available.
+    covariate_names : list[str]
+        List of covariate names used in the experiment.
+    covariate_desc : dict[str, str]
+        Dictionary mapping covariate names to their descriptions. Note that not
+        all covariates have descriptions. "Duration" is always included as a covariate
+        and represents the duration of the treatment in ISO 8601 format.
+    extended_covariate_names : list[str]
+        List of extended covariate names, including inclusion-related binary variables.
+    treatment_names : list[str]
+        List of treatment names used in the experiment.
+    outcome_names : list[str]
+        List of outcome names used in the experiment.
+    outcome_timeframes : list[str | None]
+        List of timeframes for each outcome, or None if not available.
+    outcome_treatment : list[list[str | list[str]]]
+        List of lists containing outcome and treatment pairs, where each pair
+        consists of an outcome name and a list of treatment names.
+    treatment_desc : dict[str, str | None]
+        Dictionary mapping treatment names to their descriptions, or None if not
+        available.
+    outcome_desc : dict[str, str | None]
+        Dictionary mapping outcome names to their descriptions, or None if not
+        available.
+    treatment_common_names : dict[str, list[str]]
+        Dictionary mapping treatment names to their common names, which are
+        alternative names or identifiers for the treatments used in the experiment.
+    outcome_common_names : dict[str, list[str]]
+        Dictionary mapping outcome names to their common names, which are
+        alternative names or identifiers for the outcomes used in the experiment.
+    effect_sizes : list[float]
+        List of effect sizes for each outcome-treatment pair.
+    drugbank_names : dict[str, list[str]]
+        Dictionary mapping treatment names to their DrugBank aliases, which are
+        alternative names or identifiers for the treatments used in the experiment.
+    options : dict[str, list[str]]
+        Dictionary containing expected choices for each feature, including treatments,
+        outcomes, and covariates. The keys are feature names, and the values are lists
+        of possible values for those features.
+    numerical_repr : dict[str, dict[str, int]]
+        Dictionary mapping feature names to their numerical representations,
+        where each feature value is mapped to an integer index.
+    language_repr : dict[str, dict[int, str]]
+        Dictionary mapping feature names to their language representations,
+        where each integer index is mapped to its corresponding feature value.
+    source_paths : dict[str, list]
+        Dictionary storing paths to curated data for the experiment, one per source.
+
+    """
+
     def __init__(
         self,
         data_path: str,
@@ -522,11 +620,24 @@ class Experiment:
         )
 
     def get_question_prompts(self) -> dict[str, str]:
-        """Get the prompts for each feature in the experiment."""
+        """Get the prompts for each feature in the experiment.
+
+        This method loads the question prompts for inclusion criteria, covariates,
+        treatments, and outcomes from the prompt templates directory. The prompts
+        are formatted with the relevant information from the experiment, such as
+        inclusion criteria, covariate names, treatment names, and outcome names.
+
+        Returns
+        -------
+        dict[str, str]
+            A dictionary where keys are feature names (e.g., inclusion criteria,
+            covariates, treatments, outcomes) and values are the corresponding
+            formatted question prompts.
+        """
         prompts_dir = str(Path(__file__).resolve().parents[1] / "prompts" / "templates")
         question_prompts: dict[str, str] = {}
 
-        question_prompts[INCLUSION_COL_NAME] = load_prompt(
+        question_prompts[INCLUSION_COL_NAME] = load_prompt(  # type: ignore[assignment]
             prompts_dir,
             "question_inclusion",
             return_format="prompt",
@@ -553,6 +664,7 @@ class Experiment:
         return question_prompts
 
     def _discretize_covariate(self, extractions: pd.DataFrame, covariate: str) -> None:
+        """Discretize a covariate in the extractions DataFrame."""
         if covariate not in extractions.columns:
             raise ValueError(f"`{covariate}` column is missing from extractions.")
 
@@ -573,6 +685,12 @@ class Experiment:
     def _discretize_many_unique(
         self, extractions: pd.DataFrame, covariate: str, covariate_data: pd.Series
     ) -> None:
+        """Discretize a covariate with many unique values in the extractions DataFrame.
+
+        This method converts numeric covariates into binary representations based on
+        the median value, or categorizes non-numeric covariates into frequent and
+        infrequent categories, grouping the infrequent ones into "Other".
+        """
         if covariate == "Duration":
             numeric_series = covariate_data
         else:
@@ -629,11 +747,13 @@ class Experiment:
     def _discretize_few_unique(
         self, extractions: pd.DataFrame, covariate: str, all_answers: np.ndarray
     ) -> None:
+        """Discretize a covariate with few unique values in the extractions DataFrame."""
         cov_map = {name: i for (i, name) in enumerate(all_answers)}
         extractions[covariate] = extractions[covariate].replace(cov_map).astype(int)
         self.options.update({covariate: [str(name) for name in all_answers]})
 
     def _discretize_binary_columns(self, extractions: pd.DataFrame) -> None:
+        """ "Discretize binary columns in the extractions DataFrame."""
         binary_map_num = {"No": 0, "Yes": 1}
         for feat in self.extended_covariate_names + [OUTCOME_COL_NAME]:
             if feat not in extractions.columns:
@@ -641,6 +761,7 @@ class Experiment:
             extractions[feat] = extractions[feat].replace(binary_map_num)
 
     def _discretize_treatment_column(self, extractions: pd.DataFrame) -> None:
+        """ "Discretize the treatment column in the extractions DataFrame."""
         if TREATMENT_COL_NAME not in extractions.columns:
             raise ValueError(
                 f"`{TREATMENT_COL_NAME}` column is missing from extractions."
@@ -651,7 +772,14 @@ class Experiment:
         )
 
     def _set_outcome_treatment_effects(self, trial: ClinicalTrial) -> None:
-        """Set variables related to outcomes, treatments and their effect sizes."""
+        """Set variables related to outcomes, treatments and their effect sizes.
+
+        This method initializes the `_outcome_treatment` list, `_treatment_desc`,
+        and `_outcome_desc` dictionaries based on the status of the trial. It builds
+        the outcome-treatment pairs and their descriptions for both active and
+        completed trials. It also sets the treatment and outcome names, timeframes,
+        and their descriptions.
+        """
         self._outcome_treatment: list[list[str | list[str]]] = []
         self._treatment_desc, self._outcome_desc = {}, {}
 
@@ -688,7 +816,10 @@ class Experiment:
             for outcome in outcomes
         }
 
-    def _get_active_outcomes_treatments(self, trial: ClinicalTrial):
+    def _get_active_outcomes_treatments(
+        self, trial: ClinicalTrial
+    ) -> tuple[list[Outcome], list[ArmGroup]]:
+        """Get active outcomes and treatments from the trial."""
         primary_outcomes: list[Outcome] | None = get_nested_value(
             trial, "protocolSection.outcomesModule.primaryOutcomes"
         )
@@ -710,6 +841,7 @@ class Experiment:
     def _build_active_outcome_treatment(
         self, outcomes: list[Outcome], treatments: list[ArmGroup]
     ) -> None:
+        """Build the outcome-treatment pairs for active trials."""
         for outcome in outcomes:
             for i, arm1 in enumerate(treatments):
                 for j, arm2 in enumerate(treatments):
@@ -718,7 +850,9 @@ class Experiment:
                             [outcome.measure, [arm1.label, arm2.label]]
                         )
 
-    def _get_completed_outcomes_treatments(self, trial: ClinicalTrial):
+    def _get_completed_outcomes_treatments(
+        self, trial: ClinicalTrial
+    ) -> tuple[list[OutcomeMeasure], list[MeasureGroup]]:
         trial_outcome_measures: list[OutcomeMeasure] | None = get_nested_value(
             trial,
             "resultsSection.outcomeMeasuresModule.outcomeMeasures",
@@ -771,7 +905,7 @@ class Experiment:
                             continue
                         unit = (
                             outcome.unitOfMeasure.lower()
-                            if getattr(outcome, "unitOfMeasure", None)
+                            if outcome.unitOfMeasure is not None
                             else ""
                         )
                         effect1 = (

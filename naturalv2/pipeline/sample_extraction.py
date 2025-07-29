@@ -1,3 +1,5 @@
+"""Sample extraction stages of the NATURAL pipeline."""
+
 import asyncio
 import logging
 import os
@@ -73,7 +75,13 @@ class SampleExtractionStage(PipelineStage):
         self.data: pd.DataFrame | None = None
 
     def get_language_model(self) -> LM:
-        """Return the language model used in this stage."""
+        """Return the language model used in this stage.
+
+        Returns
+        -------
+        LM
+            An instance of the language model configured for this stage.
+        """
         return build_lm_instance_from_cfg(self.model_cfg)
 
     async def process(

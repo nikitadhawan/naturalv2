@@ -1,27 +1,57 @@
-# drugbank_cache.py
+"""DrugBank Cache Module.
+
+This module provides a cache for DrugBank aliases, allowing for quick lookups of
+drug names and their aliases.
+"""
+
 import ast
 import gzip
 import json
 import os
-from typing import Optional
 
 import pandas as pd
 from lxml import etree as ET  # noqa: N812
 
 
-_aliases_cache: Optional[dict[int, list[str]]] = None
-_index_mapping: Optional[dict] = None
+_aliases_cache: dict[int, list[str]] | None = None
+_index_mapping: dict[str, int] | None = None
 
 
 def get_drugbank_aliases(data_path: str, drug_name: str) -> list[str]:
+    """Retrieve aliases for a given drug name from the DrugBank cache.
+
+    This function loads the DrugBank data if not already loaded and returns
+    a list of aliases for the specified drug name. The drug name is converted
+    to lowercase for case-insensitive matching.
+
+    Parameters
+    ----------
+    data_path : str
+        The path to the directory containing DrugBank data files.
+    drug_name : str
+        The name of the drug for which aliases are to be retrieved.
+
+    Returns
+    -------
+    list[str]
+        A list of aliases for the specified drug name. If the drug name is not found,
+        an empty list is returned.
+
+    Raises
+    -------
+    FileNotFoundError
+        If the DrugBank data files are not found in the specified path.
+    RuntimeError
+        If there is an error loading the DrugBank data.
+    """
     _load_data(data_path)
 
-    drug_name = drug_name.lower()
-    drug_index = _index_mapping.get(drug_name)
+    drug_index = _index_mapping.get(drug_name.lower())
     return _aliases_cache.get(drug_index, [])
 
 
 def _load_data(data_path: str) -> None:
+    """Load DrugBank aliases and indices from cached files or parse the XML file."""
     global _aliases_cache, _index_mapping  # noqa: PLW0603
 
     if _aliases_cache is not None:
@@ -59,7 +89,8 @@ def _load_data(data_path: str) -> None:
         _aliases_cache[index].extend(ast.literal_eval(row["alias_list"]))
 
 
-def _parse_drugbank_xml(file_path: str):
+def _parse_drugbank_xml(file_path: str) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Parse the DrugBank XML file and extract drug aliases and indices."""
     with gzip.open(file_path, "rt") as xml_file:
         tree = ET.parse(xml_file)
         root = tree.getroot()

@@ -341,6 +341,7 @@ class RedditSource:
             name.lower().strip() for name in experiment.outcome_common_names["reddit"]
         }
 
+        # Compile regex pattern once and reuse it for all subreddits
         treatment_pattern = _compile_search_pattern(treatment_names)
         outcome_pattern = _compile_search_pattern(outcome_names)
 
@@ -526,6 +527,7 @@ def _get_study_relevant_posts(
     outcome_pattern: re.Pattern,
     cutoff_dt: pd.Timestamp | None,
 ) -> pd.DataFrame:
+    """Get posts from cleaned Reddit data that mention both treatments and outcomes."""
     df = pd.read_parquet(clean_data_path)
     if not df.empty and cutoff_dt is not None:
         df = filter_by_date(df, cutoff_dt, "date_created")

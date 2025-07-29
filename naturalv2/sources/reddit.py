@@ -2,7 +2,6 @@
 
 import asyncio
 import concurrent.futures
-import csv
 import json
 import logging
 import os
@@ -401,7 +400,7 @@ class RedditSource:
 
         # Concatenate all DataFrames and save to CSV
         final_df = pd.concat(curated_experiment_data, ignore_index=True)
-        final_df.to_csv(save_path, index=False, quoting=csv.QUOTE_NONNUMERIC)
+        final_df.to_csv(save_path, index=False)
 
         return save_path, len(final_df)
 

@@ -1,14 +1,10 @@
-import ast
-import gzip
-import json
+import asyncio
 import logging
 import os
 import re
-import xml.etree.ElementTree as ET
 from itertools import product
-from typing import Any
+from typing import Any, Coroutine
 
-import pandas as pd
 from pydantic import BaseModel, create_model
 
 from naturalv2.evals.clinical_trial import (
@@ -40,6 +36,19 @@ def create_response_format(
     return create_model(name, **fields)
 
 
+async def concurrency_limited(coro: Coroutine, semaphore: asyncio.Semaphore) -> Any:
+    """Run a coroutine with a concurrency limit using a semaphore."""
+
+    async with semaphore:
+        return await coro
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename by replacing disallowed characters with underscores."""
+
+    return re.sub(r"[^\w\-.]", "_", filename)
+
+
 def get_save_path(
     base_path: str,
     nct_id: str,
@@ -52,9 +61,9 @@ def get_save_path(
         base_path,
         "results",
         f"{nct_id}",
-        f"{model_name.replace('/', '-')}_{extract_type}.csv"
+        sanitize_filename(f"{model_name}_{extract_type}") + ".csv"
         if outcome is None
-        else f"{model_name.replace('/', '-')}_{extract_type}_{outcome}.csv",
+        else sanitize_filename(f"{model_name}_{extract_type}_{outcome}") + ".csv",
     )
 
 
@@ -191,73 +200,6 @@ def get_nested_value(data: Any, path: str) -> Any | None:
             return None  # path doesn't exist
 
     return current
-
-
-def _parse_drugbank_xml(file_path: str):
-    with gzip.open(file_path, "rt") as xml_file:
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-        ns = "{http://www.drugbank.ca}"
-        aliases_dicts = []
-        index_mapping = {}
-
-        # Helper to extract and append text if present
-        def append_text(elem, aliases):
-            if elem is not None and elem.text:
-                aliases.append(elem.text.strip().lower())
-
-        for index, drug in enumerate(root.findall(ns + "drug")):
-            aliases = []
-
-            append_text(drug.find(ns + "name"), aliases)
-
-            synonyms_elem = drug.find(ns + "synonyms")
-            if synonyms_elem is not None:
-                for syn_elem in synonyms_elem.findall(ns + "synonym"):
-                    append_text(syn_elem, aliases)
-
-            products_elem = drug.find(ns + "products")
-            if products_elem is not None:
-                for product_elem in products_elem.findall(ns + "product"):
-                    append_text(product_elem.find(ns + "name"), aliases)
-
-            intl_brands_elem = drug.find(ns + "international-brands")
-            if intl_brands_elem is not None:
-                for intl_brand_elem in intl_brands_elem.findall(
-                    ns + "international-brand"
-                ):
-                    append_text(intl_brand_elem.find(ns + "name"), aliases)
-
-            aliases = list(set(aliases))
-            aliases_dicts.append({"index": index, "alias_list": str(aliases)})
-            for alias in aliases:
-                index_mapping[alias] = index
-
-    return aliases_dicts, index_mapping
-
-
-def get_drugbank_aliases(data_path: str, drug_name: str) -> list[str]:
-    alias_path = os.path.join(data_path, "drugbank_aliases.csv")
-    index_path = os.path.join(data_path, "drugbank_indices.csv")
-    if os.path.exists(alias_path) and os.path.exists(index_path):
-        aliases_df = pd.read_csv(alias_path, index_col=0)
-        with open(index_path, "r") as f:
-            index_mapping = json.load(f)
-    else:
-        file_path = os.path.join(data_path, "full_database.xml.gz")
-        aliases_dicts, index_mapping = _parse_drugbank_xml(file_path)
-        aliases_df = pd.DataFrame(aliases_dicts)
-        aliases_df.to_csv(alias_path)
-        with open(index_path, "w") as f:
-            json.dump(index_mapping, f)
-
-    drug_name = drug_name.lower()
-    drug_index = index_mapping.get(drug_name)
-    aliases = aliases_df.loc[aliases_df["index"] == drug_index]["alias_list"]
-    all_aliases = []
-    for alias_list in aliases:
-        all_aliases += ast.literal_eval(alias_list)
-    return all_aliases
 
 
 def qa_interleaved_enum(q_dct, options_dct, a_enum, to_enum):

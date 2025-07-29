@@ -18,6 +18,7 @@ from naturalv2.estimators.natural_mc import NaturalMC
 from naturalv2.estimators.natural_oi import NaturalOI
 from naturalv2.evals.experiment import Experiment
 from naturalv2.pipeline.natural import NATURALPipeline, PipelineContext, PipelineStage
+from naturalv2.study import get_study_filepaths
 
 
 load_dotenv(".env")
@@ -261,11 +262,7 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
 def main(cfg: DictConfig) -> None:
     """Main function to estimate average treatment effects."""
     # Load study object from YAML file
-    study_file = os.path.join(
-        cfg.save_path,
-        "studies",
-        cfg.conditions[0].lower().replace(" ", "_") + "_study.yaml",
-    )
+    study_file = get_study_filepaths(cfg.save_path, cfg.conditions[0])["study"]
     study = Study.from_yaml(study_file)
 
     if cfg.split not in ["train", "val", "test"]:

@@ -4,8 +4,8 @@ import os
 
 import matplotlib.pyplot as plt
 
-from filter_curate import StudyDataset
 from naturalv2.evals.experiment import Experiment
+from naturalv2.study import StudyDataset, get_study_filepaths
 
 
 # Usage: python -m scripts.analyze_datasets --data_path /mfs1/u/nikita/naturalv2 --output_dir scratch --study hemic_and_lymphatic_diseases
@@ -76,9 +76,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     experiment_dir = os.path.join(args.data_path, "experiments")
-    study_dataset_path = os.path.join(
-        args.data_path, f"studies/{args.study}_study_dataset.yaml"
-    )
+    study_dataset_path = get_study_filepaths(args.data_path, args.study)[
+        "study_dataset"
+    ]
     study_dataset = StudyDataset.from_yaml(study_dataset_path)
 
     utc_dates, date_labels = [], []

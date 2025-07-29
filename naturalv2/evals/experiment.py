@@ -239,10 +239,14 @@ class Experiment:
 
         self._effect_sizes: list[float] = []
 
-        # Set treatment and outcome names and common names
+        # Set treatment and outcome names and common names per data source
+        # E.g. {"reddit": {
+        #  "Erenumab": [Aimovig],
+        #  "Topiramate": [Topamax]
+        # }}
         self._set_outcome_treatment_effects(trial)
-        self.treatment_common_names: dict[str, list[str]] = {}
-        self.outcome_common_names: dict[str, list[str]] = {}
+        self.treatment_common_names: dict[str, dict[str, list[str]]] = {}
+        self.outcome_common_names: dict[str, dict[str, list[str]]] = {}
 
         self._drugbank_names: dict[str, list[str]] = {}
 
@@ -598,7 +602,11 @@ class Experiment:
         treatment_names = list(
             set(
                 self.treatment_names
-                + self.treatment_common_names[source_name]
+                + [
+                    item
+                    for sublist in self.treatment_common_names[source_name].values()
+                    for item in sublist
+                ]
                 + [item for sublist in self.drugbank_names.values() for item in sublist]
             )
         )
@@ -606,7 +614,11 @@ class Experiment:
             "conditions": self._conditions,
             "treatments": treatment_names,
             "outcome": outcome,
-            "outcome_common_names": self.outcome_common_names.get(source_name, []),
+            "outcome_common_names": [
+                item
+                for sublist in self.outcome_common_names[source_name].values()
+                for item in sublist
+            ],
             "covariates": self.covariate_names + self.extended_covariate_names,
             "treatment_desc": self.treatment_desc,
             "outcome_desc": outcome_desc,

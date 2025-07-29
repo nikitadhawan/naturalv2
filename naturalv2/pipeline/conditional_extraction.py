@@ -408,8 +408,9 @@ def _prepare_for_conditional_extraction(
     # Build interleaved multiple choice questions
     # For each answer combination, add the question, choices and the answer
     # to a string
+    question_prompts = experiment.get_question_prompts()
     interleaved_mcqa = _build_interleaved_multiple_choice_questions(
-        {key: experiment.question_prompts[key] for key in features_to_enumerate},
+        {key: question_prompts[key] for key in features_to_enumerate},
         {key: experiment.options[key] for key in features_to_enumerate},
         answer_combinations,
         features_to_enumerate,
@@ -496,11 +497,12 @@ async def _llm_task_producer(
                 covariate_answers = experiment.apply_transform(
                     row[to_sample].to_dict(), repr_type="language"
                 )
-                qa_text = "\n\nQuestions and their correct answers:\n"
+                question_prompts = experiment.get_question_prompts()
+                qa_text = "\n\nQuestions and their correct answers:"
                 for key in covariate_answers:
                     qa_text += (
-                        "Q: "
-                        + experiment.question_prompts[key]
+                        "\nQ: "
+                        + question_prompts[key]
                         + "A: "
                         + str(covariate_answers[key])
                         + "."

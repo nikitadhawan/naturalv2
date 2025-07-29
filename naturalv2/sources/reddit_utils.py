@@ -1,28 +1,30 @@
 """Utilities for downloading and processing Reddit data from The Eye archive."""
 
+import asyncio
 import datetime
 import glob
 import json
 import logging
 import os
-import time
 import warnings
-from functools import partial
-from typing import Any, Generator, Literal, Optional
+from typing import Generator, Literal, Optional
 from urllib import error, request
 
+import asyncpraw
+import asyncprawcore
 import pandas as pd
 import tenacity
 import wget
 import zstandard
+from aiolimiter import AsyncLimiter
 from tenacity import (
     before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_attempt,
-    wait_exponential,
+    wait_random_exponential,
 )
-from tqdm.contrib.concurrent import process_map
+from tqdm.asyncio import tqdm
 
 from naturalv2.sources.anonymizer import Anonymizer
 
@@ -33,89 +35,112 @@ warnings.simplefilter("ignore", FutureWarning)
 logger = logging.getLogger(__name__)
 
 
-def _get_sub_desc(data: dict[str, Any]) -> Optional[dict[str, str]]:
-    """Extract subreddit description and public description from the data."""
-    if "data" in data:
-        descr = data["data"].get("description", "")
-        public_descr = data["data"].get("public_description", "")
-        sub = data["data"].get("display_name", "")
-        return {
-            "sub": sub,
-            "description": descr,
-            "public_description": public_descr,
-        }
-    return None
+async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.DataFrame:
+    """Fetch subreddit about information and create a DataFrame.
 
-
-def _is_rate_limit_error(exception: Exception) -> bool:
-    """Check if the exception is a rate limit error (HTTP 429)."""
-    return isinstance(exception, error.HTTPError) and exception.code == 429
-
-
-def _fallback_return(retry_state: "tenacity.RetryCallState") -> dict[str, Any]:
-    """Returns a dictionary with an error message and the URL that caused the error."""
-    return {"error": "retry limit exceeded", "url": retry_state.args[0]}
-
-
-@retry(
-    wait=wait_exponential(multiplier=2.4, min=60, max=120),
-    stop=stop_after_attempt(5),
-    retry=retry_if_exception(_is_rate_limit_error),
-    retry_error_callback=_fallback_return,
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
-)
-def _download_from_url(url_str: str) -> dict[str, Any]:
-    """Download JSON data from a URL with error handling and rate limiting.
+    This function checks if the list of subreddits exists, downloads it if not,
+    and then fetches the about information for each subreddit. It saves the
+    information in a CSV file and returns a DataFrame containing the subreddit
+    names, descriptions, and public descriptions.
 
     Parameters
     ----------
-    url_str : str
-        The URL to download the JSON data from.
+    data_path : str
+        The path where the subreddit about information will be saved.
+    api_rate_limit : int, default=10
+        The number of requests allowed per minute to the Reddit API.
 
     Returns
     -------
-    dict[str, Any]
-        The JSON data as a dictionary, or an error message if the download fails.
+    pd.DataFrame
+        A DataFrame containing the subreddit names, descriptions, and public
+        descriptions.
 
-    Raises
-    ------
-    tenacity.RetryError
-        If the download fails after the maximum number of retries.
     """
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        req = request.Request(url_str, headers=headers)
-        data = json.load(request.urlopen(req))
-        time.sleep(2)
-        return data
-    except error.HTTPError as e:
-        if e.code == 429:
-            raise  # tenacity will handle rate limit errors
+    # Load the CSV file if it exists and return as DataFrame
+    about_csv_path = os.path.join(data_path, "subs_about.csv")
+    if os.path.exists(about_csv_path):
+        return pd.read_csv(about_csv_path, index_col=0)
 
-        logger.error(f"HTTP error {e.code} for {url_str}: {e.reason}")
-        return {"error": f"HTTP error {e.code}", "url": url_str}
-    except Exception as e:
-        logger.error(f"Unexpected error fetching {url_str}: {e}")
-        return {"error": str(e), "url": url_str}
+    subs_list_path = download_subs_list(data_path)
+    with open(subs_list_path, "r") as f:
+        all_subs = f.read().splitlines()
 
+    about_jsons_dir = os.path.join(data_path, "subs_about")
+    os.makedirs(about_jsons_dir, exist_ok=True)
+    all_json_files = glob.glob(os.path.join(about_jsons_dir, "*.json"))
 
-def _fetch_sub_about(data_path: str, sub: str) -> Optional[dict[str, str]]:
-    """Fetch subreddit about information from Reddit API or local JSON file."""
-    about_file = os.path.join(data_path, "subs_about", f"{sub}_about.json")
-    if os.path.exists(about_file):
-        with open(about_file, "r") as f:
+    # Load already downloaded JSON files
+    # NOTE: A json file is always saved, regardless of whether there was an error
+    # while fetching the subreddit about info or not. But, subreddits that
+    # had an error during downloading will not be added to the CSV file.
+    subreddit_info_rows = []
+    downloaded_subs = set()
+    for json_file in all_json_files:
+        sub_name_from_file = os.path.splitext(os.path.basename(json_file))[0].replace(
+            "_about", ""
+        )
+        downloaded_subs.add(sub_name_from_file)
+        with open(json_file, "r") as f:
             data = json.load(f)
-    else:
-        about_url = f"https://www.reddit.com/r/{sub}/about.json"
-        data = _download_from_url(about_url)
+            if data["subreddit"] != "error":
+                subreddit_info_rows.append(data)
 
-        with open(about_file, "w") as f:
-            json.dump(data, f)
+    # Resume downloading about info for subreddits not yet processed
+    # by checking the difference between all_subs and downloaded_subs
+    remaining_subs = list(set(all_subs) - downloaded_subs)
 
-    return _get_sub_desc(data)
+    # Fetch about info for remaining subreddits and combine with existing data
+    if len(remaining_subs) > 0:
+        async with asyncpraw.Reddit(
+            client_id=os.environ.get("PRAW_CLIENT_ID"),
+            client_secret=os.environ.get("PRAW_CLIENT_SECRET"),
+            password=os.environ.get("PRAW_PWD"),
+            username=os.environ.get("PRAW_USERNAME"),
+            user_agent=os.environ.get("PRAW_AGENT"),
+        ) as reddit_client:
+            rate_limter = AsyncLimiter(api_rate_limit, 60)
+            subreddit_fetch_tasks = [
+                asyncio.create_task(
+                    _fetch_sub_about(
+                        subreddit_name, reddit_client, about_jsons_dir, rate_limter
+                    )
+                )
+                for subreddit_name in remaining_subs
+            ]
+
+            for task in tqdm(
+                asyncio.as_completed(subreddit_fetch_tasks),
+                total=len(subreddit_fetch_tasks),
+                desc="Fetching subreddit about info",
+                unit="subreddit",
+                leave=False,
+                dynamic_ncols=True,
+            ):
+                result = await task
+                if result["subreddit"] != "error":
+                    subreddit_info_rows.append(result)
+
+    cols = ["subreddit", "description", "public_description"]
+    if not subreddit_info_rows:
+        logger.warning(
+            "No subreddit about information was fetched. Returning an empty DataFrame."
+        )
+        return pd.DataFrame(columns=cols)
+
+    # Create DataFrame from the collected subreddit info
+    about_df = (
+        pd.DataFrame(subreddit_info_rows, columns=cols)
+        .drop_duplicates(subset=["subreddit"])
+        .sort_values(by="subreddit")
+        .reset_index(drop=True)
+    )
+    about_df.to_csv(about_csv_path)
+
+    return about_df
 
 
-def download_subs_list(data_path: str) -> None:
+def download_subs_list(data_path: str) -> str:
     """Download the list of subreddits from The Eye archive.
 
     Parameters
@@ -123,9 +148,15 @@ def download_subs_list(data_path: str) -> None:
     data_path : str
         The path where the list of subreddits will be saved.
 
+    Returns
+    -------
+    str
+        The path to the file containing the list of subreddits.
+
     """
     filepath = os.path.join(data_path, "subs_list.txt")
     if not os.path.exists(filepath):
+        logger.info("Downloading the list of subreddits from The Eye archive...")
         url = "https://the-eye.eu/redarcs/"
         response = request.urlopen(url)
         html: str = response.read().decode("utf-8")
@@ -143,160 +174,7 @@ def download_subs_list(data_path: str) -> None:
 
         logger.info(f"{len(subs)} subreddits listed.")
 
-
-def get_sub_about_info(data_path: str) -> pd.DataFrame:
-    """Fetch subreddit about information and create a DataFrame.
-
-    This function checks if the list of subreddits exists, downloads it if not,
-    and then fetches the about information for each subreddit. It saves the
-    information in a CSV file and returns a DataFrame containing the subreddit
-    names, descriptions, and public descriptions.
-
-    Parameters
-    ----------
-    data_path : str
-        The path where the subreddit about information will be saved.
-
-    Returns
-    -------
-    pd.DataFrame
-        A DataFrame containing the subreddit names, descriptions, and public
-        descriptions.
-
-    """
-    subs_list_path = os.path.join(data_path, "subs_list.txt")
-    if not os.path.exists(subs_list_path):
-        logger.info("Subreddit list not found. Downloading the list of subreddits.")
-        download_subs_list(data_path)
-
-    with open(subs_list_path, "r") as f:
-        subs_list = f.read().splitlines()
-
-    about_jsons_dir = os.path.join(data_path, "subs_about")
-    os.makedirs(about_jsons_dir, exist_ok=True)
-
-    about_csv_path = os.path.join(data_path, "subs_about.csv")
-
-    # construct the about_df from the existing JSON files
-    def _create_about_csv_from_json_files():
-        all_json_files = glob.glob(os.path.join(about_jsons_dir, "*.json"))
-        rows = []
-        for json_file in all_json_files:
-            with open(json_file, "r") as f:
-                data: dict[str, Any] = json.load(f)
-                row_data = _get_sub_desc(data)
-                if row_data is not None:
-                    rows.append(row_data)
-
-        df = pd.DataFrame(
-            rows, columns=["sub", "description", "public_description"], copy=False
-        ).convert_dtypes(dtype_backend="pyarrow")
-        df.drop_duplicates(subset=["sub"], inplace=True)
-        df.sort_values(by="sub", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        return df
-
-    # filter out already downloaded subreddits from subs_list
-    # NOTE: A json file is always saved, regardless of whether there was an error
-    # while fetching the subreddit about info or not. But, subreddits that
-    # had an error during downloading will not be added to the CSV file.
-    downloaded_subs = [
-        os.path.splitext(file)[0].split("_")[0] for file in os.listdir(about_jsons_dir)
-    ]
-    subs_list = list(set(subs_list) - set(downloaded_subs))
-
-    if len(subs_list) == 0:
-        if os.path.exists(about_csv_path):
-            logger.info(
-                "All subreddits' about info already downloaded. Loading existing about CSV file."
-            )
-            return pd.read_csv(about_csv_path, index_col=0)
-
-        logger.warning(
-            "All subreddits' about info already downloaded, but no CSV file found. "
-            "Creating a new CSV file from the existing JSON files."
-        )
-        df = _create_about_csv_from_json_files()
-        df.to_csv(about_csv_path)
-        return df
-
-    partial_df: Optional[pd.DataFrame] = None
-    if os.path.exists(about_csv_path):
-        partial_df = pd.read_csv(about_csv_path, index_col=0)
-    elif len(downloaded_subs) > 0:  # download was interrupted before CSV creation
-        partial_df = _create_about_csv_from_json_files()
-
-    rows = []
-    results = process_map(
-        partial(_fetch_sub_about, data_path),
-        subs_list,
-        chunksize=1,
-        desc="Fetching subreddit about info",
-    )
-    for row in results:
-        if row is not None:
-            rows.append(row)
-
-    if partial_df is None:
-        about_df = pd.DataFrame(
-            rows, columns=["sub", "description", "public_description"], copy=False
-        ).convert_dtypes(dtype_backend="pyarrow")
-        about_df.to_csv(about_csv_path)
-    else:  # append new rows to the existing DataFrame
-        new_df = pd.DataFrame(
-            rows, columns=["sub", "description", "public_description"], copy=False
-        )
-        about_df = pd.concat([partial_df, new_df], ignore_index=True)
-        about_df = about_df.drop_duplicates(subset=["sub"])
-        about_df.sort_values(by="sub", inplace=True)
-        about_df.reset_index(drop=True, inplace=True)
-        about_df.to_csv(about_csv_path)
-
-    return about_df
-
-
-def _read_and_decode(
-    reader: zstandard.ZstdDecompressionReader,
-    chunk_size: int,
-    max_window_size: int,
-    previous_chunk: Optional[bytes] = None,
-    bytes_read: int = 0,
-) -> str:
-    chunk = reader.read(chunk_size)
-    bytes_read += chunk_size
-
-    if previous_chunk is not None:
-        chunk = previous_chunk + chunk
-
-    try:
-        return chunk.decode()
-    except UnicodeDecodeError as err:
-        if bytes_read > max_window_size:
-            raise UnicodeError(
-                f"Unable to decode frame after reading {bytes_read:,} bytes"
-            ) from err
-        logger.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
-        return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
-
-
-def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
-    with open(file_name, "rb") as file_handle:
-        buffer = ""
-        reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
-            file_handle
-        )
-
-        while True:
-            chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
-            if not chunk:
-                break
-            lines = (buffer + chunk).split("\n")
-
-        for line in lines[:-1]:
-            yield line, file_handle.tell()
-
-        buffer = lines[-1]
-    reader.close()
+    return filepath
 
 
 def download_sub_data(
@@ -338,7 +216,7 @@ def download_sub_data(
 
     os.makedirs(data_path, exist_ok=True)
 
-    save_path = os.path.join(data_path, "{}_{}.csv".format(subreddit, data_type))
+    save_path = os.path.join(data_path, "{}_{}.parquet".format(subreddit, data_type))
     if os.path.exists(save_path):
         logger.warning(
             f"File {save_path} already exists. Skipping download for {subreddit} {data_type}."
@@ -347,7 +225,8 @@ def download_sub_data(
 
     file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
     if not os.path.exists(file_path):
-        # Go to TMPDIR if set, otherwise stay current working directory, since wget doesn't respect TMPDIR
+        # Go to TMPDIR if set, otherwise stay current working directory, since
+        # wget doesn't respect TMPDIR
         tmpdir = os.environ.get("TMPDIR", os.getcwd())
         original_cwd = os.getcwd()
         try:
@@ -396,27 +275,12 @@ def download_sub_data(
             num_workers=num_workers,
         )
 
-    df.to_csv(save_path)
+    df.to_parquet(save_path, index=False, compression="snappy")
     os.remove(file_path)
     logger.info(
         f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
         f"({bad_lines:,} bad lines)"
     )
-
-
-def _get_submission_permalink(permalink: str) -> str:
-    """Extracts the submission permalink from a full Reddit permalink."""
-    return "/" + permalink.split("/")[-2] + "/"
-
-
-def _get_comment_permalink(permalink: str) -> str:
-    """Extracts the comment permalink from a full Reddit permalink."""
-    return "/" + permalink.split("/")[-3] + "/"
-
-
-def _get_date(utc_timestamp: float) -> str:
-    dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
-    return dt.strftime("%B %d, %Y")
 
 
 def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
@@ -495,7 +359,7 @@ def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
     return post_df
 
 
-def _get_context_post_df(
+def get_context_post_df(
     submissions: pd.DataFrame, comments: pd.DataFrame
 ) -> pd.DataFrame:
     """Join submissions and comments DataFrames to create a context post DataFrame."""
@@ -593,3 +457,164 @@ def _get_context_post_df(
             "author_replies",
         ]
     )
+
+
+def filter_by_date(
+    adf: pd.DataFrame, cutoff_dt: pd.Timestamp, date_col: str
+) -> pd.DataFrame:
+    """Filter a DataFrame by a date cutoff.
+
+    Parameters
+    ----------
+    adf : pd.DataFrame
+        The DataFrame to filter.
+    cutoff_dt : pd.Timestamp
+        The cutoff date. Only rows with dates on or before this date will be kept.
+    date_col : str
+        The name of the column in the DataFrame containing date information.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame filtered to include only rows with dates on or before the cutoff date.
+    """
+    if adf.empty:
+        return pd.DataFrame()
+
+    # Parse date column all at once, try inference and coerce errors
+    date_series: pd.Series = pd.to_datetime(adf[date_col], errors="coerce")
+
+    # Filter rows which have a datetime and are on or before cutoff
+    mask = (date_series.notna()) & (date_series <= cutoff_dt)
+    return adf.loc[mask].reset_index(drop=True)
+
+
+def is_retryable_error(exception: BaseException) -> bool:
+    """Check if the exception is retryable."""
+    return isinstance(
+        exception, asyncprawcore.exceptions.ResponseException
+    ) and exception.response.status in [429, 500, 502, 503, 504]
+
+
+@retry(
+    wait=wait_random_exponential(min=1, max=30),
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(is_retryable_error),
+    retry_error_callback=lambda retry_state: {
+        "subreddit": "error",
+        "description": f"Retry limit exceeded for {retry_state.args[0]}",
+        "public_description": None,
+    },
+    before_sleep=before_sleep_log(logger, logging.INFO),
+)
+async def _fetch_sub_about(
+    subreddit_name: str,
+    reddit_client: asyncpraw.Reddit,
+    save_dir: str,
+    rate_limter: AsyncLimiter,
+) -> dict[str, str | None]:
+    """Fetch subreddit about information from Reddit API or local JSON file."""
+    about_info = {"subreddit": "error", "description": None, "public_description": None}
+    async with rate_limter:
+        try:
+            subreddit = await reddit_client.subreddit(subreddit_name, fetch=True)
+            if not subreddit.over18:
+                about_info = {
+                    "subreddit": subreddit.display_name,
+                    "description": subreddit.description,
+                    "public_description": subreddit.public_description,
+                }
+            else:
+                about_info["description"] = (
+                    "This subreddit is NSFW (not safe for work)."
+                )
+        except asyncprawcore.exceptions.ResponseException as e:
+            if e.response.status == 429:  # catch and retry on rate limit errors
+                raise error.HTTPError(
+                    f"https://www.reddit.com/r/{subreddit_name}/about.json",
+                    e.response.status,
+                    e.response.reason,
+                    e.response.headers,
+                    None,
+                ) from e
+            logger.debug(
+                f"Error fetching about info for subreddit {subreddit_name}: {e}"
+            )
+            about_info["description"] = e.response.reason
+        except tenacity.RetryError as e:
+            logger.error(
+                f"Retry limit exceeded for subreddit {subreddit_name}: "
+                f"{e.last_attempt.exception()}"
+            )
+            about_info["description"] = "retry limit exceeded"
+        except asyncprawcore.exceptions.AsyncPrawcoreException as e:
+            logger.error(
+                f"Error fetching about info for subreddit {subreddit_name}: {e}"
+            )
+            about_info["description"] = str(e)
+        finally:
+            # Save the about info to a JSON file
+            about_file = os.path.join(save_dir, f"{subreddit_name}_about.json")
+            with open(about_file, "w") as f:
+                json.dump(about_info, f)
+
+    return about_info
+
+
+def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
+    with open(file_name, "rb") as file_handle:
+        buffer = ""
+        reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
+            file_handle
+        )
+
+        while True:
+            chunk = _read_and_decode(reader, 2**27, (2**29) * 2)
+            if not chunk:
+                break
+            lines = (buffer + chunk).split("\n")
+
+        for line in lines[:-1]:
+            yield line, file_handle.tell()
+
+        buffer = lines[-1]
+    reader.close()
+
+
+def _read_and_decode(
+    reader: zstandard.ZstdDecompressionReader,
+    chunk_size: int,
+    max_window_size: int,
+    previous_chunk: Optional[bytes] = None,
+    bytes_read: int = 0,
+) -> str:
+    chunk = reader.read(chunk_size)
+    bytes_read += chunk_size
+
+    if previous_chunk is not None:
+        chunk = previous_chunk + chunk
+
+    try:
+        return chunk.decode()
+    except UnicodeDecodeError as err:
+        if bytes_read > max_window_size:
+            raise UnicodeError(
+                f"Unable to decode frame after reading {bytes_read:,} bytes"
+            ) from err
+        logger.info(f"Decoding error with {bytes_read:,} bytes, reading another chunk")
+        return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
+
+
+def _get_submission_permalink(permalink: str) -> str:
+    """Extracts the submission permalink from a full Reddit permalink."""
+    return "/" + permalink.split("/")[-2] + "/"
+
+
+def _get_comment_permalink(permalink: str) -> str:
+    """Extracts the comment permalink from a full Reddit permalink."""
+    return "/" + permalink.split("/")[-3] + "/"
+
+
+def _get_date(utc_timestamp: float) -> str:
+    dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
+    return dt.strftime("%B %d, %Y")

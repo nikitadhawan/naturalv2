@@ -4,30 +4,54 @@ import asyncio
 import logging
 import os
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Iterator, Optional, Union
+from typing import Iterator, Literal, Optional, Union
 
 import hydra
-import psutil
-import yaml
 from dotenv import load_dotenv
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from create_study import Study
+from naturalv2.evals.clinical_trial import ClinicalTrial
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
 from naturalv2.prompts.utils import get_common_name_prompts
 from naturalv2.sources.pubmed import PubMedSet
 from naturalv2.sources.reddit import RedditSource
+from naturalv2.study import (
+    Study,
+    StudyDataset,
+    get_study_filepaths,
+)
 from naturalv2.utils import ListResponse
 
 
 load_dotenv(".env")
 
+LOGGING_CONFIG = {
+    "version": 1,
+    "handlers": {
+        "default": {
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+        }
+    },
+    "formatters": {
+        "http": {
+            "format": "%(levelname)s [%(asctime)s] %(name)s - %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        }
+    },
+    "loggers": {
+        "httpx": {
+            "handlers": ["default"],
+            "level": "WARNING",
+        },
+    },
+}
+
+logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
 
@@ -64,61 +88,6 @@ class ExperimentTask:
     split: str
     source_name: str
     experiment_instance: Experiment
-
-
-class StudyDataset:
-    """Represents a dataset for a study, containing conditions and sources.
-
-    Parameters
-    ----------
-    conditions : list[str]
-        List of conditions for the study.
-    sources : list[str]
-        List of sources from which data is collected.
-
-    """
-
-    def __init__(
-        self,
-        conditions: list[str],
-        sources: list[str],
-    ) -> None:
-        self.conditions = list(conditions)
-        self.sources = {source: {} for source in sources}
-        self.data_sizes = {}
-        self.data_paths = {}
-
-    def to_yaml(self, filename: str) -> None:
-        """Save the study dataset to a YAML file.
-
-        Parameters
-        ----------
-        filename : str
-            The path to the YAML file where the dataset will be saved.
-
-        """
-        with open(filename, "w") as file:
-            yaml.safe_dump(self.__dict__, file)
-
-    @classmethod
-    def from_yaml(cls, filename: str) -> "StudyDataset":
-        """Load a study dataset from a YAML file.
-
-        Parameters
-        ----------
-        filename : str
-            The path to the YAML file from which the dataset will be loaded.
-
-        Returns
-        -------
-        StudyDataset
-            An instance of `StudyDataset` populated with data from the YAML file.
-        """
-        with open(filename, "r") as file:
-            data = yaml.safe_load(file)
-        study_dataset = cls.__new__(cls)
-        study_dataset.__dict__.update(data)
-        return study_dataset
 
 
 class _DataCurator:
@@ -160,7 +129,7 @@ class _DataCurator:
         self.language_model = language_model
 
         # Simple in-memory tracking
-        self._completed_experiments = set()
+        self._completed_experiments: set[str] = set()
 
         self._experiment_dir = os.path.join(cfg.save_path, "experiments")
         os.makedirs(self._experiment_dir, exist_ok=True)
@@ -196,7 +165,7 @@ class _DataCurator:
                 experiment_id in self._completed_experiments
                 or experiment_id in self.study_dataset.data_paths
             ):
-                logger.info(f"Skipping already processed experiment: {experiment_id}")
+                logger.debug(f"Skipping already processed experiment: {experiment_id}")
                 continue
 
             # Load or create experiment
@@ -205,7 +174,9 @@ class _DataCurator:
                 exp = Experiment.from_yaml(exp_file)
                 logger.debug(f"Loaded existing experiment: {nct_id}")
             except (FileNotFoundError, ValueError):
-                status = "active" if split == "test" else "completed"
+                status: Literal["completed", "active"] = (
+                    "active" if split == "test" else "completed"
+                )
                 exp = Experiment(self.cfg.data_path, nct_id, status=status)
                 logger.debug(f"Created new experiment: {nct_id}")
 
@@ -225,6 +196,254 @@ class _DataCurator:
             )
 
         return experiment_tasks
+
+    async def get_common_names_with_llm(  # noqa: PLR0915
+        self,
+        experiment_tasks: list[ExperimentTask],
+        source_name: str,
+        semaphore_limit: int = 10,
+    ) -> dict[str, LLMResult]:
+        """Execute LLM calls to get common names for treatments and outcomes.
+
+        Parameters
+        ----------
+        experiment_tasks : list[ExperimentTask]
+            List of ``ExperimentTask`` objects to process.
+        source_name : str
+            Name of the source dataset (e.g., "pubmed", "reddit").
+        semaphore_limit : int
+            Maximum number of concurrent LLM calls.
+
+        Returns
+        -------
+        dict[str, LLMResult]
+            Dictionary mapping task IDs to their results. This includes
+            the common names extracted from the LLM responses, along with
+            metadata about the task such as NCT ID, attribute (treatment/outcome),
+            and success status.
+        """
+        task_queue: asyncio.Queue[LLMTask] = asyncio.Queue(maxsize=100)
+        result_queue: asyncio.Queue[LLMResult] = asyncio.Queue()
+
+        # Shared counter for progress tracking
+        progress = {"total": 0, "completed": 0, "failed": 0}
+        pbar = None
+
+        async def producer():
+            """Generate tasks and put them in the queue."""
+            nonlocal pbar
+            task_generator = self._generate_llm_tasks_for_experiments(
+                experiment_tasks, source_name
+            )
+
+            for task in task_generator:
+                await task_queue.put(task)
+                progress["total"] += 1
+
+                # Initialize progress bar on first task
+                if pbar is None:
+                    pbar = tqdm(
+                        desc="Executing LLM tasks", unit="task", dynamic_ncols=True
+                    )
+
+        async def consumer() -> None:
+            """Process tasks from the queue."""
+            while True:
+                task = await task_queue.get()
+                if task is None:  # Producer finished
+                    task_queue.task_done()
+                    break
+
+                try:
+                    logger.debug(f"Executing LLM task: {task.task_id}")
+                    lm_response = await self.language_model(
+                        messages=task.messages, response_format=ListResponse
+                    )
+                    parsed_response = extract_list_response(lm_response)
+                    common_names = parsed_response[0] if parsed_response else []
+
+                    result = LLMResult(
+                        task_id=task.task_id,
+                        nct_id=task.nct_id,
+                        attribute=task.attribute,
+                        name=task.name,
+                        common_names=common_names,
+                        success=bool(common_names),  # Success if we got any names
+                    )
+                except Exception as e:
+                    error_msg = f"LLM call failed for {task.nct_id}/{task.attribute}/{task.name}: {str(e)}"
+                    logger.warning(error_msg)
+                    result = LLMResult(
+                        task_id=task.task_id,
+                        nct_id=task.nct_id,
+                        attribute=task.attribute,
+                        name=task.name,
+                        common_names=[],
+                        success=False,
+                        error=error_msg,
+                    )
+                finally:
+                    await result_queue.put(result)
+                    task_queue.task_done()
+
+                    # Update progress
+                    progress["completed"] += 1
+                    if not result.success:
+                        progress["failed"] += 1
+
+                    if pbar is not None:
+                        pbar.total = progress["total"]
+                        success_count = progress["completed"] - progress["failed"]
+                        pbar.set_postfix(
+                            {
+                                "success": success_count,
+                                "failed": progress["failed"],
+                                "rate": f"{success_count / max(1, progress['completed']) * 100:.1f}%",
+                            }
+                        )
+                        pbar.update(1)
+
+        # Start consumers
+        consumer_tasks = [
+            asyncio.create_task(consumer()) for _ in range(semaphore_limit)
+        ]
+
+        # Start producer
+        producer_task = asyncio.create_task(producer())
+
+        # Collect results
+        all_results = {}
+        failed_count = 0
+
+        try:
+            # Wait for producer to finish
+            await producer_task
+
+            # Wait for all tasks to be processed
+            await task_queue.join()
+
+            # Signal completion to all consumers
+            for _ in range(semaphore_limit):
+                await task_queue.put(None)  # type: ignore
+
+            # Wait for consumers to finish
+            await asyncio.gather(*consumer_tasks)
+
+            # Collect all results
+            while not result_queue.empty():
+                result = await result_queue.get()
+                all_results[result.task_id] = result
+                if not result.success:
+                    failed_count += 1
+
+        finally:
+            # Close progress bar
+            if pbar is not None:
+                pbar.close()
+
+        success_count = len(all_results) - failed_count
+        logger.info(
+            f"Completed LLM tasks: {success_count} successful, {failed_count} failed "
+            f"({success_count / max(1, len(all_results)) * 100:.1f}% success rate)"
+        )
+
+        return all_results
+
+    def process_experiments(
+        self, experiment_tasks: list[ExperimentTask], llm_results: dict[str, LLMResult]
+    ) -> list[tuple[str, str, int]]:
+        """Process experiments with LLM results.
+
+        Parameters
+        ----------
+        experiment_tasks : list[ExperimentTask]
+            List of ``ExperimentTask`` objects to process.
+        llm_results : dict[str, LLMResult]
+            Dictionary mapping task IDs to their results.
+
+        Returns
+        -------
+        list[tuple[str, str, int]]
+            List of tuples containing experiment ID, data path, and data size for
+            each processed experiment.
+        """
+        if not experiment_tasks:
+            logger.info("No experiments to process")
+            return []
+
+        # remove empty files in clean_paths
+        clean_data_paths = [
+            path
+            for path in self.clean_paths
+            if os.path.exists(path) and os.path.getsize(path) > 0
+        ]
+        grouped_llm_results = self._group_llm_results_by_experiment(llm_results)
+        final_results_list = []
+        failed_count = 0
+        for experiment_task in tqdm(
+            experiment_tasks,
+            desc="Processing experiments",
+            unit="exp",
+            dynamic_ncols=True,
+            position=0,
+        ):
+            common_name_dict = grouped_llm_results.get(experiment_task.nct_id, {})
+            experiment_id = f"{experiment_task.source_name}_{experiment_task.nct_id}"
+
+            try:
+                # Apply LLM results to the experiment object
+                if common_name_dict:
+                    for attribute in ["treatment", "outcome"]:
+                        if attribute in common_name_dict:
+                            common_names = common_name_dict[attribute]
+                            getattr(
+                                experiment_task.experiment_instance,
+                                f"{attribute}_common_names",
+                            ).update({experiment_task.source_name: common_names})
+
+                # Save the modified experiment object to YAML
+                exp_file = os.path.join(
+                    self._experiment_dir, f"{experiment_task.nct_id}.yaml"
+                )
+                experiment_task.experiment_instance.to_yaml(exp_file)
+
+                # Run experiment data curation using the source_dataset instance
+                exp_data_path, exp_data_size = (
+                    self.source_dataset.curate_experiment_data(
+                        experiment_task.experiment_instance,
+                        self.study.conditions[0],
+                        self.cfg.filter_by_date,
+                        clean_data_paths,
+                    )
+                )
+
+                # Update experiment source paths on the copied experiment instance
+                current_paths = experiment_task.experiment_instance.source_paths.get(
+                    experiment_task.source_name, []
+                )
+                experiment_task.experiment_instance.source_paths[
+                    experiment_task.source_name
+                ] = current_paths + [exp_data_path]
+
+                # Save the modified experiment object to YAML
+                experiment_task.experiment_instance.to_yaml(exp_file)
+                final_results_list.append((experiment_id, exp_data_path, exp_data_size))
+            except Exception as e:
+                failed_count += 1
+                logger.error(
+                    f"Error processing experiment {experiment_id}: {str(e)}",
+                    exc_info=True,
+                )
+
+        success_rate = len(final_results_list) / max(1, len(experiment_tasks)) * 100
+        logger.info(
+            f"Experiment processing complete: {len(final_results_list)}/{len(experiment_tasks)} "
+            f"successful ({success_rate:.1f}% success rate)"
+        )
+        if failed_count > 0:
+            logger.warning(f"{failed_count} experiments failed to process.")
+
+        return final_results_list
 
     def _generate_llm_tasks_for_experiments(
         self, experiment_tasks: list[ExperimentTask], source_name: str
@@ -272,127 +491,6 @@ class _DataCurator:
                         task_id=task_id,
                     )
 
-    async def execute_llm_tasks_in_batches(
-        self,
-        experiment_tasks: list[ExperimentTask],
-        source_name: str,
-        batch_size: int = 100,
-        semaphore_limit: Optional[int] = 50,
-    ) -> dict[str, LLMResult]:
-        """Execute LLM tasks in batches to manage memory usage.
-
-        Parameters
-        ----------
-        experiment_tasks : list[ExperimentTask]
-            List of ``ExperimentTask`` objects to process.
-        source_name : str
-            Name of the source dataset (e.g., "pubmed", "reddit").
-        batch_size : int
-            Number of tasks to process in each batch.
-        semaphore_limit : Optional[int]
-            Maximum number of concurrent LLM calls. If None, no limit is applied.
-
-        Returns
-        -------
-        dict[str, LLMResult]
-            Dictionary mapping task IDs to their results.
-        """
-
-        # First, collect all tasks to get total count
-        all_tasks = list(
-            self._generate_llm_tasks_for_experiments(experiment_tasks, source_name)
-        )
-
-        if not all_tasks:
-            logger.info("No LLM tasks to execute for the given experiments.")
-            return {}
-
-        total_tasks = len(all_tasks)
-        logger.info(f"Processing {total_tasks} LLM tasks in batches of {batch_size}")
-
-        semaphore = (
-            asyncio.Semaphore(semaphore_limit) if semaphore_limit else nullcontext()
-        )
-        all_results = {}
-        failed_count = 0
-
-        async def execute_single_task(task: LLMTask) -> LLMResult:
-            async with semaphore:
-                try:
-                    logger.debug(f"Executing LLM task: {task.task_id}")
-                    lm_response = await self.language_model(
-                        messages=task.messages, response_format=ListResponse
-                    )
-                    parsed_response = extract_list_response(lm_response)
-                    common_names = parsed_response[0] if parsed_response else []
-
-                    return LLMResult(
-                        task_id=task.task_id,
-                        nct_id=task.nct_id,
-                        attribute=task.attribute,
-                        name=task.name,
-                        common_names=common_names,
-                        success=True,
-                    )
-                except Exception as e:
-                    error_msg = f"LLM call failed for {task.nct_id}/{task.attribute}/{task.name}: {str(e)}"
-                    logger.warning(error_msg)
-                    return LLMResult(
-                        task_id=task.task_id,
-                        nct_id=task.nct_id,
-                        attribute=task.attribute,
-                        name=task.name,
-                        common_names=[],
-                        success=False,
-                        error=str(e),
-                    )
-
-        # Process in batches
-        with tqdm(total=total_tasks, desc="Executing LLM tasks", unit="task") as pbar:
-            for i in range(0, total_tasks, batch_size):
-                batch_tasks = all_tasks[i : i + batch_size]
-                batch_number = (i // batch_size) + 1
-                total_batches = (total_tasks + batch_size - 1) // batch_size
-
-                # Execute current batch
-                batch_coroutines = [execute_single_task(task) for task in batch_tasks]
-
-                for coro in asyncio.as_completed(batch_coroutines):
-                    try:
-                        result = await coro
-                        all_results[result.task_id] = result
-
-                        if not result.success:
-                            failed_count += 1
-
-                        # Update progress bar
-                        success_count = len(all_results) - failed_count
-                        pbar.set_postfix(
-                            {
-                                "batch": f"{batch_number}/{total_batches}",
-                                "success": success_count,
-                                "failed": failed_count,
-                                "rate": f"{success_count / max(1, len(all_results)) * 100:.1f}%",
-                            }
-                        )
-                    except Exception as e:
-                        logger.error(f"Unexpected error in LLM task: {e}")
-                        failed_count += 1
-                    finally:
-                        pbar.update(1)
-
-                # Clear batch tasks to free memory
-                del batch_tasks
-                del batch_coroutines
-
-        success_count = len(all_results) - failed_count
-        logger.info(
-            f"Completed LLM tasks: {success_count} successful, {failed_count} failed "
-            f"({success_count / max(1, len(all_results)) * 100:.1f}% success rate)"
-        )
-
-        return all_results
-
     def _group_llm_results_by_experiment(
         self, llm_results: dict[str, LLMResult]
     ) -> dict[str, dict[str, list[str]]]:
@@ -415,173 +513,6 @@ class _DataCurator:
                 final_grouped[nct_id][attribute] = list(set(names))
 
         return final_grouped
-
-    @staticmethod
-    def _mp_worker_process_single_experiment(args_bundle):
-        """
-        Worker function for processing a single experiment.
-        Designed to be run in a separate process.
-        """
-        # Unpack arguments
-        (
-            exp_task,
-            exp_llm_data,
-            source_dataset,
-            study_condition_0,
-            cfg_filter_by_date,
-            clean_paths,
-            experiment_dir,
-        ) = args_bundle
-
-        # Type annotations
-        exp_task: ExperimentTask
-        exp_llm_data: dict[str, list[str]]
-        source_dataset: Union[RedditSource, PubMedSet]
-        study_condition_0: str
-        cfg_filter_by_date: bool
-        clean_paths: list[str]
-        experiment_dir: str
-
-        experiment_id = f"{exp_task.source_name}_{exp_task.nct_id}"
-
-        try:
-            # Apply LLM results to the experiment object
-            if exp_llm_data:
-                for attribute in ["treatment", "outcome"]:
-                    if attribute in exp_llm_data:
-                        common_names = exp_llm_data[attribute]
-                        getattr(
-                            exp_task.experiment_instance, f"{attribute}_common_names"
-                        ).update({exp_task.source_name: common_names})
-
-            # Save the modified experiment object to YAML
-            exp_file = os.path.join(experiment_dir, f"{exp_task.nct_id}.yaml")
-            exp_task.experiment_instance.to_yaml(exp_file)
-
-            # Run experiment data curation using the source_dataset instance
-            exp_data_path, exp_data_size = source_dataset.curate_experiment_data(
-                exp_task.experiment_instance,
-                study_condition_0,
-                cfg_filter_by_date,
-                clean_paths,
-            )
-
-            # Update experiment source paths on the copied experiment instance
-            current_paths = exp_task.experiment_instance.source_paths.get(
-                exp_task.source_name, []
-            )
-            exp_task.experiment_instance.source_paths[exp_task.source_name] = (
-                current_paths + [exp_data_path]
-            )
-
-            # Save the modified experiment object to YAML
-            exp_task.experiment_instance.to_yaml(exp_file)
-
-            return {
-                "status": "success",
-                "experiment_id": experiment_id,
-                "exp_data_path": exp_data_path,
-                "exp_data_size": exp_data_size,
-                "nct_id": exp_task.nct_id,
-            }
-
-        except Exception as e:
-            # Return error information for logging in the main process
-            return {
-                "status": "error",
-                "experiment_id": experiment_id,
-                "nct_id": exp_task.nct_id,
-                "error_message": f"Error in worker for {experiment_id} (NCT: {exp_task.nct_id}): {str(e)}",
-            }
-
-    def process_experiments(
-        self, experiment_tasks: list[ExperimentTask], llm_results: dict[str, LLMResult]
-    ) -> list[tuple[str, str, int]]:
-        """Process experiments with LLM results.
-
-        Parameters
-        ----------
-        experiment_tasks : list[ExperimentTask]
-            List of ``ExperimentTask`` objects to process.
-        llm_results : dict[str, LLMResult]
-            Dictionary mapping task IDs to their results.
-
-        Returns
-        -------
-        list[tuple[str, str, int]]
-            List of tuples containing experiment ID, data path, and data size for
-            each processed experiment.
-        """
-        if not experiment_tasks:
-            logger.info("No experiments to process")
-            return []
-
-        grouped_llm_results = self._group_llm_results_by_experiment(llm_results)
-
-        tasks_args_bundles = []
-        for exp_task in experiment_tasks:
-            exp_llm_data_for_task = grouped_llm_results.get(exp_task.nct_id, {})
-
-            # Bundle arguments for the worker function
-            args_bundle = (
-                exp_task,
-                exp_llm_data_for_task,
-                self.source_dataset,
-                self.study.conditions[0],
-                self.cfg.filter_by_date,
-                self.clean_paths,
-                self._experiment_dir,
-            )
-            tasks_args_bundles.append(args_bundle)
-
-        final_results_list = []
-        processed_count = 0
-        failed_count = 0
-
-        max_workers = self.cfg.get("max_workers_curate") or max(
-            1, (psutil.cpu_count(logical=False) or 1) // 4
-        )
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_worker_outputs = executor.map(
-                _DataCurator._mp_worker_process_single_experiment, tasks_args_bundles
-            )
-
-            for worker_output in tqdm(
-                future_worker_outputs,
-                total=len(tasks_args_bundles),
-                desc=f"Processing experiments [{max_workers} workers]",
-                unit="exp",
-            ):
-                if worker_output["status"] == "success":
-                    final_results_list.append(
-                        (
-                            worker_output["experiment_id"],
-                            worker_output["exp_data_path"],
-                            worker_output["exp_data_size"],
-                        )
-                    )
-                    # Update completed_experiments in the main process
-                    self._completed_experiments.add(worker_output["experiment_id"])
-                    processed_count += 1
-                    logger.debug(
-                        "Successfully processed experiment: "
-                        f"{worker_output['experiment_id']} (size: "
-                        f"{worker_output['exp_data_size']})"
-                    )
-                else:  # status == "error"
-                    failed_count += 1
-                    logger.error(worker_output["error_message"])
-
-        success_rate = processed_count / max(1, len(experiment_tasks)) * 100
-        logger.info(
-            f"Experiment processing complete: {processed_count}/{len(experiment_tasks)} "
-            f"successful ({success_rate:.1f}% success rate)"
-        )
-        if failed_count > 0:
-            logger.warning(f"{failed_count} experiments failed to process.")
-
-        return final_results_list
 
 
 async def _curate_experiments(
@@ -621,15 +552,11 @@ async def _curate_experiments(
         logger.info(f"No experiments to process for {source_name}")
         return
 
-    # Phase 1: Execute LLM calls in batches
-    batch_size = cfg.get("curate_batch_size", 200)
-    semaphore_limit = cfg.get("curate_max_concurrency", 100)
-
-    llm_results = await curator.execute_llm_tasks_in_batches(
+    # Phase 1: Execute LLM calls
+    llm_results = await curator.get_common_names_with_llm(
         experiment_tasks=experiment_tasks,
         source_name=source_name,
-        batch_size=batch_size,
-        semaphore_limit=semaphore_limit,
+        semaphore_limit=cfg.get("curate_max_concurrency", 10),
     )
 
     # Phase 2: Process all experiments
@@ -651,11 +578,7 @@ async def _curate_experiments(
 @hydra.main(config_path="conf/", config_name="config.yaml", version_base="1.2")
 def main(cfg: DictConfig) -> None:
     # Load study from yaml
-    study_file = os.path.join(
-        cfg.save_path,
-        "studies",
-        cfg.conditions[0].lower().replace(" ", "_") + "_study.yaml",
-    )
+    study_file = get_study_filepaths(cfg.save_path, cfg.conditions[0])["study"]
     study = Study.from_yaml(study_file)
 
     # Extract train, val, and test NCT IDs
@@ -671,37 +594,49 @@ def main(cfg: DictConfig) -> None:
     all_ncts = train_ncts + val_ncts + test_ncts
 
     # Create study dataset
-    study_dataset_file = os.path.join(
-        cfg.data_path,
-        "studies",
-        cfg.conditions[0].lower().replace(" ", "_") + "_study_dataset.yaml",
-    )
+    study_dataset_file = get_study_filepaths(cfg.save_path, cfg.conditions[0])[
+        "study_dataset"
+    ]
     if os.path.exists(study_dataset_file):
         study_dataset = StudyDataset.from_yaml(study_dataset_file)
     else:
         study_dataset = StudyDataset(study.conditions, cfg.sources)
 
-    async def process_all_sources():
+    async def process_all_sources() -> None:
         for source_name in cfg.sources:
             source_dataset: Union[RedditSource, PubMedSet] = instantiate(
                 cfg[source_name]
             )
             study_dataset.data_paths[f"{source_name}_cleaned"] = []
 
-            all_condition_keywords = []
-            for nct_id, split in zip(all_ncts, splits):
-                status = "active" if split == "test" else "completed"
-                exp = Experiment(cfg.data_path, nct_id, status=status)
-                condition_keywords = exp.conditions if exp.conditions else []
-                all_condition_keywords.extend(condition_keywords)
+            all_condition_keywords: list[str] = []
+            for nct_id, split in tqdm(
+                zip(all_ncts, splits),
+                desc=f"Collecting all condition keywords for {source_name}",
+                leave=False,
+            ):
+                if split == "test":
+                    trial_path = os.path.join(
+                        cfg.data_path, f"nct_reports_test/{nct_id}.json"
+                    )
+                else:
+                    trial_path = os.path.join(
+                        cfg.data_path, f"nct_reports/{nct_id}.json"
+                    )
+
+                trial = ClinicalTrial.from_json_file(trial_path)
+
+                conditions_mod = trial.protocolSection.conditionsModule
+                if conditions_mod is not None:
+                    condition_keywords = conditions_mod.conditions
+                    all_condition_keywords.extend(condition_keywords)
+
+            # Ensure unique keywords
             all_condition_keywords = list(set(all_condition_keywords))
 
             # Filter and download data related to condition keywords
             await source_dataset.condition_filter(
-                all_condition_keywords,
-                study_dataset,
-                study_dataset_file,
-                semaphore_limit=cfg.get("curate_max_concurrency", 100),
+                all_condition_keywords, study_dataset, study_dataset_file
             )
 
             clean_paths = source_dataset.clean_data()

@@ -2,6 +2,8 @@ _target_: naturalv2.sources.reddit.RedditSource
 data_path: ${data_path}/reddit_data
 lm_cfg: ${sample_model}
 max_download_workers: null
-anonymize: True
+reddit_api_qpm: 90 # QPM is 100 with OAuth and 10 without; 90 allows for some buffer
+max_llm_concurrency: 10
+anonymize: False
 anonymizer_score_threshold: 0.85
 anonymizer_batch_size: 1000

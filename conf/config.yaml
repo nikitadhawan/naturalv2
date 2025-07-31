@@ -28,7 +28,6 @@ date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 
 # configs for filter_curate pipleine
 curate_max_concurrency: 10
-max_workers_curate: null
 filter_by_date: True
 
 probs_model:

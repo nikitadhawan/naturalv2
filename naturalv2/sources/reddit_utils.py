@@ -35,6 +35,17 @@ warnings.simplefilter("ignore", FutureWarning)
 logger = logging.getLogger(__name__)
 
 
+def is_retryable_error(exception: BaseException) -> bool:
+    """Check if the exception is retryable."""
+    return (
+        isinstance(exception, asyncprawcore.exceptions.ResponseException)
+        and exception.response.status in [429, 500, 502, 503, 504]
+    ) or (
+        isinstance(exception, error.HTTPError)
+        and exception.code in [429, 500, 502, 503, 504]
+    )
+
+
 async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.DataFrame:
     """Fetch subreddit about information and create a DataFrame.
 
@@ -177,6 +188,12 @@ def download_subs_list(data_path: str) -> str:
     return filepath
 
 
+@retry(
+    wait=wait_random_exponential(min=1, max=30),
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(is_retryable_error),
+    before_sleep=before_sleep_log(logger, logging.INFO),
+)
 def download_sub_data(
     subreddit: str,
     data_type: Literal["submissions", "comments"],
@@ -209,21 +226,19 @@ def download_sub_data(
     """
     if data_type not in ["submissions", "comments"]:
         raise ValueError(
-            "Expected data_type to be 'submissions' or 'comments', but got {}".format(
-                data_type
-            )
+            f"Expected data_type to be 'submissions' or 'comments', but got {data_type}"
         )
 
     os.makedirs(data_path, exist_ok=True)
 
-    save_path = os.path.join(data_path, "{}_{}.parquet".format(subreddit, data_type))
+    save_path = os.path.join(data_path, f"{subreddit}_{data_type}.parquet")
     if os.path.exists(save_path):
         logger.warning(
             f"File {save_path} already exists. Skipping download for {subreddit} {data_type}."
         )
         return
 
-    file_path = os.path.join(data_path, "{}_{}.zst".format(subreddit, data_type))
+    file_path = os.path.join(data_path, f"{subreddit}_{data_type}.zst")
     if not os.path.exists(file_path):
         # Go to TMPDIR if set, otherwise stay current working directory, since
         # wget doesn't respect TMPDIR
@@ -232,9 +247,7 @@ def download_sub_data(
         try:
             os.chdir(tmpdir)
             _ = wget.download(
-                "https://the-eye.eu/redarcs/files/{}_{}.zst".format(
-                    subreddit, data_type
-                ),
+                f"https://the-eye.eu/redarcs/files/{subreddit}_{data_type}.zst",
                 out=data_path,
                 bar=None,
             )
@@ -253,20 +266,23 @@ def download_sub_data(
             bad_lines += 1
         file_lines += 1
 
-    df = pd.DataFrame(data, copy=False)
+    df = pd.DataFrame(data, dtype="string")
 
     # remove deleted posts or comments
     df = (
-        df[df["selftext"] != "[deleted]"]
+        df[df["selftext"] not in ["[deleted]", "[removed]"]]
         if data_type == "submissions"
-        else df[df["body"] != "[deleted]"]
+        else df[df["body"] not in ["[deleted]", "[removed]"]]
     )
 
+    df["score"] = pd.to_numeric(df["score"], errors="coerce")
+
+    cols_to_keep = ["created_utc", "author", "permalink", "subreddit", "score"]
     # anonymize dataframe
     if anonymizer_instance is not None:
         df = anonymizer_instance.anonymize_dataframe(
             df,
-            cols_to_keep=["created_utc", "author", "permalink", "subreddit", "score"],
+            cols_to_keep=cols_to_keep,
             cols_to_anonymize=["selftext", "title"]
             if data_type == "submissions"
             else ["body"],
@@ -275,11 +291,13 @@ def download_sub_data(
             num_workers=num_workers,
         )
 
-    df.to_parquet(save_path, index=False, compression="snappy")
+    df.convert_dtypes(dtype_backend="pyarrow").to_parquet(
+        save_path, index=False, compression="snappy"
+    )
     os.remove(file_path)
     logger.info(
         f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
-        f"({bad_lines:,} bad lines)"
+        f"({bad_lines:,} bad lines) and {len(df):,} valid records."
     )
 
 
@@ -319,11 +337,10 @@ def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
     post_df = post_df.loc[idx]
 
     # remove rows without a score
-    post_df = post_df.loc[post_df["score"] != None]
+    post_df = post_df.loc[post_df["score"].notna()]
 
     # remove rows where the submission is deleted or removed
-    post_df = post_df.loc[post_df[text_field] != "[deleted]"]
-    post_df = post_df.loc[post_df[text_field] != "[removed]"]
+    post_df = post_df.loc[post_df[text_field] not in ["[deleted]", "[removed]"]]
 
     # remove very short comments
     if text_field == "body":
@@ -452,7 +469,7 @@ def get_context_post_df(
                 "title": [submission["title"]] * len(other_comments),
                 "initial_post": [submission_text] * len(other_comments),
                 "report": other_comments["body"].astype(str).tolist(),
-                "score": other_comments["score"].astype(str).tolist(),
+                "score": other_comments["score"].astype(int).tolist(),
                 "date_created": other_comments["date_created"].tolist(),
                 "permalink": other_comments["permalink"].tolist(),
                 "author_replies": [[]] * len(other_comments),
@@ -475,6 +492,7 @@ def get_context_post_df(
 
     if all_results:
         return pd.DataFrame(all_results)
+
     return pd.DataFrame(
         columns=[
             "subreddit",
@@ -520,13 +538,6 @@ def filter_by_date(
     # Filter rows which have a datetime and are on or before cutoff
     mask = (date_series.notna()) & (date_series <= cutoff_dt)
     return adf.loc[mask].reset_index(drop=True)
-
-
-def is_retryable_error(exception: BaseException) -> bool:
-    """Check if the exception is retryable."""
-    return isinstance(
-        exception, asyncprawcore.exceptions.ResponseException
-    ) and exception.response.status in [429, 500, 502, 503, 504]
 
 
 @retry(

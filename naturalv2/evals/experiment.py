@@ -731,8 +731,8 @@ class Experiment:
 
             # Create a mask for categories that have more samples than the tail sum
             # This means, if we kept the category and grouped all the categories
-            # after it into "Other", we would have more samples in the "Other" category
-            # than in the category itself
+            # after it into "Other", the "Other" category would have at most as many samples
+            # as the category itself
             tail_mask = tail_sums <= value_counts
 
             if tail_mask.any():

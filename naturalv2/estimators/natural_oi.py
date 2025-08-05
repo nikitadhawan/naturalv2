@@ -58,11 +58,16 @@ class NaturalOI:
                 "Conditionals DataFrame must contain 'y_given_tx_probs' column."
             )
 
+        discretized_covariate_cols = [
+            f"{cov}_discretized" for cov in self._covariate_names
+        ]
         if not all(
-            covariate in conditionals.columns for covariate in self._covariate_names
+            covariate in conditionals.columns
+            for covariate in discretized_covariate_cols
         ):
             raise ValueError(
-                f"Conditionals DataFrame must contain all covariates: {self._covariate_names}"
+                "Conditionals DataFrame must contain all covariates: "
+                f"{discretized_covariate_cols}."
             )
 
         # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
@@ -95,7 +100,10 @@ class NaturalOI:
         self.outcome_conditionals = self._compute_outcome_conditionals(conditionals)
         all_ites = np.zeros((self._num_treat, len(conditionals)))
         for i, (_, row) in enumerate(conditionals.iterrows()):
-            x = row[self._covariate_names].to_dict()
+            x = {
+                k.replace("_discretized", ""): v
+                for k, v in row[discretized_covariate_cols].to_dict().items()
+            }
             x_idx = feat_dicts.index(x)
             for t in range(self._num_treat):
                 all_ites[t, i] = self.outcome_conditionals[x_idx, t]
@@ -124,10 +132,10 @@ class NaturalOI:
 
             # restrict posts using sampled features
             for key in self._covariate_names:
-                subset = subset.loc[subset[key] == features[key]]
+                subset = subset.loc[subset[key + "_discretized"] == features[key]]
 
             for t in range(self._num_treat):
-                subset_t = subset.loc[subset[TREATMENT_COL_NAME] == t]
+                subset_t = subset.loc[subset[TREATMENT_COL_NAME + "_discretized"] == t]
 
                 if len(subset_t) > 0:
                     py1_given_xt = np.array(

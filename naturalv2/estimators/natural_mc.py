@@ -66,17 +66,27 @@ class NaturalMC:
             If the treatment column or covariates are not present in the data.
 
         """
-        if TREATMENT_COL_NAME not in observational_data.columns:
+        sampled_treatment_col = f"{TREATMENT_COL_NAME}_sampled"
+        if sampled_treatment_col not in observational_data.columns:
             raise ValueError(
-                f"{TREATMENT_COL_NAME} must be in ``observational_data`` columns."
+                f"{sampled_treatment_col} must be in ``observational_data`` columns."
             )
 
+        sampled_outcome_col = f"{outcome}_sampled"
+        if sampled_outcome_col not in observational_data.columns:
+            raise ValueError(
+                f"{sampled_outcome_col} must be in ``observational_data`` columns."
+            )
+
+        discretized_covariate_names = [
+            f"{cov}_discretized" for cov in self._covariate_names
+        ]
         if not all(
             covariate in observational_data.columns
-            for covariate in self._covariate_names
+            for covariate in discretized_covariate_names
         ):
             raise ValueError(
-                f"All covariates {self._covariate_names} must be in "
+                f"All covariates {discretized_covariate_names} must be in "
                 "``observational_data`` columns."
             )
 
@@ -84,9 +94,9 @@ class NaturalMC:
         model = self._causal_models[self.estimator_type]()
 
         data = CausalData(
-            X=observational_data[self._covariate_names].copy(),  # covariates
-            T=observational_data[f"{TREATMENT_COL_NAME}_sampled"].copy(),  # treatment
-            Y=observational_data[f"{outcome}_sampled"].copy(),  # outcome
+            X=observational_data[discretized_covariate_names].copy(),  # covariates
+            T=observational_data[sampled_treatment_col].copy(),  # treatment
+            Y=observational_data[sampled_outcome_col].copy(),  # outcome
         )
 
         model.fit(data)

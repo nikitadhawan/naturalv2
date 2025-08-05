@@ -222,7 +222,16 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
         """
         treatment_options = (
             context.experiment.treatment_names
-            + context.experiment.treatment_common_names[context.source_name]
+            + list(
+                context.experiment.treatment_common_names[context.source_name].keys()
+            )
+            + [
+                item
+                for sublist in context.experiment.treatment_common_names[
+                    context.source_name
+                ].values()
+                for item in sublist
+            ]
             + ["None"]
         )
         response_format = create_response_format(
@@ -607,9 +616,9 @@ def _result_processor(
         )
         return None  # Signal error
 
-    if extract_type == ExtractType.KNOWNS:
-        # append "_known" to each key in the parsed data
-        parsed_data = {f"{key}_known": value for key, value in parsed_data.items()}
+    if extract_type == ExtractType.IMPUTATIONS:
+        # append "_imputed" to each key in the parsed data
+        parsed_data = {f"{key}_imputed": value for key, value in parsed_data.items()}
 
     # Combine original row data with parsed LLM data
     parsed_row_data: dict[str, Any] = row.to_dict()

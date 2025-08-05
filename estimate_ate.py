@@ -102,10 +102,8 @@ def _calculate_treatment_effects(
         absolute errors if available.
     """
     if not use_imputed_nones:
-        # Filter out rows with ``None`` in any 'known' covariate columns
-        extractions = extractions.dropna(
-            subset=[f"{cov}_known" for cov in experiment.covariate_names]
-        )
+        # Filter out rows with ``None`` in any covariate columns
+        extractions = extractions.dropna(subset=experiment.covariate_names)
 
     result_dicts = []
 

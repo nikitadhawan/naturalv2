@@ -53,6 +53,20 @@ class NaturalIPW:
             An array of shape (num_treatments, num_samples) containing the ITEs for
             each treatment and covariate combination.
         """
+        discretized_covariate_cols = [
+            f"{cov}_discretized" for cov in self._covariate_names
+        ]
+        if not all(col in conditionals.columns for col in discretized_covariate_cols):
+            raise ValueError(
+                "Conditionals DataFrame must contain discretized covariate columns: "
+                f"{discretized_covariate_cols}."
+            )
+
+        if "ty_given_x_probs" not in conditionals.columns:
+            raise ValueError(
+                "Conditionals DataFrame must contain 'ty_given_x_probs' column."
+            )
+
         # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
         conditionals = conditionals.copy()
         # outcome_idx = self.experiment.outcome_names.index(outcome)
@@ -84,7 +98,11 @@ class NaturalIPW:
         all_ites = np.zeros((self._num_treat, len(conditionals)))
         for i, (_, row) in enumerate(conditionals.iterrows()):  # Fixed PLW2901
             probs = row["ty_given_x_probs"]
-            x = row[self._covariate_names].to_dict()
+            x = {
+                k.replace("_discretized", ""): v
+                for k, v in row[discretized_covariate_cols].to_dict().items()
+            }
+
             # enumerate treatments
             for t in range(self._num_treat):
                 # propensity score given x features
@@ -121,7 +139,7 @@ class NaturalIPW:
 
             # restrict posts using sampled features
             for key in self._covariate_names:
-                subset = subset.loc[subset[key] == features[key]]
+                subset = subset.loc[subset[key + "_discretized"] == features[key]]
             if len(subset) == 0:
                 prop_scores = [0 for _ in range(self._num_treat)]
             else:

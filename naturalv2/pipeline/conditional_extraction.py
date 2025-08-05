@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import build_lm_instance_from_cfg, get_prompt_logprobs
-from naturalv2.pipeline import INCLUSION_COL_NAME, TREATMENT_COL_NAME
+from naturalv2.pipeline import INCLUSION_COL_NAME, OUTCOME_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.utils import convert_enum_to_dicts, enumerate_strings, get_save_path
@@ -321,10 +321,15 @@ async def extract_conditionals(  # noqa: PLR0912
         logging.info(f"File {file_path} already exists. Loading existing results.")
         return pd.read_csv(file_path, index_col=0)
 
-    # NOTE: We only need to discretize the input once when the first conditional
-    # extraction stage is run. Here we assume that the inclusion stage is run
-    # first, which may not always be the case.
-    if extract_type == ConditionalsExtractType.INCLUSION:
+    discretized_cols = [
+        col + "_discretized"
+        for col in experiment.covariate_names
+        + experiment.extended_covariate_names
+        + [TREATMENT_COL_NAME, OUTCOME_COL_NAME]
+    ]
+    if not input_df.empty and not all(
+        col in input_df.columns for col in discretized_cols
+    ):
         # Discretize input dataframe
         input_df = experiment.discretize(input_df)
 
@@ -525,15 +530,23 @@ async def _llm_task_producer(
         try:
             report = row["report"]
             if extract_type != ConditionalsExtractType.INCLUSION:
+                discretized_covariate_names = [
+                    col + "_discretized" for col in experiment.covariate_names
+                ]
                 to_sample = (
-                    experiment.covariate_names
+                    discretized_covariate_names
                     if extract_type == ConditionalsExtractType.TY_GIVEN_X
-                    else experiment.covariate_names + [TREATMENT_COL_NAME]
+                    else discretized_covariate_names
+                    + [TREATMENT_COL_NAME + "_discretized"]
                 )
+                to_transform = {
+                    k.replace("_discretized", ""): v
+                    for k, v in row[to_sample].to_dict().items()
+                }
 
                 # Add question and answers for covariates to the report
                 covariate_answers = experiment.apply_transform(
-                    row[to_sample].to_dict(), repr_type="language"
+                    to_transform, repr_type="language"
                 )
                 question_prompts = experiment.get_question_prompts()
                 qa_text = "\n\nQuestions and their correct answers:"
@@ -616,7 +629,7 @@ async def _prompt_processor(
             # Make LLM call
             # The use of asyncio.TaskGroup ensures atomicity - if one of the calls
             # fails, all tasks are cancelled.
-            async with asyncio.TaskGroup() as tg:
+            async with asyncio.timeout(300.0), asyncio.TaskGroup() as tg:
                 tasks: list[asyncio.Task] = []
                 for prompt in prompts:
                     tasks.append(tg.create_task(llm(prompt=prompt), name="LLM-Call"))

@@ -5,9 +5,9 @@ import logging
 import os
 import re
 from itertools import product
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Literal, get_args, get_origin
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, create_model, model_validator
 
 from naturalv2.evals.clinical_trial import (
     ArmGroup,
@@ -29,8 +29,13 @@ class ListResponse(BaseModel):
 
 def create_response_format(
     name: str, keys: list[str], types: dict[str, Any] | None = None
-) -> BaseModel:
+) -> type[BaseModel]:
     """Generate a Pydantic model with fields specified by the given keys.
+
+    If `types` is provided, it should be a dictionary mapping each key to its
+    corresponding type. If `types` is None, all fields will default to Any type.
+    Literal types will be validated to match the provided options, allowing
+    case-insensitive matching.
 
     Parameters
     ----------
@@ -44,16 +49,50 @@ def create_response_format(
 
     Returns
     -------
-    BaseModel
+    type[BaseModel]
         A Pydantic model class with fields corresponding to the provided keys.
+        If any field is a Literal type, it will be validated to allow case-insensitive
+        matching of its values.
     """
-
     if types is None:
         types = dict.fromkeys(keys, Any)
 
-    fields = {key: (types.get(key, Any)) for key in keys}
+    fields = {}
+    literal_fields = {}
 
-    return create_model(name, **fields)
+    for key in keys:
+        field_type = types.get(key, Any)
+        fields[key] = (field_type, ...)
+
+        if get_origin(field_type) is Literal:
+            literal_fields[key] = get_args(field_type)
+
+    # Create base model
+    BaseModelClass = create_model(name, **fields)  # noqa: N806
+
+    if not literal_fields:
+        return BaseModelClass
+
+    # Create class with model validator
+    class ValidatedModel(BaseModelClass):
+        @model_validator(mode="before")
+        @classmethod
+        def normalize_literals(cls, values):
+            if isinstance(values, dict):
+                for field_name, literal_options in literal_fields.items():
+                    if field_name in values:
+                        value = values[field_name]
+                        if isinstance(value, str):
+                            value_lower = value.lower()
+                            for option in literal_options:
+                                if str(option).lower() == value_lower:
+                                    values[field_name] = option
+                                    break
+            return values
+
+    ValidatedModel.__name__ = name
+    ValidatedModel.__qualname__ = name
+    return ValidatedModel
 
 
 async def concurrency_limited(coro: Coroutine, semaphore: asyncio.Semaphore) -> Any:

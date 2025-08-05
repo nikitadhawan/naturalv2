@@ -768,7 +768,7 @@ class Experiment:
                 # as "Other"
                 categories = value_counts.index.tolist()[:-1]
 
-            extractions[col_name] = np.where(
+            extractions[discrete_covariate_name] = np.where(
                 covariate_data.isin(categories),
                 covariate_data,
                 "Other",
@@ -776,7 +776,7 @@ class Experiment:
             updated_answers = categories + ["Other"]
             cov_map = {name: i for (i, name) in enumerate(updated_answers)}
             extractions[discrete_covariate_name] = (
-                extractions[col_name].replace(cov_map).astype(int)
+                extractions[discrete_covariate_name].replace(cov_map).astype(int)
             )
             self.options.update(
                 {covariate_name: [str(name) for name in updated_answers]}

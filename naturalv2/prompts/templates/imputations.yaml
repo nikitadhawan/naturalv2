@@ -26,10 +26,10 @@ user_prompt_template: |-
       {%- if covariates is defined and covariate_desc is defined %}
         {%- for covariate in covariates %}
           {%- if covariate in covariate_desc %}
-            - Name: {{ covariate }}
+            - Name: '{{ covariate }}'
               Description: {{ covariate_desc[covariate] }}
           {%- else %}
-            - Name: {{ covariate }}
+            - Name: '{{ covariate }}'
               Description: Standard clinical definition applies
           {%- endif %}
         {%- endfor %}
@@ -37,10 +37,10 @@ user_prompt_template: |-
       {%- raw %}
         {%- for covariate in covariates %}
           {%- if covariate in covariate_desc %}
-            - Name: {{ covariate }}
+            - Name: '{{ covariate }}'
               Description: {{ covariate_desc[covariate] }}
           {%- else %}
-            - Name: {{ covariate }}
+            - Name: '{{ covariate }}'
               Description: Standard clinical definition applies
           {%- endif %}
         {%- endfor %}
@@ -50,7 +50,7 @@ user_prompt_template: |-
   **Required Output Schema:**
   Your JSON must contain exactly these keys with specific values:
   {% for covariate in covariates %}
-  - {{ covariate }}
+  - '{{ covariate }}'
   {% endfor %}
 
   **Imputation Guidelines:**

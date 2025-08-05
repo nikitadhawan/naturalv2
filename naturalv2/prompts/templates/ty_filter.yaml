@@ -78,12 +78,11 @@ user_prompt_template: |-
 
   **Response Format:**
   Respond only with a valid JSON object containing the following keys:
-  ```json
   {
     "treatment_taken": "[value]",
     "is_outcome_mentioned": "[value]"
   }
-  ```
+
 
   **Key Definitions and Guidelines:**
   treatment_taken - The treatment mentioned in the report.

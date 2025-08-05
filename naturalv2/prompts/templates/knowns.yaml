@@ -31,10 +31,10 @@ user_prompt_template: |-
   {%- if covariates is defined and covariate_desc is defined %}
     {%- for covariate in covariates %}
       {%- if covariate in covariate_desc %}
-        - Name: {{ covariate }}
+        - Name: '{{ covariate }}'
           Description: {{ covariate_desc[covariate] }}
       {%- else %}
-        - Name: {{ covariate }}
+        - Name: '{{ covariate }}'
           Description: Standard clinical definition applies
       {%- endif %}
     {%- endfor %}
@@ -42,10 +42,10 @@ user_prompt_template: |-
   {%- raw %}
     {%- for covariate in covariates %}
       {%- if covariate in covariate_desc %}
-        - Name: {{ covariate }}
+        - Name: '{{ covariate }}'
           Description: {{ covariate_desc[covariate] }}
       {%- else %}
-        - Name: {{ covariate }}
+        - Name: '{{ covariate }}'
           Description: Standard clinical definition applies
       {%- endif %}
     {%- endfor %}
@@ -60,7 +60,7 @@ user_prompt_template: |-
 
   - Handle Missing Information:
     - Use "Unknown" when the report contains indirect indicators or contextual clues that strongly suggest a specific value for the covariate, but the value is not explicitly stated. (Example: "I am an Uncle" strongly suggests male sex, but doesn't explicitly state it)
-    - Use "None", or "No" where appropriate, when there is no information in the report - either explicit or inferential - that relates to the covariate at all.
+    - Use "None", or "No" for "meets_inclusion_criteria", when there is no information in the report - either explicit or inferential - that relates to the covariate at all.
 
-  Return ONLY a valid JSON object with all the covariates as keys and their extracted values as values.
+  Return ONLY a valid JSON object with all the covariate names as keys and their extracted values as values.
   Ensure the JSON is well-formed, with no additional text or formatting.

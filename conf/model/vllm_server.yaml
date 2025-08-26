@@ -2,11 +2,17 @@
 
 model_name: ???
 completion_type: chat
-routing_strategy: least-busy
-allowed_failures: 10
-cooldown_time: 2
-retry_after: 1
-num_retries: 4
+routing_strategy: usage-based-routing-v2
+allowed_failures: 100
+cooldown_time: 5
+retry_after: 5
+num_retries: 10
 seed: ${..seed}
 temperature: 0.7
 max_tokens: 512
+redis_host: ${oc.env:REDIS_HOST,null}
+redis_port: ${oc.env:REDIS_PORT,null}
+redis_password: ${oc.env:REDIS_PASSWORD,null}
+redis_client_kwargs:
+  ssl: ${oc.env:REDIS_SSL,False}
+  ssl_check_hostname: False

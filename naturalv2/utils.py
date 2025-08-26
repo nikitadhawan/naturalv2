@@ -10,7 +10,7 @@ from typing import Any, Coroutine, Literal, get_args, get_origin
 
 from pydantic import BaseModel, create_model, model_validator
 
-from naturalv2.evals.clinical_trial import (
+from naturalv2.clinical_trial import (
     ArmGroup,
     ArmGroupType,
     ClinicalTrial,

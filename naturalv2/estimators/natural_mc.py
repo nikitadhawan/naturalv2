@@ -5,12 +5,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from naturalv2.evals.experiment import Experiment
-from naturalv2.models.causal_models import (
-    IPSW,
-    CausalData,
-    OutcomeImputation,
-)
+from naturalv2.experiment import Experiment
+from naturalv2.models.causal_models import IPSW, CausalData, OutcomeImputation
 from naturalv2.pipeline import OUTCOME_COL_NAME, TREATMENT_COL_NAME
 
 

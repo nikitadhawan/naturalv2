@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from functools import partial
+from typing import TYPE_CHECKING
 
 import asyncpraw
 import numpy as np
@@ -24,9 +25,8 @@ from tenacity import (
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
-from naturalv2.prompts.utils import load_prompt
+from naturalv2.prompts import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     download_sub_data,
@@ -36,8 +36,12 @@ from naturalv2.sources.reddit_utils import (
     is_retryable_error,
     rule_based_filter,
 )
-from naturalv2.study import StudyDataset
 from naturalv2.utils import ListResponse, concurrency_limited, sanitize_filename
+
+
+if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
+    from naturalv2.study import StudyDataset
 
 
 logger = logging.getLogger(__name__)
@@ -96,7 +100,10 @@ class RedditSource:
         os.makedirs(self._subs_data_dir, exist_ok=True)
 
     async def condition_filter(
-        self, keywords: list[str], study_dataset: StudyDataset, study_dataset_file: str
+        self,
+        keywords: list[str],
+        study_dataset: "StudyDataset",
+        study_dataset_file: str,
     ) -> dict[str, list[str]]:
         """Filter subreddits based on keywords in their description.
 
@@ -294,7 +301,7 @@ class RedditSource:
 
     def curate_experiment_data(
         self,
-        experiment: Experiment,
+        experiment: "Experiment",
         study_name: str,
         apply_date_filter: bool,
         clean_data_paths: list[str],

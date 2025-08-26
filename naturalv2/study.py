@@ -6,7 +6,7 @@ import os
 import yaml
 from omegaconf import DictConfig
 
-from naturalv2.evals.experiment import Experiment
+from naturalv2.experiment import Experiment
 from naturalv2.utils import sanitize_filename
 
 

@@ -12,16 +12,17 @@ from omegaconf import DictConfig
 from scipy.special import softmax
 from tqdm import tqdm
 
-from naturalv2.evals.experiment import Experiment
 from naturalv2.models.lm import build_lm_instance_from_cfg, get_prompt_logprobs
-from naturalv2.pipeline import INCLUSION_COL_NAME, TREATMENT_COL_NAME
+from naturalv2.pipeline.constants import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.utils import _get_alphabet_labels, get_answer_dicts, get_save_path
 
 
 if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
     from naturalv2.models.lm import LM, ResponseType
+
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +255,7 @@ class InclusionProbStage(ConditionalExtractionStage):
 
 async def extract_conditionals(  # noqa: PLR0912
     input_df: pd.DataFrame,
-    experiment: Experiment,
+    experiment: "Experiment",
     source_name: str,
     outcome: str,
     llm: "LM",
@@ -445,7 +446,7 @@ async def extract_conditionals(  # noqa: PLR0912
 
 
 def _prepare_for_conditional_extraction(
-    experiment: Experiment, features_to_enumerate: list[str]
+    experiment: "Experiment", features_to_enumerate: list[str]
 ) -> tuple[list[str], list[str], list[dict[str, str] | dict[str, int]]]:
     """Prepare data structures for conditional extraction."""
 
@@ -505,7 +506,7 @@ def _build_interleaved_multiple_choice_questions(
 async def _llm_task_producer(
     queue: asyncio.Queue,
     input_df: pd.DataFrame,
-    experiment: Experiment,
+    experiment: "Experiment",
     extract_type: ConditionalsExtractType,
     interleaved_mcqa: list[str],
     outcome: str,

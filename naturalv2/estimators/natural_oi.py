@@ -5,7 +5,7 @@ from ast import literal_eval
 import numpy as np
 import pandas as pd
 
-from naturalv2.evals.experiment import Experiment
+from naturalv2.experiment import Experiment
 from naturalv2.pipeline import TREATMENT_COL_NAME
 from naturalv2.utils import get_answer_dicts
 

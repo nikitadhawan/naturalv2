@@ -8,7 +8,7 @@ import pandas as pd
 import yaml
 from hydra import compose, initialize
 
-from create_study import run_study_and_get_stats
+from naturalv2.cli.create_study import run_study_and_get_stats
 
 
 logging.basicConfig(

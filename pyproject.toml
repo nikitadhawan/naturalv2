@@ -8,7 +8,7 @@ dependencies = [
     "asyncpraw>=7.8.1",
     "causallib>=0.10.0",
     "hydra-core>=1.3.2",
-    "litellm[proxy]>=1.75.8",
+    "litellm[proxy]>=1.76.0",
     "lxml>=6.0.0",
     "nest-asyncio>=1.6.0",
     "numpy<2.0.0",
@@ -18,6 +18,7 @@ dependencies = [
     "scipy>=1.16.0",
     "tenacity>=9.1.2",
     "tqdm>=4.67.1",
+    "vllm>=0.10.1.1",
     "wget>=3.2",
 ]
 
@@ -30,10 +31,10 @@ dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=1.0.0",
     "redis>=6.4.0",
-    "ruff>=0.12.8",
+    "ruff>=0.12.10",
     "scalene>=1.5.53",
     "submitit>=1.5.3",
-    "vllm>=0.10.1",
+    "weave>=0.51.56",
 ]
 
 [tool.ruff]
@@ -84,6 +85,20 @@ ignore-names = ["X*", "setUp"]
 [tool.ruff.lint.isort]
 lines-after-imports = 2
 
+[project.scripts]
+filter_curate = "naturalv2.cli.filter_curate:main"
+estimate_ate = "naturalv2.cli.estimate_ate:main"
+create_study = "naturalv2.cli.create_study:main"
+
 [tool.pytest.ini_options]
 markers = ["integration_test: marks tests as integration tests"]
 asyncio_default_fixture_loop_scope = "function"
+
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# use package name as the root directory instead of 'src'
+module-name = "naturalv2"
+module-root = ""

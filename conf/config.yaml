@@ -21,8 +21,8 @@ sources:
   - pubmed
 split: train
 train_ratio: 0.6
-save_path: ${oc.env:SAVE_PATH}
-data_path: ${oc.env:DATA_PATH}
+save_path: ${oc.env:SAVE_PATH,./outputs}
+data_path: ${oc.env:DATA_PATH,./data}
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 
 # configs for filter_curate pipleine

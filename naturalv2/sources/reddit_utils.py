@@ -275,7 +275,7 @@ def download_sub_data(
         else df[~df["body"].isin(["[deleted]", "[removed]"])]
     )
 
-    df["score"] = pd.to_numeric(df["score"], errors="coerce")
+    df.loc[:, "score"] = pd.to_numeric(df["score"], errors="coerce")
 
     cols_to_keep = ["created_utc", "author", "permalink", "subreddit", "score"]
     # anonymize dataframe

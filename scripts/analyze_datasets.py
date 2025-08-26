@@ -4,7 +4,7 @@ import os
 
 import matplotlib.pyplot as plt
 
-from naturalv2.evals.experiment import Experiment
+from naturalv2.experiment import Experiment
 from naturalv2.study import StudyDataset, get_study_filepaths
 
 

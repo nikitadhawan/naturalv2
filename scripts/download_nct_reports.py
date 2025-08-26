@@ -1,6 +1,6 @@
 import argparse
 
-from naturalv2.evals.clinical_trial import download_clinical_trials
+from naturalv2.clinical_trial import download_clinical_trials
 
 
 if __name__ == "__main__":

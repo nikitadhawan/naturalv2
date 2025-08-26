@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 from omegaconf import DictConfig
@@ -14,9 +14,10 @@ from rich.console import Console
 from rich.pretty import Pretty
 from rich.table import Table
 
-from naturalv2.evals.experiment import Experiment
-from naturalv2.models.lm import LM
 
+if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
+    from naturalv2.models import LM
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class PipelineContext:
     """Context for the pipeline execution."""
 
     #: An instance of the ``Experiment`` class containing experiment details.
-    experiment: Experiment
+    experiment: "Experiment"
 
     #: The name of the source from which data is being processed.
     source_name: str
@@ -74,7 +75,7 @@ class PipelineStage(ABC):
     def __init__(self, model_cfg: DictConfig) -> None:
         """Initialize the pipeline stage with model configuration."""
         self.model_cfg = model_cfg
-        self._llm: LM | None = None
+        self._llm: "LM" | None = None
         self._model_name: str = model_cfg.get("model_name", "")
         self._stats: dict[str, Any] = {}
 
@@ -84,14 +85,14 @@ class PipelineStage(ABC):
         return self.__class__.__name__
 
     @property
-    def llm(self) -> LM:
+    def llm(self) -> "LM":
         """Lazy-loaded language model property."""
         if self._llm is None:
             self._llm = self.get_language_model()
         return self._llm
 
     @abstractmethod
-    def get_language_model(self) -> LM:
+    def get_language_model(self) -> "LM":
         """Return the language model used in this stage."""
         pass
 

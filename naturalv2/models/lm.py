@@ -1,3 +1,5 @@
+"""Litellm-backed LLM interface."""
+
 import asyncio
 import logging
 import warnings

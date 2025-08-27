@@ -1,3 +1,5 @@
+"""Rate limiter based on the token bucket algorithm."""
+
 import asyncio
 import heapq
 import logging

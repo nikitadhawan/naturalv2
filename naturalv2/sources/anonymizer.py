@@ -1,3 +1,5 @@
+"""Module for anonymizing sensitive information in text data using Presidio."""
+
 import logging
 from collections import Counter
 from typing import Optional

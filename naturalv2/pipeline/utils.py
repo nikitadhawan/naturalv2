@@ -1,4 +1,4 @@
-"""Utility functions for the NaturalV2 pipeline."""
+"""Utility functions for the NATURAL pipeline."""
 
 import asyncio
 import csv

@@ -1,3 +1,5 @@
+"""Token bucket implementation for rate limiting."""
+
 import logging
 import math
 import time

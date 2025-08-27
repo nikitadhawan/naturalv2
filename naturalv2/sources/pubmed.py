@@ -1,3 +1,5 @@
+"""Module to filter and curate PubMed articles based on specific conditions."""
+
 import json
 import os
 from typing import TYPE_CHECKING, Optional

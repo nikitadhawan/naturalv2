@@ -1,3 +1,5 @@
+"""Representation of Clinical Trial Data from ClinicalTrials.gov."""
+
 import json
 import logging
 import multiprocessing as mp

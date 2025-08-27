@@ -1,3 +1,5 @@
+"""Wrapper around the LLM class from vLLM for offline inference."""
+
 import warnings
 from typing import TYPE_CHECKING, Optional, Union
 

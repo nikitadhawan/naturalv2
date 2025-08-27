@@ -1,3 +1,5 @@
+"""Utilities for retrieving and processing PubMed case reports."""
+
 import ast
 import json
 import os

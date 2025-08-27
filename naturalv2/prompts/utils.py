@@ -1,3 +1,5 @@
+"""Utility functions for loading and formatting prompts."""
+
 import logging
 import os
 from typing import Any, Literal

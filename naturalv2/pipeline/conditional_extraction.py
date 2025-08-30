@@ -1,10 +1,11 @@
 """Conditional extraction stages of the NATURAL pipeline."""
 
 import asyncio
+import functools
 import logging
 import os
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ from omegaconf import DictConfig
 from scipy.special import softmax
 from tqdm import tqdm
 
-from naturalv2.models.lm import build_lm_instance_from_cfg, get_prompt_logprobs
+from naturalv2.models import lm, vllm
 from naturalv2.pipeline.constants import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
@@ -20,6 +21,11 @@ from naturalv2.utils import _get_alphabet_labels, get_answer_dicts, get_save_pat
 
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.llm import LLM
+    from vllm.outputs import RequestOutput
+    from vllm.sampling_params import SamplingParams
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+
     from naturalv2.experiment import Experiment
     from naturalv2.models.lm import LM, ResponseType
 
@@ -48,6 +54,9 @@ class ConditionalExtractionStage(PipelineStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    use_offline_inference : bool, optional, default=False
+        Whether to use vLLM offline inference for computing conditional probabilities.
+        If ``False``, an API-based online model is assumed and used.
     length_norm : bool, optional, default=False
         Whether to normalize the log probabilities by the length of the prompt,
         by default False.
@@ -62,6 +71,7 @@ class ConditionalExtractionStage(PipelineStage):
     def __init__(
         self,
         model_cfg: DictConfig,
+        use_offline_inference: bool = False,
         length_norm: bool = False,
         max_concurrent_workers: int | None = None,
     ) -> None:
@@ -69,60 +79,26 @@ class ConditionalExtractionStage(PipelineStage):
         super().__init__(model_cfg)
         self.length_norm = length_norm
         self.max_concurrent_workers = max_concurrent_workers
+        self.use_offline_inference = use_offline_inference
         self.prompt_example: str = ""
+        self._sampling_params: Optional["SamplingParams"] = None
 
-    def get_language_model(self) -> "LM":
+    def get_language_model(self) -> Union["LM", "LLM"]:
         """Instantiate the language model for conditional extraction.
 
         Returns
         -------
-        LM
+        LM | LLM
             An instance of the language model configured for conditional extraction.
 
         """
-        model = build_lm_instance_from_cfg(self.model_cfg)
+        if self.use_offline_inference:
+            llm, self._sampling_params = self._get_vllm_model()
+            return llm
 
-        # Set mandatory parameters for conditional extraction
-        if model.completion_type != "text":
-            logger.warning(
-                f"Model {self._model_name} is not configured for text completion, "
-                "which is required for conditional/inclusion probability extraction."
-                "Setting completion type to 'text'."
-            )
-            model.completion_type = "text"  # Ensure text completion type
+        return self._get_online_model()
 
-        if "prompt_logprobs" not in model._request_params or (
-            "prompt_logprobs" in model._request_params
-            and model._request_params["prompt_logprobs"] not in [0, False]
-        ):
-            logger.warning(
-                "The conditional/inclusion probability extraction stages requires "
-                "the log probabilities of the tokens in the input prompt but the "
-                "model is not configured to return them. "
-                "Setting prompt_logprobs to 0."
-            )
-            model._request_params["prompt_logprobs"] = 0
-
-        if "max_tokens" not in model._request_params:
-            logger.warning(
-                "The conditional/inclusion probability extraction stages does not "
-                "require the model to generate any tokens. Setting max_tokens to 1 "
-                "to improve throughput."
-            )
-            model._request_params["max_tokens"] = 1  # No generation needed
-        if (
-            "max_tokens" in model._request_params
-            and model._request_params["max_tokens"] > 1
-        ):
-            logger.warning(
-                "The conditional/inclusion probability extraction stages does not "
-                "require the model to generate any tokens. Consider setting max_tokens "
-                "to 1 to improve throughput."
-            )
-
-        return model
-
-    def prompt_template(self):
+    def prompt_template(self) -> dict[str, Any]:
         return {"prompt_example": self.prompt_example}
 
     async def process(
@@ -179,6 +155,8 @@ class ConditionalExtractionStage(PipelineStage):
             context.save_path,
             context.exp_name,
             extract_type,
+            is_offline_inference=self.use_offline_inference,
+            sampling_params=self._sampling_params,
             length_norm=self.length_norm,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -187,7 +165,59 @@ class ConditionalExtractionStage(PipelineStage):
             f"{len(self.data)} reports."
         )
         self.prompt_example = prompt_example
+
+        if self.use_offline_inference:
+            # Shutdown vLLM engine to free up resources and reinitialize for next use
+            self.llm.llm_engine.engine_core.shutdown()
         return self.data
+
+    def _get_vllm_model(self) -> tuple["LLM", "SamplingParams"]:
+        """Instantiate an instance of ``vllm.LLM class for offline inference."""
+        return vllm.get_llm_and_sampling_params(**self.model_cfg)
+
+    def _get_online_model(self) -> "LM":
+        """Instantiate an instance of the ``LM`` class for online inference."""
+        model = lm.build_lm_instance_from_cfg(self.model_cfg)
+
+        # Set mandatory parameters for conditional extraction
+        if model.completion_type != "text":
+            logger.warning(
+                f"Model {self._model_name} is not configured for text completion, "
+                "which is required for conditional/inclusion probability extraction."
+                "Setting completion type to 'text'."
+            )
+            model.completion_type = "text"  # Ensure text completion type
+
+        if "prompt_logprobs" not in model._request_params or (
+            "prompt_logprobs" in model._request_params
+            and model._request_params["prompt_logprobs"] not in [0, False]
+        ):
+            logger.warning(
+                "The conditional/inclusion probability extraction stages requires "
+                "the log probabilities of the tokens in the input prompt but the "
+                "model is not configured to return them. "
+                "Setting prompt_logprobs to 0."
+            )
+            model._request_params["prompt_logprobs"] = 0
+
+        if "max_tokens" not in model._request_params:
+            logger.warning(
+                "The conditional/inclusion probability extraction stages does not "
+                "require the model to generate any tokens. Setting max_tokens to 1 "
+                "to improve throughput."
+            )
+            model._request_params["max_tokens"] = 1  # No generation needed
+        if (
+            "max_tokens" in model._request_params
+            and model._request_params["max_tokens"] > 1
+        ):
+            logger.warning(
+                "The conditional/inclusion probability extraction stages does not "
+                "require the model to generate any tokens. Consider setting max_tokens "
+                "to 1 to improve throughput."
+            )
+
+        return model
 
 
 class InclusionProbStage(ConditionalExtractionStage):
@@ -201,6 +231,9 @@ class InclusionProbStage(ConditionalExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    use_offline_inference : bool, optional, default=False
+        Whether to use vLLM offline inference for computing inclusion probabilities.
+        If ``False``, an API-based online model is assumed and used.
     length_norm : bool, optional, default=False
         Whether to normalize the log probabilities by the length of the prompt,
         by default False.
@@ -242,6 +275,8 @@ class InclusionProbStage(ConditionalExtractionStage):
             context.save_path,
             context.exp_name,
             extract_type,
+            is_offline_inference=self.use_offline_inference,
+            sampling_params=self._sampling_params,
             length_norm=self.length_norm,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -250,6 +285,10 @@ class InclusionProbStage(ConditionalExtractionStage):
             f"{len(self.data)} reports."
         )
         self.prompt_example = prompt_example
+
+        if self.use_offline_inference:
+            # Shutdown vLLM engine to free up resources and reinitialize for next use
+            self.llm.llm_engine.engine_core.shutdown()
         return self.data
 
 
@@ -258,11 +297,13 @@ async def extract_conditionals(  # noqa: PLR0912
     experiment: "Experiment",
     source_name: str,
     outcome: str,
-    llm: "LM",
+    llm: Union["LM", "LLM"],
     model_name: str,
     save_path: str,
     exp_name: str,
     extract_type: ConditionalsExtractType,
+    is_offline_inference: bool = False,
+    sampling_params: Optional["SamplingParams"] = None,
     length_norm: bool = False,
     max_concurrent_requests: int | None = None,
 ) -> tuple[pd.DataFrame, str]:
@@ -283,7 +324,7 @@ async def extract_conditionals(  # noqa: PLR0912
         Name of the source from which the data was collected.
     outcome : str
         The outcome variable for which the conditional probabilities are computed.
-    llm : LM
+    llm : LM | LLM
         Language model instance used to compute the conditional probabilities.
     model_name : str
         Name of the language model used for conditional extraction.
@@ -297,6 +338,12 @@ async def extract_conditionals(  # noqa: PLR0912
         - ConditionalsExtractType.Y_GIVEN_TX: P(Y|T,X)
         - ConditionalsExtractType.INCLUSION: P(X ∈ Inclusion | report)
         - ConditionalsExtractType.NONE: No extraction needed
+    is_offline_inference : bool, default=False
+        Whether to use vLLM offline inference for computing conditional probabilities.
+        If ``False``, an API-based online model is assumed and used.
+    sampling_params : SamplingParams | None, optional, default=None
+        Sampling parameters to use with the LLM. Only used if `is_offline_inference`
+        is ``True``.
     length_norm : bool, default=False
         Whether to normalize the log probabilities by the length of the prompt.
     max_concurrent_requests : int | None, optional, default=None
@@ -309,7 +356,7 @@ async def extract_conditionals(  # noqa: PLR0912
         DataFrame containing the original input data with additional columns
         for the extracted conditional probabilities.
     str
-        An example input prompt dict used for conditional extraction.
+        An example input prompt used for conditional extraction.
 
     """
 
@@ -352,95 +399,54 @@ async def extract_conditionals(  # noqa: PLR0912
     num_workers = min(max_concurrent_requests or min(10, num_samples), num_samples)
     queue_size = max(num_workers * 10, 1000)
 
-    prompt_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
     result_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
 
     # Create progress bars for the different tasks
     producer_pbar = _create_progress_bar(total=num_samples, desc="Creating prompts")
-    worker_pbar = _create_progress_bar(total=num_samples, desc="Processing prompts")
     writer_pbar = _create_progress_bar(total=num_samples, desc="Writing results")
-
-    # Create task for producing prompts
-    producer_task = asyncio.create_task(
-        _llm_task_producer(
-            prompt_queue,
-            input_df,
-            experiment,
-            extract_type,
-            interleaved_options,
-            outcome,
-            source_name,
-            producer_pbar,
-        ),
-        name="LLM-Task-Producer",
-    )
-
-    # Create worker tasks to process prompts
-    # Account for the number of interleaved options as each worker will process
-    # a batch of prompts corresponding to these at once.
-    worker_tasks = [
-        asyncio.create_task(
-            _prompt_processor(
-                worker_id,
-                prompt_queue,
-                result_queue,
-                llm,
-                extract_type,
-                length_norm,
-                answer_dicts,
-                worker_pbar,
-            ),
-            name=f"Prompt-Processor-{worker_id}",
-        )
-        for worker_id in range(max(1, num_workers // len(interleaved_options)))
-    ]
 
     # Create a CSV writer task to write results to a file
     csv_writer_task = asyncio.create_task(
         _csv_writer(result_queue, file_path, writer_pbar), name="CSV-Writer"
     )
 
-    try:
-        # Wait for the producer to finish producing tasks
-        example_prompt = await producer_task
-        await prompt_queue.join()  # Ensure all prompts are processed
-
-        # Signal workers to stop by putting None in the queue
-        for _ in range(len(worker_tasks)):
-            await prompt_queue.put((None, None, None))  # Signal to stop processing
-
-        # Wait for all workers to finish
-        worker_errors = await asyncio.gather(*worker_tasks, return_exceptions=True)
-
-        processing_error_count = 0
-        for idx, error in enumerate(worker_errors):
-            if isinstance(error, int):
-                processing_error_count += error
-            elif isinstance(error, BaseException):
-                logging.error(
-                    f"Worker {idx} encountered an exception: {type(error).__name__} - {error}",
-                    exc_info=True,
-                )
-                processing_error_count += 1
-
-        await result_queue.put(None)  # Signal the CSV writer to finish
-        success_count = await csv_writer_task
-        logger.info(
-            f"Processing completed. {success_count} records written, "
-            f"{processing_error_count} errors"
+    if is_offline_inference:
+        example_prompt = await _offline_inference(
+            input_df,
+            experiment,
+            extract_type,
+            interleaved_options,
+            outcome,
+            source_name,
+            length_norm,
+            answer_dicts,
+            llm,
+            sampling_params,
+            csv_writer_task,
+            result_queue,
+            producer_pbar,
+            writer_pbar,
         )
-    except BaseException as e:
-        logger.error(f"Error during extraction: {e}", exc_info=True)
-        # Cancel any running tasks
-        for task in [csv_writer_task, producer_task] + worker_tasks:
-            if not task.done():
-                task.cancel()
-        raise
-    finally:
-        # Clean up progress bars
-        for pbar in [producer_pbar, worker_pbar, writer_pbar]:
-            if not pbar.disable:
-                pbar.close()
+    else:
+        worker_pbar = _create_progress_bar(total=num_samples, desc="Processing prompts")
+        example_prompt = await _online_inference(
+            input_df,
+            experiment,
+            extract_type,
+            interleaved_options,
+            outcome,
+            source_name,
+            length_norm,
+            answer_dicts,
+            llm,
+            csv_writer_task,
+            result_queue,
+            producer_pbar,
+            worker_pbar,
+            writer_pbar,
+            num_workers,
+            queue_size,
+        )
 
     return pd.read_csv(file_path, index_col=0), example_prompt
 
@@ -503,8 +509,217 @@ def _build_interleaved_multiple_choice_questions(
     return all_interleaved_options
 
 
-async def _llm_task_producer(
-    queue: asyncio.Queue,
+async def _offline_inference(
+    input_df: pd.DataFrame,
+    experiment: "Experiment",
+    extract_type: ConditionalsExtractType,
+    interleaved_mcqa: list[str],
+    outcome: str,
+    source_name: str,
+    length_norm: bool,
+    answer_dicts: list[dict[str, str]],
+    llm: "LLM",
+    sampling_params: "SamplingParams",
+    csv_writer_task: asyncio.Task,
+    result_queue: asyncio.Queue,
+    producer_pbar: tqdm,
+    writer_pbar: tqdm,
+) -> str:
+    """Perform offline inference using vLLM."""
+    example_prompt: str = ""
+    processing_error_count = 0
+
+    # get all the prompts
+    producer_pbar.total = len(input_df)
+    prompt_items = list(
+        _prompt_generator(
+            input_df,
+            experiment,
+            extract_type,
+            interleaved_mcqa,
+            outcome,
+            source_name,
+            producer_pbar,
+        )
+    )
+
+    rows: list[pd.Series] = []
+    prompts: list[list[str]] = []
+    for _, row, prompt in prompt_items:
+        if prompt is not None:
+            rows.append(row)
+            prompts.append(prompt)
+        else:
+            # The prompt formatting failed for this row
+            logging.error(
+                f"Skipping row at index {row.name} due to prompt formatting failure."
+            )
+            processing_error_count += 1
+
+    num_options_per_row = len(prompts[0]) if prompts else 0
+
+    # flatten the list of prompts
+    flat_prompts: list[str] = [p for sublist in prompts for p in sublist]
+
+    if not example_prompt and flat_prompts:
+        example_prompt = flat_prompts[0]
+
+    responses: list["RequestOutput"] = llm.generate(
+        flat_prompts, sampling_params, use_tqdm=functools.partial(tqdm, leave=False)
+    )
+
+    for idx, row in enumerate(rows):
+        row_responses: list["RequestOutput"] = responses[
+            idx * num_options_per_row : (idx + 1) * num_options_per_row
+        ]
+        try:
+            processed_results = _result_processor(
+                row,
+                row_responses,
+                length_norm=length_norm,
+                answer_dicts=answer_dicts,
+                extract_type=extract_type,
+                is_offline_inference=True,
+                tokenizer=llm.get_tokenizer(),
+            )
+            await result_queue.put(processed_results)
+        except Exception as e:
+            logging.error(
+                f"Failed to process results for item at index {row.name}: "
+                f"{type(e).__name__} - {e}",
+                exc_info=True,
+            )
+            processing_error_count += 1
+            await result_queue.put(False)
+        finally:
+            writer_pbar.update(1)
+
+    await result_queue.put(None)  # Signal the CSV writer to finish
+
+    try:
+        success_count = await csv_writer_task
+        logger.info(
+            f"Processing completed. {success_count} records written, "
+            f"{processing_error_count} errors"
+        )
+    except Exception as e:
+        logger.error(f"Error during writing results: {e}", exc_info=True)
+
+        # Close writer task if running
+        if not csv_writer_task.done():
+            csv_writer_task.cancel()
+        raise
+    finally:
+        # Clean up progress bars
+        for pbar in [producer_pbar, writer_pbar]:
+            if not pbar.disable:
+                pbar.close()
+
+    return example_prompt
+
+
+async def _online_inference(
+    input_df: pd.DataFrame,
+    experiment: "Experiment",
+    extract_type: ConditionalsExtractType,
+    interleaved_options: list[str],
+    outcome: str,
+    source_name: str,
+    length_norm: bool,
+    answer_dicts: list[dict[str, str]],
+    llm: "LM",
+    csv_writer_task: asyncio.Task,
+    result_queue: asyncio.Queue,
+    producer_pbar: tqdm,
+    worker_pbar: tqdm,
+    writer_pbar: tqdm,
+    num_workers: int,
+    queue_size: int,
+) -> str:
+    """Use online services to perform inference."""
+    prompt_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
+
+    # Create task for producing prompts
+    producer_task = asyncio.create_task(
+        _llm_task_producer(
+            prompt_queue,
+            input_df,
+            experiment,
+            extract_type,
+            interleaved_options,
+            outcome,
+            source_name,
+            producer_pbar,
+        ),
+        name="LLM-Task-Producer",
+    )
+
+    # Create worker tasks to process prompts
+    # Account for the number of interleaved options as each worker will process
+    # a batch of prompts corresponding to these at once.
+    worker_tasks = [
+        asyncio.create_task(
+            _prompt_processor(
+                worker_id,
+                prompt_queue,
+                result_queue,
+                llm,
+                extract_type,
+                length_norm,
+                answer_dicts,
+                worker_pbar,
+            ),
+            name=f"Prompt-Processor-{worker_id}",
+        )
+        for worker_id in range(max(1, num_workers // len(interleaved_options)))
+    ]
+
+    try:
+        # Wait for the producer to finish producing tasks
+        example_prompt = await producer_task
+        await prompt_queue.join()  # Ensure all prompts are processed
+
+        # Signal workers to stop by putting None in the queue
+        for _ in range(len(worker_tasks)):
+            await prompt_queue.put((None, None, None))  # Signal to stop processing
+
+        # Wait for all workers to finish
+        worker_errors = await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+        processing_error_count = 0
+        for idx, error in enumerate(worker_errors):
+            if isinstance(error, int):
+                processing_error_count += error
+            elif isinstance(error, BaseException):
+                logging.error(
+                    f"Worker {idx} encountered an exception: {type(error).__name__} - {error}",
+                    exc_info=True,
+                )
+                processing_error_count += 1
+
+        await result_queue.put(None)  # Signal the CSV writer to finish
+        success_count = await csv_writer_task
+        logger.info(
+            f"Processing completed. {success_count} records written, "
+            f"{processing_error_count} errors"
+        )
+    except BaseException as e:
+        logger.error(f"Error during extraction: {e}", exc_info=True)
+        # Cancel any running tasks
+        for task in [csv_writer_task, producer_task] + worker_tasks:
+            if not task.done():
+                task.cancel()
+        raise
+    finally:
+        # Clean up progress bars
+        for pbar in [producer_pbar, worker_pbar, writer_pbar]:
+            if not pbar.disable:
+                pbar.close()
+
+    return example_prompt
+
+
+def _prompt_generator(
     input_df: pd.DataFrame,
     experiment: "Experiment",
     extract_type: ConditionalsExtractType,
@@ -512,16 +727,8 @@ async def _llm_task_producer(
     outcome: str,
     source_name: str,
     pbar: tqdm,
-) -> None:
-    """Produce prompts for the LLM based on the input DataFrame.
-
-    This function formats the input data into prompts for the LLM, including
-    the report text and any relevant covariates and optionallly treatment information
-    based on the specified `extract_type`. It handles exceptions during prompt
-    formatting and puts the prompts into the queue for processing by workers.
-    """
-    example_prompt: str = ""
-
+) -> Generator[tuple[int, pd.Series, list[str] | None], None, None]:
+    """Generate prompts for the LLM based on the input DataFrame."""
     for idx, row in input_df.iterrows():
         try:
             report = row["report"]
@@ -574,22 +781,46 @@ async def _llm_task_producer(
                     report=report_with_option,
                     return_format="prompt",
                 )
+
                 prompts.append(prompt)
-
-            if not example_prompt:
-                example_prompt = prompts[0]
-
-            # Put the prompts into the queue as a unit (must be processed together)
-            await queue.put((idx, row, prompts))
+            yield idx, row, prompts
         except Exception as e:
             logging.error(
                 f"Failed to format prompts for item at index {idx}: {type(e).__name__} - {e}",
                 exc_info=True,
             )
-            # Put a None message to signal failure
-            await queue.put((idx, row, None))
+            yield idx, row, None
         finally:
             pbar.update(1)
+
+
+async def _llm_task_producer(
+    queue: asyncio.Queue,
+    input_df: pd.DataFrame,
+    experiment: "Experiment",
+    extract_type: ConditionalsExtractType,
+    interleaved_mcqa: list[str],
+    outcome: str,
+    source_name: str,
+    pbar: tqdm,
+) -> None:
+    """Produce prompts for the LLM based on the input DataFrame.
+
+    This function formats the input data into prompts for the LLM, including
+    the report text and any relevant covariates and optionallly treatment information
+    based on the specified `extract_type`. It handles exceptions during prompt
+    formatting and puts the prompts into the queue for processing by workers.
+    """
+    example_prompt: str = ""
+
+    for idx, row, prompts in _prompt_generator(
+        input_df, experiment, extract_type, interleaved_mcqa, outcome, source_name, pbar
+    ):
+        if not example_prompt and prompts:
+            example_prompt = prompts[0]
+
+        # Put the prompts into the queue as a unit (must be processed together)
+        await queue.put((idx, row, prompts))
 
     return example_prompt
 
@@ -629,7 +860,7 @@ async def _prompt_processor(
 
             # Make LLM call
             # The use of asyncio.TaskGroup ensures atomicity - if one of the calls
-            # fails, all tasks are cancelled.
+            # fail, all tasks are cancelled.
             async with asyncio.timeout(300.0), asyncio.TaskGroup() as tg:
                 tasks: list[asyncio.Task] = []
                 for prompt in prompts:
@@ -664,10 +895,13 @@ async def _prompt_processor(
 
 def _result_processor(
     row: pd.Series,
-    responses: list["ResponseType"],
+    responses: list["ResponseType"] | list["RequestOutput"],
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
     extract_type: ConditionalsExtractType,
+    is_offline_inference: bool = False,
+    *,
+    tokenizer: Optional["AnyTokenizer"] = None,
 ) -> dict[str, Any]:
     """Process the LLM response and combine it with the original row data.
 
@@ -675,18 +909,30 @@ def _result_processor(
     returns a dictionary with the original row data and the computed probabilities.
 
     """
-    logprobs = []
-    for response in responses:
-        prompt_logprobs_obj = get_prompt_logprobs(response)
-        if prompt_logprobs_obj is None:
-            continue
+    if is_offline_inference:
+        if tokenizer is None:
+            raise ValueError("Tokenizer must be provided for offline inference.")
 
-        logprob = sum(prompt_logprobs_obj.logprobs)
-        if length_norm:
-            logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
-        logprobs.append(logprob)
+        prompt_logprobs = vllm.get_prompt_logprobs(tokenizer, responses)
+        logprob_sums = []
+        for idx, logprobs_list in enumerate(prompt_logprobs):
+            logprob_sum = sum(logprobs_list)
+            if length_norm:
+                logprob_sum = logprob_sum / len(responses[idx].prompt_token_ids)
+            logprob_sums.append(logprob_sum)
+    else:
+        logprob_sums = []
+        for response in responses:
+            prompt_logprobs_obj = lm.get_prompt_logprobs(response)
+            if prompt_logprobs_obj is None:
+                continue
 
-    probs: np.ndarray = softmax(np.array(logprobs), axis=0)
+            logprob = sum(prompt_logprobs_obj.logprobs)
+            if length_norm:
+                logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
+            logprob_sums.append(logprob)
+
+    probs: np.ndarray = softmax(np.array(logprob_sums), axis=0)
     sample_index = np.random.choice(len(probs), p=probs)
 
     sampled_features = answer_dicts[sample_index]

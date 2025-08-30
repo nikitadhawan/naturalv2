@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import pandas as pd
 from omegaconf import DictConfig
@@ -16,6 +16,8 @@ from rich.table import Table
 
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.llm import LLM
+
     from naturalv2.experiment import Experiment
     from naturalv2.models import LM
 
@@ -75,8 +77,11 @@ class PipelineStage(ABC):
     def __init__(self, model_cfg: DictConfig) -> None:
         """Initialize the pipeline stage with model configuration."""
         self.model_cfg = model_cfg
-        self._llm: "LM" | None = None
-        self._model_name: str = model_cfg.get("model_name", "")
+        self._llm: Optional[Union["LM", "LLM"]] = None
+        self._model_name: str = (
+            model_cfg.get("model_name", None)
+            or model_cfg.get("llm_params", {}).get("model", "").split("/")[-1]
+        )
         self._stats: dict[str, Any] = {}
 
     @property
@@ -85,14 +90,14 @@ class PipelineStage(ABC):
         return self.__class__.__name__
 
     @property
-    def llm(self) -> "LM":
+    def llm(self) -> Union["LM", "LLM"]:
         """Lazy-loaded language model property."""
         if self._llm is None:
             self._llm = self.get_language_model()
         return self._llm
 
     @abstractmethod
-    def get_language_model(self) -> "LM":
+    def get_language_model(self) -> Union["LM", "LLM"]:
         """Return the language model used in this stage."""
         pass
 
@@ -123,11 +128,19 @@ class PipelineStage(ABC):
     def get_stats(self) -> dict[str, Any]:
         """Return a dictionary of statistics collected during processing."""
         if "cost" not in self._stats:
-            self._stats["cost"] = self.llm.cost
+            self._stats["cost"] = self.llm.cost if hasattr(self.llm, "cost") else 0.0
         if "total_prompt_tokens" not in self._stats:
-            self._stats["total_prompt_tokens"] = self.llm.total_prompt_tokens
+            self._stats["total_prompt_tokens"] = (
+                self.llm.total_prompt_tokens
+                if hasattr(self.llm, "total_prompt_tokens")
+                else 0
+            )
         if "total_completion_tokens" not in self._stats:
-            self._stats["total_completion_tokens"] = self.llm.total_completion_tokens
+            self._stats["total_completion_tokens"] = (
+                self.llm.total_completion_tokens
+                if hasattr(self.llm, "total_completion_tokens")
+                else 0
+            )
 
         return self._stats
 
@@ -252,7 +265,12 @@ class NATURALPipeline:
 
                     stage.add_stat("data_count", len(current_data))
                     stage.add_stat("model_name", stage._model_name)
-                    stage.add_stat("model_request_params", stage.llm._request_params)
+                    stage.add_stat(
+                        "model_request_params",
+                        stage.llm._request_params
+                        if hasattr(stage.llm, "_request_params")
+                        else {},
+                    )
                     # TODO: add prompt template to stats
                     stage_stats = stage.get_stats()
                     logger.info(f"Stage {stage.stage_name} completed successfully.")

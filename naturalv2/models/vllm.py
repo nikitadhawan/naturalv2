@@ -1,105 +1,105 @@
-"""Wrapper around the LLM class from vLLM for offline inference."""
+"""Helper functions for using vLLM for offline inference."""
 
 import warnings
-from typing import TYPE_CHECKING, Optional, Union
-
-import torch
-from vllm.sampling_params import SamplingParams
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.llm import LLM
     from vllm.outputs import RequestOutput
+    from vllm.sampling_params import SamplingParams
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
-class VLLM:
-    def __init__(
-        self,
-        model: str,
-        tokenizer_path: Optional[str] = None,
-        trust_remote_code: bool = False,
-        num_gpus: Optional[int] = None,
-        dtype: str = "auto",
-        seed: Optional[int] = None,
-        gpu_mem_util: float = 0.9,
-        enforce_eager: Optional[bool] = None,
-        download_dir: Optional[str] = None,
-        max_seq_len: Optional[int] = None,
-        max_num_seqs: Optional[int] = None,
-        add_bos: bool = False,
-        # sampling params
-        temperature: float = 1.0,
-        top_p: float = 1.0,
-        prompt_logprobs: Optional[int] = None,
-        max_tokens: Optional[int] = 16,
-        **kwargs,
-    ) -> None:
-        self.add_bos = add_bos
+def get_llm_and_sampling_params(
+    llm_params: dict[str, Any],
+    sampling_params: dict[str, Any] | None = None,
+) -> tuple["LLM", "SamplingParams"]:
+    """Return an instance of `vllm.LLM` class and sampling parameters.
 
-        if not num_gpus:
-            num_gpus = torch.cuda.device_count()
+    Parameters
+    ----------
+    llm_params : dict[str, Any]
+        Parameters to initialize the `vllm.LLM` class.
+    sampling_params : dict[str, Any] | None, optional, default=None
+        Sampling parameters to override the default ones.
 
-        from vllm.entrypoints.llm import LLM  # noqa: PLC0415
+    Returns
+    -------
+    tuple["LLM", "SamplingParams"]
+        An instance of `vllm.LLM` class and sampling parameters.
+    """
+    import msgspec  # type: ignore # noqa: PLC0415
+    from vllm.entrypoints.llm import LLM  # type: ignore # noqa: PLC0415
+    from vllm.sampling_params import SamplingParams  # type: ignore # noqa: PLC0415
 
-        self.llm = LLM(
-            model=model,
-            tokenizer=tokenizer_path,
-            trust_remote_code=trust_remote_code,
-            tensor_parallel_size=num_gpus,
-            dtype=dtype,
-            seed=seed,
-            gpu_memory_utilization=gpu_mem_util,
-            enforce_eager=enforce_eager,
-            max_model_len=max_seq_len,
-            max_num_seqs=max_num_seqs,
-            download_dir=download_dir,
-            **kwargs,
+    llm = LLM(**llm_params)
+    default_sampling_params = msgspec.structs.asdict(llm.get_default_sampling_params())
+
+    if sampling_params is not None:
+        default_sampling_params.update(sampling_params)
+
+    return llm, SamplingParams(**default_sampling_params)
+
+
+def should_add_bos(tokenizer: "AnyTokenizer") -> bool:
+    """Check if the tokenizer has a beginning-of-sequence (BOS) token.
+
+    If not, it sets the BOS token to be the same as the end-of-sequence (EOS) token
+    and issues a warning.
+
+    Parameters
+    ----------
+    tokenizer : AnyTokenizer
+        The tokenizer to check.
+
+    Returns
+    -------
+    bool
+        True if the BOS token was added, False otherwise.
+
+    Warns
+    -----
+    UserWarning
+        If the tokenizer does not have a BOS token and it is set to the EOS token.
+    """
+    test_tokens = tokenizer.encode("test", add_special_tokens=True)
+    if tokenizer.bos_token_id not in test_tokens:
+        if tokenizer.bos_token is None:
+            tokenizer.bos_token = tokenizer.eos_token
+        warnings.warn(
+            f"Adding to the prompt the ``bos`` token: {tokenizer.bos_token}. "
+            "If this is an ``eos`` token, this tokenizer does not have a ``bos`` token.",
+            stacklevel=2,
+        )
+        return True
+
+    return False
+
+
+def get_prompt_logprobs(
+    tokenizer: "AnyTokenizer", outputs: list["RequestOutput"]
+) -> list[list[float]]:
+    """Extract the log probabilities of the input tokens from the outputs.
+
+    Parameters
+    ----------
+    tokenizer : AnyTokenizer
+        The tokenizer used to encode the prompts.
+    outputs : list[RequestOutput]
+        The outputs from the LLM containing the prompt log probabilities.
+
+    Returns
+    -------
+    list[list[float]]
+        A list of lists containing the log probabilities of the input tokens for
+        each output.
+    """
+    logprobs = []
+    for output in outputs:
+        input_tokens = tokenizer.encode(output.prompt, add_special_tokens=True)
+        logprobs.append(
+            [i[j].logprob for i, j in zip(output.prompt_logprobs[1:], input_tokens[1:])]
         )
 
-        self.tokenizer: "AnyTokenizer" = self.llm.get_tokenizer()
-        self.check_bos()
-
-        self._sampling_params = {
-            "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens,
-            "prompt_logprobs": prompt_logprobs,
-            "seed": seed,
-        }
-
-    def check_bos(self):
-        # Check if tokenizer automatically adds BOS token; set add_bos to True if BOS token to be added manually
-        test_tokens = self.tokenizer.encode("test", add_special_tokens=True)
-        if self.tokenizer.bos_token_id not in test_tokens:
-            if self.tokenizer.bos_token is None:
-                self.tokenizer.bos_token = self.tokenizer.eos_token
-            warnings.warn(
-                f"Adding to the prompt the bos token: {self.tokenizer.bos_token}. If this is an eos token, this tokenizer does not have a bos token.",
-                stacklevel=2,
-            )
-            self.add_bos = True
-
-    def get_completions(
-        self, prompt: Union[str, list[str]], **sampling_params
-    ) -> list["RequestOutput"]:
-        sampling_params = SamplingParams(**{**self._sampling_params, **sampling_params})
-        if isinstance(prompt, str):
-            prompt = [prompt]
-
-        if self.add_bos:
-            prompt = [self.tokenizer.bos_token + p for p in prompt]
-
-        return self.llm.generate(prompt, sampling_params)
-
-    def get_prompt_logprobs(self, outputs: list["RequestOutput"]) -> list[list[float]]:
-        logprobs = []
-        for output in outputs:
-            input_tokens = self.tokenizer.encode(output.prompt, add_special_tokens=True)
-            logprobs.append(
-                [
-                    i[j].logprob
-                    for i, j in zip(output.prompt_logprobs[1:], input_tokens[1:])
-                ]
-            )
-
-        return logprobs
+    return logprobs

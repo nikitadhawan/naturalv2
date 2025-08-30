@@ -29,20 +29,12 @@ date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 curate_max_concurrency: 10
 filter_by_date: True
 
-probs_model:
-  completion_type: text
-  temperature: 1.0
-  max_tokens: 1
-  prompt_logprobs: 0
-  get_response: False
-  local: False
-
 pipeline_max_concurrent_workers: 8
 
 pipeline_stages:
-  # - _target_: naturalv2.pipeline.sample_extraction.RelevanceFilterStage
-  #   model_cfg: ${cheap_model}
-  #   max_concurrent_workers: ${pipeline_max_concurrent_workers}
+  - _target_: naturalv2.pipeline.sample_extraction.RelevanceFilterStage
+    model_cfg: ${cheap_model}
+    max_concurrent_workers: ${pipeline_max_concurrent_workers}
 
   - _target_: naturalv2.pipeline.sample_extraction.TreatmentOutcomeFilterStage
     model_cfg: ${cheap_model}
@@ -60,11 +52,13 @@ pipeline_stages:
     model_cfg: ${probs_model}
     length_norm: False
     max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    use_offline_inference: False
 
   - _target_: naturalv2.pipeline.conditional_extraction.ConditionalExtractionStage
     model_cfg: ${probs_model}
     length_norm: False
     max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    use_offline_inference: False
 
 use_imputed_nones: True
 use_inclusion_weights: True

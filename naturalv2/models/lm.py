@@ -579,8 +579,4 @@ def build_lm_instance_from_cfg(cfg: DictConfig):
         value for _, value in cfg_copy["deployment_params"].items()
     ]
 
-    # remove keys that are not needed for LM initialization
-    cfg_copy.pop("local", None)
-    cfg_copy.pop("get_response", None)
-
     return LM(**cfg_copy)

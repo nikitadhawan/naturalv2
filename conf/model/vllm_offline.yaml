@@ -1,10 +1,14 @@
-model: meta-llama/Llama-2-70b-chat-hf
-trust_remote_code: True
-seed: ${seed}
-gpu_mem_util: 0.8
-max_seq_len: 4096
-add_bos: False
-temperature: 1.0
-top_p: 1.0
-max_tokens: 1
-download_dir: ${user.vllm_model_cache}
+llm_params:
+  model: ???
+  trust_remote_code: True
+  gpu_memory_utilization: 0.9
+  max_model_len: 16384
+  tensor_parallel_size: 4
+  seed: ${seed}
+  download_dir: ${oc.env:VLLM_CACHE_ROOT,null}
+sampling_params:
+  seed: ${seed}
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 1
+  prompt_logprobs: 0

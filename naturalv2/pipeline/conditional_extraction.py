@@ -860,7 +860,7 @@ async def _prompt_processor(
 
             # Make LLM call
             # The use of asyncio.TaskGroup ensures atomicity - if one of the calls
-            # fail, all tasks are cancelled.
+            # fails, all tasks are cancelled.
             async with asyncio.timeout(300.0), asyncio.TaskGroup() as tg:
                 tasks: list[asyncio.Task] = []
                 for prompt in prompts:

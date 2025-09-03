@@ -10,6 +10,7 @@ system_prompt: |-
 
   You will receive information about a specific treatment and a target data source (e.g., patient forums, scientific literature).
   Your goal is to generate a structured list of terms that would be used to refer to this treatment within that source, focusing on maximizing recall for data retrieval tasks.
+
 user_prompt_template: |-
   Based on the clinical trial treatment described below, identify the most common brand names, colloquial terms, common misspellings or alternative names used to refer to this treatment in {{ source }} content.
 

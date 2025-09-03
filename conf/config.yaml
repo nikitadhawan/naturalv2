@@ -29,6 +29,20 @@ date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 curate_max_concurrency: 10
 filter_by_date: True
 
+condition_config:
+  _target_: naturalv2.pipeline.curation.ConditionStage
+  model_cfg: ${sample_model}
+  source_name:
+  max_concurrent_workers: ${curate_max_concurrency}
+
+synonym_config:
+  _target_: naturalv2.pipeline.curation.SynonymStage
+  model_cfg: ${sample_model}
+  source_name:
+  attribute: "treatment"
+  max_concurrent_workers: ${curate_max_concurrency}
+
+# configs for estimate_ate pipeline
 pipeline_max_concurrent_workers: 8
 
 pipeline_stages:
@@ -47,6 +61,11 @@ pipeline_stages:
   - _target_: naturalv2.pipeline.sample_extraction.ImputationsStage
     model_cfg: ${sample_model}
     max_concurrent_workers: ${pipeline_max_concurrent_workers}
+
+  # # Use this for NATURAL-MC
+  # - _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
+  #   model_cfg: ${sample_model}
+  #   max_concurrent_workers: ${pipeline_max_concurrent_workers}
 
   - _target_: naturalv2.pipeline.conditional_extraction.InclusionProbStage
     model_cfg: ${probs_model}

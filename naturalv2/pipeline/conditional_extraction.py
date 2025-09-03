@@ -17,7 +17,7 @@ from naturalv2.models import lm, vllm
 from naturalv2.pipeline.constants import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
-from naturalv2.utils import _get_alphabet_labels, get_answer_dicts, get_save_path
+from naturalv2.utils import get_alphabet_labels, get_answer_dicts, get_save_path
 
 
 if TYPE_CHECKING:
@@ -166,6 +166,7 @@ class ConditionalExtractionStage(PipelineStage):
             f"{len(self.data)} reports."
         )
         self.prompt_example = prompt_example
+        self.data = context.experiment.discretize_ty(self.data)
 
         if self.use_offline_inference:
             # Shutdown vLLM engine to free up resources and reinitialize for next use
@@ -498,7 +499,7 @@ def _build_interleaved_multiple_choice_questions(
 
             # Add options/choices
             num_choices = len(answer_choices[key])
-            option_labels = _get_alphabet_labels(num_choices)
+            option_labels = get_alphabet_labels(num_choices)
             interleaved_enum += "\nOptions: "
             for i in range(num_choices):
                 interleaved_enum += option_labels[i] + answer_choices[key][i] + " "
@@ -756,16 +757,10 @@ def _prompt_generator(
                 covariate_answers = experiment.apply_transform(
                     to_transform, repr_type="language"
                 )
-                question_prompts = experiment.get_question_prompts()
-                qa_text = "\n\n**Questions and their correct answers:**"
+                # question_prompts = experiment.get_question_prompts()
+                qa_text = "\n\n**Covariate information about this individual:**"
                 for key in covariate_answers:
-                    qa_text += (
-                        "\nQ: "
-                        + question_prompts[key]
-                        + " A: "
-                        + str(covariate_answers[key])
-                        + "."
-                    )
+                    qa_text += f"\n{key}: {str(covariate_answers[key])}."
                 report += qa_text
 
             # Repeat the report for all interleaved options

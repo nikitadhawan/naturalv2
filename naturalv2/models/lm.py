@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+import os
 import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Union
 
 import httpx
+from dotenv import load_dotenv
 from litellm import Router, model_cost, token_counter
 from litellm._logging import verbose_logger, verbose_router_logger
 from litellm.cost_calculator import completion_cost
@@ -18,11 +20,14 @@ from typing_extensions import TypedDict
 from naturalv2.utils import ListResponse
 
 
-try:
+load_dotenv()
+is_weave_available = os.getenv("USE_WEAVE", "false").lower() == "true"
+
+if is_weave_available:
     import weave
 
     weave_op = weave.op
-except ImportError:
+else:
     # Fallback decorator: does nothing
     def weave_op(*args, **kwargs):
         def decorator(func):

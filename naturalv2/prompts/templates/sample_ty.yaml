@@ -1,0 +1,34 @@
+system_prompt: |-
+  You are a medical assistant aiding a physician.
+  I am going to ask you a few multiple choice questions about a report on a patient's experience with a treatment. Please, answer accordingly.
+  Your final answer must always be a single, well-formed JSON object with no additional text, explanations, or formatting.
+user_prompt_template: |-
+  I will give you a report about an individual's experience with a treatment and its effect on the following outcome:
+  {{ outcome }}
+  Description: {{ outcome_desc }}
+
+  Then, I'll show you a covariate information about this individual.
+  Finally, I'll give you some multiple choice question(s) and options to choose from. Pick the right answer(s).
+
+  **Report found on {{ source }}:**
+
+  {{ report }}
+
+  **Covariate information about this individual:**
+  {%- for covariate in covariates %}
+    - {{ covariate }}: {{ covariate_answers[covariate] }}
+  {%- endfor %}
+
+  **Multiple Choice Question(s):**
+
+  Q: Which of the following treatments did the individual described in the report take?
+  Options: {{ treatment_options }}
+
+  Q: Does the individual described in the report count positively towards the {{ outcome }}{%- if outcome_timeframe %}, after taking the treatment for {{ outcome_timeframe }}{%- endif %}?
+  Options: {{ outcome_options }}
+
+  **Response Format:**
+  Your JSON must contain exactly these keys with one of the corresponding options:
+  - treatment
+  - outcome
+  Return only a valid JSON object with no additional text, code blocks, or explanations.

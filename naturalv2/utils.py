@@ -390,7 +390,7 @@ def get_answer_dicts(answer_map: dict[str, list[str]]) -> list[dict[str, str]]:
     return result
 
 
-def _get_alphabet_labels(n: int) -> list[str]:
+def get_alphabet_labels(n: int) -> list[str]:
     """Generate alphabet labels for multiple choice options.
 
     For a given number n, generate labels like a), b), ..., z), aa), ab), etc.

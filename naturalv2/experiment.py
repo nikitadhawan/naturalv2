@@ -448,19 +448,21 @@ class Experiment:
             If the `TREATMENT_COL_NAME` or `OUTCOME_COL_NAME` columns are missing
             from the extractions DataFrame.
         """
-        if TREATMENT_COL_NAME not in extractions.columns:
+        if f"{TREATMENT_COL_NAME}_filter" not in extractions.columns:
             raise ValueError(
-                f"`{TREATMENT_COL_NAME}` column is missing from extractions."
+                f"`{TREATMENT_COL_NAME}_filter` column is missing from extractions."
             )
 
-        if OUTCOME_COL_NAME not in extractions.columns:
+        if f"{OUTCOME_COL_NAME}_filter" not in extractions.columns:
             raise ValueError(
-                f"`{OUTCOME_COL_NAME}` column is missing from extractions."
+                f"`{OUTCOME_COL_NAME}_filter` column is missing from extractions."
             )
 
         return extractions[
-            extractions[TREATMENT_COL_NAME].isin(self.options[TREATMENT_COL_NAME])
-            & (extractions[OUTCOME_COL_NAME].isin(["Yes", "No"]))
+            extractions[f"{TREATMENT_COL_NAME}_filter"].isin(
+                self.options[TREATMENT_COL_NAME]
+            )
+            & (extractions[f"{OUTCOME_COL_NAME}_filter"].isin(["Yes", "No"]))
         ]
 
     def hard_filter_inclusion(self, extractions: pd.DataFrame) -> pd.DataFrame:
@@ -518,10 +520,12 @@ class Experiment:
         """
         for covariate in self.covariate_names:
             self._discretize_covariate(extractions, covariate)
+        self._set_transforms()
+        return extractions
 
+    def discretize_ty(self, extractions: pd.DataFrame) -> pd.DataFrame:
         self._discretize_outcome_column(extractions)
         self._discretize_treatment_column(extractions)
-        self._set_transforms()
         return extractions
 
     def apply_transform(
@@ -569,6 +573,7 @@ class Experiment:
         outcome: str,
         source_name: str,
         report: str,
+        covariate_answers: dict,
         return_format: Literal["prompt", "messages"] = "messages",
     ) -> str | list[dict[str, str]]:
         """Create a prompt for a given report.
@@ -613,6 +618,9 @@ class Experiment:
             "outcome_desc": self.outcome_desc[outcome],
             "covariate_desc": self.covariate_desc,
             "inclusion_criteria": self.inclusion_criteria,
+            "covariate_answers": covariate_answers,
+            "treatment_options": self.options[TREATMENT_COL_NAME],
+            "outcome_options": ["No", "Yes"],
             "report": report,
         }
 

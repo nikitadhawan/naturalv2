@@ -2,7 +2,6 @@
 
 import asyncio
 import concurrent.futures
-import importlib.resources
 import json
 import logging
 import os
@@ -16,7 +15,6 @@ import pandas as pd
 import psutil
 import pyarrow.parquet as pq
 from aiolimiter import AsyncLimiter
-from omegaconf import DictConfig
 from tenacity import (
     before_sleep_log,
     retry,
@@ -26,8 +24,6 @@ from tenacity import (
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
-from naturalv2.prompts import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.reddit_utils import (
     download_sub_data,
@@ -37,12 +33,11 @@ from naturalv2.sources.reddit_utils import (
     is_retryable_error,
     rule_based_filter,
 )
-from naturalv2.utils import ListResponse, concurrency_limited, sanitize_filename
+from naturalv2.utils import sanitize_filename
 
 
 if TYPE_CHECKING:
     from naturalv2.experiment import Experiment
-    from naturalv2.study import StudyDataset
 
 
 logger = logging.getLogger(__name__)
@@ -55,8 +50,6 @@ class RedditSource:
     ----------
     data_path : str
         Root directory for storing Reddit data.
-    lm_cfg : DictConfig
-        Configuration for the language model, which is set to be our choice of "sample model".
     max_download_workers : int | None, default=None
         Maximum number of workers for downloading or curating Reddit data.
         If ``None``, defaults to half the number of physical CPU cores.
@@ -77,7 +70,6 @@ class RedditSource:
     def __init__(
         self,
         data_path: str,
-        lm_cfg: DictConfig,
         max_download_workers: int | None = None,
         reddit_api_qpm: int = 10,
         max_llm_concurrency: int = 10,
@@ -87,7 +79,6 @@ class RedditSource:
     ) -> None:
         """Initialize an instance of the class."""
         self.data_path = data_path
-        self.lm_cfg = lm_cfg
         self.max_download_workers = max_download_workers or max(
             1, (psutil.cpu_count(logical=False) or 1) // 2
         )
@@ -100,18 +91,11 @@ class RedditSource:
         self._subs_data_dir = os.path.join(self.data_path, "subs_data")
         os.makedirs(self._subs_data_dir, exist_ok=True)
 
-    async def condition_filter(
-        self,
-        keywords: list[str],
-        study_dataset: "StudyDataset",
-        study_dataset_file: str,
-    ) -> dict[str, list[str]]:
+    async def condition_filter(self, keywords: list[str]) -> pd.DataFrame:
         """Filter subreddits based on keywords in their description.
 
         This method searches for subreddits that match the given keywords and
-        retrieves posts from those subreddits. It uses the Reddit API to search
-        for subreddits and posts, and then applies a language model to determine
-        which subreddits are relevant based on the posts found.
+        retrieves posts from those subreddits, using the Reddit API.
 
         Parameters
         ----------
@@ -124,19 +108,18 @@ class RedditSource:
 
         Returns
         -------
-        dict[str, list[str]]
-            A dictionary mapping each keyword to a list of relevant subreddits.
+        pd.DataFrame
+            A DataFrame with columns: keyword, candidate_subs, input_data
+            containing the search results for each keyword.
         """
-        source_metadata = study_dataset.sources["reddit"]
 
-        lm = build_lm_instance_from_cfg(self.lm_cfg)
-
-        llm_semaphore = asyncio.Semaphore(self.max_llm_concurrency)
         reddit_rate_limiter = AsyncLimiter(self.reddit_api_qpm)
         keywords_semaphore = asyncio.Semaphore(
             min(self.max_llm_concurrency * 2, len(keywords))
         )  # Process keywords concurrently, but limit to this many at a time
-        lock = asyncio.Lock()
+
+        # Collect results for DataFrame
+        results_data = []
 
         async with asyncpraw.Reddit(
             client_id=os.environ.get("PRAW_CLIENT_ID"),
@@ -145,78 +128,69 @@ class RedditSource:
             username=os.environ.get("PRAW_USERNAME"),
             user_agent=os.environ.get("PRAW_AGENT"),
         ) as reddit_client:
-            logger.info(f"Getting relevant subreddits for {len(keywords)} keywords.")
+            logger.info(f"Getting candidate subreddits for {len(keywords)} keywords.")
 
             async def process_keyword(word: str) -> None:
-                if word not in source_metadata:
-                    async with keywords_semaphore:
-                        try:
-                            candidate_subs = await self._search_subreddits(
-                                word, reddit_client, reddit_rate_limiter
-                            )
+                async with keywords_semaphore:
+                    try:
+                        candidate_subs = await self._search_subreddits(
+                            word, reddit_client, reddit_rate_limiter
+                        )
 
-                            # Concurrently search for the top 5 posts in candidate subreddits
-                            post_search_tasks = [
-                                asyncio.create_task(
-                                    self._search_posts_in_subreddit(
-                                        subreddit,
-                                        word,
-                                        reddit_client,
-                                        reddit_rate_limiter,
-                                    )
+                        # Concurrently search for the top 5 posts in candidate subreddits
+                        post_search_tasks = [
+                            asyncio.create_task(
+                                self._search_posts_in_subreddit(
+                                    subreddit,
+                                    word,
+                                    reddit_client,
+                                    reddit_rate_limiter,
                                 )
-                                for subreddit in candidate_subs
-                            ]
-                            # Collect the title and first 1000 characters of each
-                            posts_results = await asyncio.gather(
-                                *post_search_tasks, return_exceptions=True
                             )
+                            for subreddit in candidate_subs
+                        ]
+                        # Collect the title and first 1000 characters of each
+                        posts_results = await asyncio.gather(
+                            *post_search_tasks, return_exceptions=True
+                        )
 
-                            llm_input = []
-                            for subreddit, posts in zip(candidate_subs, posts_results):
-                                if not isinstance(posts, Exception):
-                                    llm_input.append(
-                                        {"subreddit": subreddit, "example_posts": posts}
-                                    )
-
-                            matched_subreddits = []
-
-                            # Don't make expensive LLM calls if no posts found
-                            if llm_input:
-                                llm_input_dict = {
-                                    "condition": word,
-                                    "input": json.dumps(llm_input, indent=4),
-                                }
-                                matched_subreddits = await concurrency_limited(
-                                    self._get_subreddits_from_llm(lm, llm_input_dict),
-                                    llm_semaphore,
+                        # Create llm_input for DataFrame
+                        llm_input = []
+                        for subreddit, posts in zip(candidate_subs, posts_results):
+                            if not isinstance(posts, Exception):
+                                llm_input.append(
+                                    {"Subreddit": subreddit, "Example Posts": posts}
                                 )
+                        llm_input = json.dumps(llm_input, indent=4)
 
-                            logger.info(
-                                f"{len(matched_subreddits)} relevant subreddits "
-                                f"found for keyword: {word}."
-                            )
-                            source_metadata[word] = matched_subreddits
+                        # Store results for DataFrame
+                        results_data.append(
+                            {
+                                "keyword": word,
+                                "candidate_subs": candidate_subs,
+                                "input_data": llm_input,
+                            }
+                        )
 
-                            # Write to YAML immediately (protected by a lock)
-                            async with lock:
-                                study_dataset.sources["reddit"] = source_metadata
-                                study_dataset.to_yaml(study_dataset_file)
-                        except Exception as e:
-                            logger.error(
-                                f"Error processing keyword {word}: {e}", exc_info=True
-                            )
+                        logger.info(
+                            f"{len(candidate_subs)} candidate subreddits "
+                            f"found for keyword: {word}."
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing keyword {word}: {e}", exc_info=True
+                        )
 
             # Launch all tasks concurrently, but limited by the semaphore
             await asyncio.gather(*(process_keyword(word) for word in keywords))
 
-            self.relevant_subreddits = {
-                sub for keyword in source_metadata for sub in source_metadata[keyword]
-            }
-            logger.info(f"{len(self.relevant_subreddits)} relevant subreddits found!")
-        return source_metadata
+            logger.info(f"Total of {len(results_data)} keywords processed!")
 
-    async def clean_data(self) -> list[str]:
+        if results_data:
+            return pd.DataFrame(results_data)
+        return pd.DataFrame(columns=["keyword", "candidate_subs", "input_data"])
+
+    async def clean_data(self, relevant_subreddits: list[str]) -> list[str]:
         """Download and clean data for relevant subreddits.
 
         This method checks if the cleaned data for each relevant subreddit already
@@ -228,18 +202,26 @@ class RedditSource:
 
         Currently, only supports the top 20k subreddits form PushShift.
 
+        Parameters
+        ----------
+        relevant_subreddits : list[str]
+            List of relevant subreddits to clean.
+
         Returns
         -------
         list[str]
             List of paths to the cleaned data files for each relevant subreddit.
         """
-        if not self.relevant_subreddits:
+        if not relevant_subreddits:
             logger.info("No relevant subreddits found to clean.")
             return []
 
         subs_about = await get_sub_about_info(self.data_path, self.reddit_api_qpm)
         pushshift_subreddits = set(subs_about["subreddit"].to_list())
-        available_subs = self.relevant_subreddits.intersection(pushshift_subreddits)
+        available_subs = set(relevant_subreddits).intersection(pushshift_subreddits)
+        logger.info(
+            f"{len(available_subs)} out of {len(relevant_subreddits)} available."
+        )
 
         clean_paths = []
         subs_to_filter = []
@@ -309,8 +291,8 @@ class RedditSource:
     ) -> tuple[str, int]:
         """Curate Reddit data for a specific experiment.
 
-        This method filters the cleaned Reddit data for posts that mention both
-        treatments and outcomes specified in the experiment. It saves the curated
+        This method filters the cleaned Reddit data for posts that mention
+        any of the treatments specified in the experiment. It saves the curated
         data to a CSV file and returns the path along with the number of valid posts.
 
         Parameters
@@ -483,32 +465,12 @@ class RedditSource:
                 posts.append(
                     "**Title**: "
                     + submission.title
-                    + "\n\n"
+                    + "\n"
                     + "**Post content**: "
                     + (submission.selftext or "")[:1000]
                 )
 
             return posts
-
-    async def _get_subreddits_from_llm(
-        self, lm: LM, llm_input: dict[str, str]
-    ) -> list[str]:
-        """Get subreddits from the language model based on the condition."""
-        messages: list[dict[str, str]] = load_prompt(
-            base_dir=str(importlib.resources.files("naturalv2.prompts.templates")),
-            prompt_type="condition_subreddits",
-            return_format="messages",
-            **llm_input,
-        )
-
-        response = await lm(messages=messages, response_format=ListResponse)
-        subreddits = extract_list_response(response)
-        if not subreddits:
-            logger.debug(
-                "No subreddits found for the given condition. Returning an empty list."
-            )
-            return []
-        return subreddits[0]
 
 
 def _download_submissions_and_comments(

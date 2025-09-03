@@ -38,6 +38,7 @@ class ExtractType(str, Enum):
     TY_FILTER = "ty_filter"
     KNOWNS = "knowns"
     IMPUTATIONS = "imputations"
+    SAMPLE_TY = "sample_ty"
 
 
 class SampleExtractionStage(PipelineStage):
@@ -427,6 +428,67 @@ class ImputationsStage(SampleExtractionStage):
         return self.data
 
 
+class SampleTYStage(SampleExtractionStage):
+    """Stage for sampling treatment and outcome given covariates.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    max_concurrent_workers : int | None, optional, default=None
+        Maximum number of concurrent workers for processing. If None, defaults to 10.
+
+    Attributes
+    ----------
+    max_concurrent_workers : int | None
+        Maximum number of concurrent workers for processing.
+    data : pd.DataFrame | None
+        DataFrame containing the processed data after imputing missing covariates.
+    llm : LM
+        Lazy-loaded language model instance used for covariate extraction.
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    stage_name : str
+        Name of the stage, derived from the class name.
+    """
+
+    def __init__(
+        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+    ) -> None:
+        super().__init__(model_cfg, max_concurrent_workers)
+        self.extract_type = ExtractType.SAMPLE_TY.value
+
+    async def process(
+        self, data: pd.DataFrame, context: PipelineContext
+    ) -> pd.DataFrame:
+        treatment_options = context.experiment.options[TREATMENT_COL_NAME]
+        response_format = create_response_format(
+            "SampleTYResponse",
+            [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
+            types={
+                TREATMENT_COL_NAME: Literal[*treatment_options],
+                OUTCOME_COL_NAME: Literal["No", "Yes"],
+            },
+        )
+        self.data = await extract_covariates(
+            input_df=data,
+            experiment=context.experiment,
+            source_name=context.source_name,
+            outcome=context.outcome,
+            extract_type=ExtractType.SAMPLE_TY,
+            llm=self.llm,
+            model_name=self._model_name,
+            save_path=context.save_path,
+            exp_name=context.exp_name,
+            response_format=response_format,
+            max_concurrent_requests=self.max_concurrent_workers,
+        )
+
+        self.data = context.experiment.discretize_ty(self.data)
+        logger.info(f"Final: {len(self.data)} reports after sampling TY.")
+        return self.data
+
+
 async def extract_covariates(  # noqa: PLR0912
     input_df: pd.DataFrame,
     experiment: "Experiment",
@@ -616,11 +678,23 @@ def _prompt_formatter(
     if "report" not in row:
         raise ValueError("Row must contain 'report' field for prompt formatting.")
 
+    covariate_answers = None
+    if prompt_type == "sample_ty":
+        to_sample = [col + "_discretized" for col in experiment.covariate_names]
+        to_transform = {
+            k.replace("_discretized", ""): v
+            for k, v in row[to_sample].to_dict().items()
+        }
+        covariate_answers = experiment.apply_transform(
+            to_transform, repr_type="language"
+        )
+
     return experiment.build_prompt_for_report(
         prompt_type=prompt_type,
         outcome=outcome,
         source_name=source_name,
         report=row["report"],
+        covariate_answers=covariate_answers,
         return_format="messages",
     )
 
@@ -653,6 +727,10 @@ def _result_processor(
             f"Response text: '{response_text[:200]}...'"
         )
         return None  # Signal error
+
+    if extract_type == ExtractType.TY_FILTER:
+        # append "_filter" to each key in the parsed data
+        parsed_data = {f"{key}_filter": value for key, value in parsed_data.items()}
 
     if extract_type == ExtractType.IMPUTATIONS:
         # append "_imputed" to each key in the parsed data

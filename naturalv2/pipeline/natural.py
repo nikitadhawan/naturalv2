@@ -16,10 +16,10 @@ from rich.table import Table
 
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.llm import LLM
+    from vllm.entrypoints.llm import LLM as OfflineLM  # noqa: N811
 
     from naturalv2.experiment import Experiment
-    from naturalv2.models import LM
+    from naturalv2.models import LM as OnlineLM  # noqa: N811
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class PipelineStage(ABC):
     def __init__(self, model_cfg: DictConfig) -> None:
         """Initialize the pipeline stage with model configuration."""
         self.model_cfg = model_cfg
-        self._llm: Optional[Union["LM", "LLM"]] = None
+        self._llm: Optional[Union["OnlineLM", "OfflineLM"]] = None
         self._model_name: str = (
             model_cfg.get("model_name", None)
             or model_cfg.get("llm_params", {}).get("model", "").split("/")[-1]
@@ -90,14 +90,14 @@ class PipelineStage(ABC):
         return self.__class__.__name__
 
     @property
-    def llm(self) -> Union["LM", "LLM"]:
+    def llm(self) -> Union["OnlineLM", "OfflineLM"]:
         """Lazy-loaded language model property."""
         if self._llm is None:
             self._llm = self.get_language_model()
         return self._llm
 
     @abstractmethod
-    def get_language_model(self) -> Union["LM", "LLM"]:
+    def get_language_model(self) -> Union["OnlineLM", "OfflineLM"]:
         """Return the language model used in this stage."""
         pass
 

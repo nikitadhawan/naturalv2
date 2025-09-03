@@ -21,13 +21,14 @@ from naturalv2.utils import _get_alphabet_labels, get_answer_dicts, get_save_pat
 
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.llm import LLM
+    from vllm.entrypoints.llm import LLM as OfflineLM  # noqa: N811
     from vllm.outputs import RequestOutput
     from vllm.sampling_params import SamplingParams
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 
     from naturalv2.experiment import Experiment
-    from naturalv2.models.lm import LM, ResponseType
+    from naturalv2.models.lm import LM as OnlineLM  # noqa: N811
+    from naturalv2.models.lm import ResponseType
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class ConditionalExtractionStage(PipelineStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
-    use_offline_inference : bool, optional, default=False
+    use_offline_inference : bool, optional, default=True
         Whether to use vLLM offline inference for computing conditional probabilities.
         If ``False``, an API-based online model is assumed and used.
     length_norm : bool, optional, default=False
@@ -71,7 +72,7 @@ class ConditionalExtractionStage(PipelineStage):
     def __init__(
         self,
         model_cfg: DictConfig,
-        use_offline_inference: bool = False,
+        use_offline_inference: bool = True,
         length_norm: bool = False,
         max_concurrent_workers: int | None = None,
     ) -> None:
@@ -83,7 +84,7 @@ class ConditionalExtractionStage(PipelineStage):
         self.prompt_example: str = ""
         self._sampling_params: Optional["SamplingParams"] = None
 
-    def get_language_model(self) -> Union["LM", "LLM"]:
+    def get_language_model(self) -> Union["OnlineLM", "OfflineLM"]:
         """Instantiate the language model for conditional extraction.
 
         Returns
@@ -171,11 +172,11 @@ class ConditionalExtractionStage(PipelineStage):
             self.llm.llm_engine.engine_core.shutdown()
         return self.data
 
-    def _get_vllm_model(self) -> tuple["LLM", "SamplingParams"]:
+    def _get_vllm_model(self) -> tuple["OfflineLM", "SamplingParams"]:
         """Instantiate an instance of ``vllm.LLM class for offline inference."""
         return vllm.get_llm_and_sampling_params(**self.model_cfg)
 
-    def _get_online_model(self) -> "LM":
+    def _get_online_model(self) -> "OnlineLM":
         """Instantiate an instance of the ``LM`` class for online inference."""
         model = lm.build_lm_instance_from_cfg(self.model_cfg)
 
@@ -297,7 +298,7 @@ async def extract_conditionals(  # noqa: PLR0912
     experiment: "Experiment",
     source_name: str,
     outcome: str,
-    llm: Union["LM", "LLM"],
+    llm: Union["OnlineLM", "OfflineLM"],
     model_name: str,
     save_path: str,
     exp_name: str,
@@ -509,7 +510,7 @@ def _build_interleaved_multiple_choice_questions(
     return all_interleaved_options
 
 
-async def _offline_inference(
+async def _offline_inference(  # noqa: PLR0912
     input_df: pd.DataFrame,
     experiment: "Experiment",
     extract_type: ConditionalsExtractType,
@@ -518,7 +519,7 @@ async def _offline_inference(
     source_name: str,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
-    llm: "LLM",
+    llm: "OfflineLM",
     sampling_params: "SamplingParams",
     csv_writer_task: asyncio.Task,
     result_queue: asyncio.Queue,
@@ -561,6 +562,10 @@ async def _offline_inference(
     # flatten the list of prompts
     flat_prompts: list[str] = [p for sublist in prompts for p in sublist]
 
+    tokenizer: "AnyTokenizer" = llm.get_tokenizer()
+    if vllm.should_add_bos(tokenizer):
+        flat_prompts = [tokenizer.bos_token + prompt for prompt in flat_prompts]
+
     if not example_prompt and flat_prompts:
         example_prompt = flat_prompts[0]
 
@@ -580,7 +585,7 @@ async def _offline_inference(
                 answer_dicts=answer_dicts,
                 extract_type=extract_type,
                 is_offline_inference=True,
-                tokenizer=llm.get_tokenizer(),
+                tokenizer=tokenizer,
             )
             await result_queue.put(processed_results)
         except Exception as e:
@@ -627,7 +632,7 @@ async def _online_inference(
     source_name: str,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
-    llm: "LM",
+    llm: "OnlineLM",
     csv_writer_task: asyncio.Task,
     result_queue: asyncio.Queue,
     producer_pbar: tqdm,
@@ -829,7 +834,7 @@ async def _prompt_processor(
     worker_id: int,
     prompt_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
-    llm: "LM",
+    llm: "OnlineLM",
     extract_type: ConditionalsExtractType,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],

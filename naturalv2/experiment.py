@@ -425,6 +425,9 @@ class Experiment:
         # This is a potentially expensive operation
         _ = self.drugbank_names
 
+        # Make sure parent folders exist first
+        Path(os.path.dirname(filename)).mkdir(parents=True, exist_ok=True)
+
         with open(filename, "w") as file:
             yaml.safe_dump(self.__dict__, file)
 
@@ -573,7 +576,7 @@ class Experiment:
         outcome: str,
         source_name: str,
         report: str,
-        covariate_answers: dict,
+        covariate_answers: dict | None = None,
         return_format: Literal["prompt", "messages"] = "messages",
     ) -> str | list[dict[str, str]]:
         """Create a prompt for a given report.

@@ -5,15 +5,16 @@ import functools
 import logging
 import os
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+from typing import TYPE_CHECKING, Any, Generator
 
+import hydra
 import numpy as np
 import pandas as pd
 from omegaconf import DictConfig
 from scipy.special import softmax
 from tqdm import tqdm
 
-from naturalv2.models import lm, vllm
+from naturalv2.models.lm import VLLMModel
 from naturalv2.pipeline.constants import INCLUSION_COL_NAME, TREATMENT_COL_NAME
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
@@ -21,14 +22,9 @@ from naturalv2.utils import get_alphabet_labels, get_answer_dicts, get_save_path
 
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.llm import LLM as OfflineLM  # noqa: N811
-    from vllm.outputs import RequestOutput
-    from vllm.sampling_params import SamplingParams
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
-
     from naturalv2.experiment import Experiment
-    from naturalv2.models.lm import LM as OnlineLM  # noqa: N811
-    from naturalv2.models.lm import ResponseType
+    from naturalv2.models.lm import APIModel, Model
+    from naturalv2.models.types import BatchResponse, ModelResponse
 
 
 logger = logging.getLogger(__name__)
@@ -72,32 +68,30 @@ class ConditionalExtractionStage(PipelineStage):
     def __init__(
         self,
         model_cfg: DictConfig,
-        use_offline_inference: bool = True,
+        name: str | None = None,
         length_norm: bool = False,
         max_concurrent_workers: int | None = None,
     ) -> None:
         """Initialize the conditional extraction stage."""
-        super().__init__(model_cfg)
+        super().__init__(model_cfg, name)
         self.length_norm = length_norm
         self.max_concurrent_workers = max_concurrent_workers
-        self.use_offline_inference = use_offline_inference
         self.prompt_example: str = ""
-        self._sampling_params: Optional["SamplingParams"] = None
 
-    def get_language_model(self) -> Union["OnlineLM", "OfflineLM"]:
+        self._is_offline_inference: bool = False
+
+    def get_language_model(self) -> "Model":
         """Instantiate the language model for conditional extraction.
 
         Returns
         -------
-        LM | LLM
+        Model
             An instance of the language model configured for conditional extraction.
 
         """
-        if self.use_offline_inference:
-            llm, self._sampling_params = self._get_vllm_model()
-            return llm
-
-        return self._get_online_model()
+        lm = hydra.utils.instantiate(self.model_cfg)
+        self._is_offline_inference = isinstance(lm, VLLMModel)
+        return lm
 
     def prompt_template(self) -> dict[str, Any]:
         return {"prompt_example": self.prompt_example}
@@ -156,8 +150,7 @@ class ConditionalExtractionStage(PipelineStage):
             context.save_path,
             context.exp_name,
             extract_type,
-            is_offline_inference=self.use_offline_inference,
-            sampling_params=self._sampling_params,
+            is_offline_inference=self._is_offline_inference,
             length_norm=self.length_norm,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -168,58 +161,10 @@ class ConditionalExtractionStage(PipelineStage):
         self.prompt_example = prompt_example
         self.data = context.experiment.discretize_ty(self.data)
 
-        if self.use_offline_inference:
+        if self._is_offline_inference:
             # Shutdown vLLM engine to free up resources and reinitialize for next use
-            self.llm.llm_engine.engine_core.shutdown()
+            self.llm.cleanup()
         return self.data
-
-    def _get_vllm_model(self) -> tuple["OfflineLM", "SamplingParams"]:
-        """Instantiate an instance of ``vllm.LLM class for offline inference."""
-        return vllm.get_llm_and_sampling_params(**self.model_cfg)
-
-    def _get_online_model(self) -> "OnlineLM":
-        """Instantiate an instance of the ``LM`` class for online inference."""
-        model = lm.build_lm_instance_from_cfg(self.model_cfg)
-
-        # Set mandatory parameters for conditional extraction
-        if model.completion_type != "text":
-            logger.warning(
-                f"Model {self._model_name} is not configured for text completion, "
-                "which is required for conditional/inclusion probability extraction."
-                "Setting completion type to 'text'."
-            )
-            model.completion_type = "text"  # Ensure text completion type
-
-        if "prompt_logprobs" not in model._request_params or (
-            "prompt_logprobs" in model._request_params
-            and model._request_params["prompt_logprobs"] not in [0, False]
-        ):
-            logger.warning(
-                "The conditional/inclusion probability extraction stages requires "
-                "the log probabilities of the tokens in the input prompt but the "
-                "model is not configured to return them. "
-                "Setting prompt_logprobs to 0."
-            )
-            model._request_params["prompt_logprobs"] = 0
-
-        if "max_tokens" not in model._request_params:
-            logger.warning(
-                "The conditional/inclusion probability extraction stages does not "
-                "require the model to generate any tokens. Setting max_tokens to 1 "
-                "to improve throughput."
-            )
-            model._request_params["max_tokens"] = 1  # No generation needed
-        if (
-            "max_tokens" in model._request_params
-            and model._request_params["max_tokens"] > 1
-        ):
-            logger.warning(
-                "The conditional/inclusion probability extraction stages does not "
-                "require the model to generate any tokens. Consider setting max_tokens "
-                "to 1 to improve throughput."
-            )
-
-        return model
 
 
 class InclusionProbStage(ConditionalExtractionStage):
@@ -233,9 +178,6 @@ class InclusionProbStage(ConditionalExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
-    use_offline_inference : bool, optional, default=False
-        Whether to use vLLM offline inference for computing inclusion probabilities.
-        If ``False``, an API-based online model is assumed and used.
     length_norm : bool, optional, default=False
         Whether to normalize the log probabilities by the length of the prompt,
         by default False.
@@ -277,8 +219,7 @@ class InclusionProbStage(ConditionalExtractionStage):
             context.save_path,
             context.exp_name,
             extract_type,
-            is_offline_inference=self.use_offline_inference,
-            sampling_params=self._sampling_params,
+            is_offline_inference=self._is_offline_inference,
             length_norm=self.length_norm,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -288,9 +229,9 @@ class InclusionProbStage(ConditionalExtractionStage):
         )
         self.prompt_example = prompt_example
 
-        if self.use_offline_inference:
+        if self._is_offline_inference:
             # Shutdown vLLM engine to free up resources and reinitialize for next use
-            self.llm.llm_engine.engine_core.shutdown()
+            self.llm.cleanup()
         return self.data
 
 
@@ -299,13 +240,12 @@ async def extract_conditionals(  # noqa: PLR0912
     experiment: "Experiment",
     source_name: str,
     outcome: str,
-    llm: Union["OnlineLM", "OfflineLM"],
+    llm: "Model",
     model_name: str,
     save_path: str,
     exp_name: str,
     extract_type: ConditionalsExtractType,
     is_offline_inference: bool = False,
-    sampling_params: Optional["SamplingParams"] = None,
     length_norm: bool = False,
     max_concurrent_requests: int | None = None,
 ) -> tuple[pd.DataFrame, str]:
@@ -326,7 +266,7 @@ async def extract_conditionals(  # noqa: PLR0912
         Name of the source from which the data was collected.
     outcome : str
         The outcome variable for which the conditional probabilities are computed.
-    llm : LM | LLM
+    llm : Model
         Language model instance used to compute the conditional probabilities.
     model_name : str
         Name of the language model used for conditional extraction.
@@ -343,9 +283,6 @@ async def extract_conditionals(  # noqa: PLR0912
     is_offline_inference : bool, default=False
         Whether to use vLLM offline inference for computing conditional probabilities.
         If ``False``, an API-based online model is assumed and used.
-    sampling_params : SamplingParams | None, optional, default=None
-        Sampling parameters to use with the LLM. Only used if `is_offline_inference`
-        is ``True``.
     length_norm : bool, default=False
         Whether to normalize the log probabilities by the length of the prompt.
     max_concurrent_requests : int | None, optional, default=None
@@ -423,7 +360,6 @@ async def extract_conditionals(  # noqa: PLR0912
             length_norm,
             answer_dicts,
             llm,
-            sampling_params,
             csv_writer_task,
             result_queue,
             producer_pbar,
@@ -520,8 +456,7 @@ async def _offline_inference(  # noqa: PLR0912
     source_name: str,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
-    llm: "OfflineLM",
-    sampling_params: "SamplingParams",
+    llm: VLLMModel,
     csv_writer_task: asyncio.Task,
     result_queue: asyncio.Queue,
     producer_pbar: tqdm,
@@ -563,19 +498,19 @@ async def _offline_inference(  # noqa: PLR0912
     # flatten the list of prompts
     flat_prompts: list[str] = [p for sublist in prompts for p in sublist]
 
-    tokenizer: "AnyTokenizer" = llm.get_tokenizer()
-    if vllm.should_add_bos(tokenizer):
-        flat_prompts = [tokenizer.bos_token + prompt for prompt in flat_prompts]
-
     if not example_prompt and flat_prompts:
         example_prompt = flat_prompts[0]
 
-    responses: list["RequestOutput"] = llm.generate(
-        flat_prompts, sampling_params, use_tqdm=functools.partial(tqdm, leave=False)
+    responses: "BatchResponse" = llm.invoke(
+        flat_prompts,
+        endpoint="text_completion",
+        max_tokens=1,
+        prompt_logprobs=0,
+        use_tqdm=functools.partial(tqdm, leave=False),
     )
 
     for idx, row in enumerate(rows):
-        row_responses: list["RequestOutput"] = responses[
+        row_responses: list["ModelResponse"] = responses[
             idx * num_options_per_row : (idx + 1) * num_options_per_row
         ]
         try:
@@ -585,8 +520,6 @@ async def _offline_inference(  # noqa: PLR0912
                 length_norm=length_norm,
                 answer_dicts=answer_dicts,
                 extract_type=extract_type,
-                is_offline_inference=True,
-                tokenizer=tokenizer,
             )
             await result_queue.put(processed_results)
         except Exception as e:
@@ -633,7 +566,7 @@ async def _online_inference(
     source_name: str,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
-    llm: "OnlineLM",
+    llm: "APIModel",
     csv_writer_task: asyncio.Task,
     result_queue: asyncio.Queue,
     producer_pbar: tqdm,
@@ -829,7 +762,7 @@ async def _prompt_processor(
     worker_id: int,
     prompt_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
-    llm: "OnlineLM",
+    llm: "APIModel",
     extract_type: ConditionalsExtractType,
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
@@ -864,9 +797,20 @@ async def _prompt_processor(
             async with asyncio.timeout(300.0), asyncio.TaskGroup() as tg:
                 tasks: list[asyncio.Task] = []
                 for prompt in prompts:
-                    tasks.append(tg.create_task(llm(prompt=prompt), name="LLM-Call"))
+                    tasks.append(
+                        tg.create_task(
+                            llm.ainvoke(
+                                prompt,
+                                # NOTE: Forced parameters for conditional extraction
+                                endpoint="text_completion",
+                                max_tokens=1,
+                                prompt_logprobs=0,
+                            ),
+                            name="LLM-Call",
+                        )
+                    )
 
-            responses: list["ResponseType"] = [task.result() for task in tasks]
+            responses: list["ModelResponse"] = [task.result() for task in tasks]
             processed_results = _result_processor(
                 row,
                 responses,
@@ -895,13 +839,10 @@ async def _prompt_processor(
 
 def _result_processor(
     row: pd.Series,
-    responses: list["ResponseType"] | list["RequestOutput"],
+    responses: list["ModelResponse"],
     length_norm: bool,
     answer_dicts: list[dict[str, str]],
     extract_type: ConditionalsExtractType,
-    is_offline_inference: bool = False,
-    *,
-    tokenizer: Optional["AnyTokenizer"] = None,
 ) -> dict[str, Any]:
     """Process the LLM response and combine it with the original row data.
 
@@ -909,28 +850,21 @@ def _result_processor(
     returns a dictionary with the original row data and the computed probabilities.
 
     """
-    if is_offline_inference:
-        if tokenizer is None:
-            raise ValueError("Tokenizer must be provided for offline inference.")
 
-        prompt_logprobs = vllm.get_prompt_logprobs(tokenizer, responses)
-        logprob_sums = []
-        for idx, logprobs_list in enumerate(prompt_logprobs):
-            logprob_sum = sum(logprobs_list)
-            if length_norm:
-                logprob_sum = logprob_sum / len(responses[idx].prompt_token_ids)
-            logprob_sums.append(logprob_sum)
-    else:
-        logprob_sums = []
-        for response in responses:
-            prompt_logprobs_obj = lm.get_prompt_logprobs(response)
-            if prompt_logprobs_obj is None:
-                continue
+    logprob_sums = []
+    for response in responses:
+        prompt_logprobs_obj = response.prompt_logprobs
+        if prompt_logprobs_obj is None or len(prompt_logprobs_obj.logprobs) == 0:
+            raise ValueError("LLM response does not contain prompt log probabilities.")
+        logprob_sum = sum(prompt_logprobs_obj.logprobs)
+        if length_norm:
+            logprob_sum = logprob_sum / len(prompt_logprobs_obj.tokens)
+        logprob_sums.append(logprob_sum)
 
-            logprob = sum(prompt_logprobs_obj.logprobs)
-            if length_norm:
-                logprob = logprob / len(prompt_logprobs_obj.decoded_tokens)
-            logprob_sums.append(logprob)
+    if len(logprob_sums) != len(answer_dicts):
+        raise ValueError(
+            "Number of log probability sums does not match number of answer combinations."
+        )
 
     probs: np.ndarray = softmax(np.array(logprob_sums), axis=0)
     sample_index = np.random.choice(len(probs), p=probs)

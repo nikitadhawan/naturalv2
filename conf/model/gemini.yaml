@@ -1,0 +1,6 @@
+defaults:
+  - litellm_model
+
+model_id: ???
+api_key: ${oc.env:GOOGLE_API_KEY,null}
+max_tokens: 32768

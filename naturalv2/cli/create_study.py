@@ -219,7 +219,7 @@ def run_study_and_get_stats(cfg: DictConfig) -> dict:
 
 
 # TODO: improve on relative path for config
-@hydra.main(config_path="../../conf/", config_name="config.yaml", version_base="1.2")
+@hydra.main(config_path="../../conf/", config_name="common.yaml", version_base="1.2")
 def main(cfg: DictConfig) -> None:
     stats = run_study_and_get_stats(cfg)
     print(yaml.safe_dump(stats, sort_keys=False))

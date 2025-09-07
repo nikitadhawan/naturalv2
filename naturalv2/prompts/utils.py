@@ -27,12 +27,12 @@ class PreserveUndefined(jinja2.Undefined):
 jinja_env = jinja2.Environment(undefined=PreserveUndefined)
 
 
-def load_prompt(
+def load_prompt(  # noqa: PLR0912
     base_dir: str,
     prompt_type: str,
-    return_format: Literal["messages", "prompt"] = "prompt",
+    return_format: Literal["messages", "responses", "prompt"] = "prompt",
     **user_prompt_format_kwargs: Any,
-) -> str | list[dict[str, str]]:
+) -> str | list[dict[str, str]] | dict[str, str]:
     """Load a prompt from a YAML file and format it with Jinja2.
 
     Parameters
@@ -55,8 +55,10 @@ def load_prompt(
         'content' keys. If return_format is 'prompt', returns a single formatted string.
 
     """
-    if return_format not in ["messages", "prompt"]:
-        raise ValueError("return_format must be either 'messages' or 'prompt.")
+    if return_format not in ["messages", "prompt", "responses"]:
+        raise ValueError(
+            "return_format must be either 'messages', 'prompt', or 'responses'"
+        )
 
     filepath = os.path.join(base_dir, f"{prompt_type}.yaml")
     if not os.path.exists(filepath):
@@ -118,6 +120,12 @@ def load_prompt(
         if system_prompt:
             return [system_role_dict, user_role_dict]
         return [user_role_dict]
+
+    if return_format == "responses":
+        input_dict = {"input": user_prompt_template}
+        if system_prompt:
+            input_dict["instructions"] = system_prompt
+        return input_dict
 
     # concatenate system_prompt and user_prompt_template
     # and return as a single string

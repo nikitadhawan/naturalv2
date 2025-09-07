@@ -1,28 +1,49 @@
-"""Litellm-backed LLM interface."""
+"""Classes for interacting with language models."""
 
 import asyncio
 import logging
 import os
-import warnings
-from dataclasses import dataclass
-from typing import Any, Literal, Optional, Union
+from abc import ABC, abstractmethod
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Optional, Union
 
-import httpx
 from dotenv import load_dotenv
-from litellm import Router, model_cost, token_counter
-from litellm._logging import verbose_logger, verbose_router_logger
+from litellm import model_cost
 from litellm.cost_calculator import completion_cost
-from litellm.types.router import AllowedFailsPolicy, RetryPolicy, RouterGeneralSettings
-from litellm.types.utils import ModelResponse, TextCompletionResponse
-from omegaconf import DictConfig, OmegaConf
-from typing_extensions import TypedDict
+from litellm.types.utils import ModelResponse as ChatCompletionResponse
+from litellm.types.utils import TextCompletionResponse
+from pydantic import BaseModel
 
-from naturalv2.utils import ListResponse
+from naturalv2.models.rate_limiter.rate_limiter import RateLimiter
+from naturalv2.models.types import (
+    BatchResponse,
+    EndpointType,
+    LogProbs,
+    ModelInput,
+    ModelResponse,
+    TokenUsage,
+    ToolCall,
+)
+from naturalv2.models.utils import (
+    _extract_output_and_parsed,
+    estimate_token_count,
+    extract_token_usage,
+    get_message_content,
+    parse_model_output_with_format,
+    validate_endpoint,
+)
 
+
+if TYPE_CHECKING:
+    import litellm
+    from litellm.types.llms.openai import ResponsesAPIResponse
+    from litellm.types.router import LiteLLMParamsTypedDict
+    from vllm.outputs import RequestOutput
 
 load_dotenv()
-is_weave_available = os.getenv("USE_WEAVE", "false").lower() == "true"
+logger = logging.getLogger(__name__)
 
+is_weave_available = os.getenv("USE_WEAVE", "false").lower() == "true"
 if is_weave_available:
     import weave
 
@@ -35,374 +56,976 @@ else:
 
         return decorator
 
-
-ResponseType = Union[ModelResponse, TextCompletionResponse]
-
-logger = logging.getLogger(__name__)
+# ruff: noqa: PLC0415 # Ignore "import outside top-level" for imports
 
 
-class LLMParams(TypedDict, total=False):
-    """Parameters for the LLM deployment."""
-
-    #: The model name to use for the LLM. This is the model name used by the LLM provider.
-    model: Optional[str]
-
-    #: The provider name to use for the LLM.
-    custom_llm_provider: Optional[str]
-
-    #: The API key for the accessing the LLM.
-    api_key: Optional[str]
-
-    #: The API base URL for the LLM.
-    api_base: Optional[str]
-
-    #: The API version for the LLM.
-    api_version: Optional[str]
-
-    #: The organization ID for the LLM, if applicable (typically for OpenAI orgs).
-    organization: Optional[Union[list, str]]
-
-    #: The tokens per minute limit for the LLM requests.
-    tpm: Optional[int]
-
-    #: The requests per minute limit for the LLM requests.
-    rpm: Optional[int]
-
-    #: The maximum number of concurrent requests to the LLM.
-    #: If tpm/rpm is set, and no max parallel request limit given, we use the
-    # RPM or calculated RPM (tpm/1000/6) as the max parallel request limit.
-    max_parallel_requests: Optional[int]
-
-    #: The order of the LLM in the routing process.
-    order: Optional[int]
-
-    #: The weight of the LLM in the routing process. This sets how often the LLM is used.
-    #: The higher the weight, the more often the LLM is used.
-    weight: Optional[int]
-
-    #: The number of seconds to timeout the LLM request if it takes too long.
-    timeout: Optional[Union[float, str, httpx.Timeout]]
-
-    #: The maximum number of times to retry the LLM request if it fails.
-    max_retries: Optional[int]
-    num_retries: Optional[int]
-
-    #: The maximum budget for LLM requests. This only works for LLMs with known costs.
-    max_budget: Optional[float]
-
-    #: A mock response to return instead of making a real request.
-    #: This is useful for testing and debugging.
-    mock_response: Optional[Union[str, ModelResponse, Exception]]
-
-    #: Whether or not to drop incompatible params, e.g. `seed` for Gemini models.
-    drop_params: Optional[bool]
-
-
-class LM:
-    """An interface for OpenAI-compatible LLM providers.
-
-    This class supports routing requests to multiple deployments of the same model
-    and provides caching and retrying capabilities.
+class Model(ABC):
+    """Abstract base class for language model wrappers.
 
     Parameters
     ----------
-    model_name : str
-        The name of the model to use. This should be a valid model name for the LLM provider.
-    deployment_params : list[LLMParams]
-        A list of dictionaries containing the deployment parameters for the LLM.
-        Each dictionary should contain the following keys:
-            - model: The model name to use for the LLM. This is the model name used by the LLM provider.
-            - custom_llm_provider: The provider name to use for the LLM.
-            - api_key: The API key for accessing the LLM.
-            - api_base: The API base URL for the LLM.
-            - api_version: The API version for the LLM.
-            - organization: The organization ID for the LLM, if applicable (typically for OpenAI orgs).
-            - tpm: The tokens per minute limit for the LLM requests.
-            - rpm: The requests per minute limit for the LLM requests.
-            - max_parallel_requests: The maximum number of concurrent requests to the LLM.
-            - order: The order of the LLM in the routing process.
-            - weight: The weight of the LLM in the routing process. This sets how often the LLM is used.
-            - timeout: The number of seconds to timeout the LLM request if it takes too long.
-            - max_retries: The maximum number of times to retry the LLM request if it fails.
-            - num_retries: The maximum number of times to retry the LLM request if it fails.
-            - max_budget: The maximum budget for LLM requests. This only works for LLMs with known costs.
-            - mock_response: A mock response to return instead of making a real request.
-    completion_type : Literal["chat", "text"], default="chat"
-        The type of completion to use. This should be either "chat" or "text".
-    routing_strategy : Literal[
-        "simple-shuffle",
-        "least-busy",
-        "cost-based-routing",
-        "usage-based-routing-v2"
-    ], default="simple-shuffle"
-        The routing strategy to use for the LLM. This should be one of the following:
-            - simple-shuffle: randomly picks a deployment unless TPM, RPM or weight is set.
-            - least-busy: picks the deployment with the least number of ongoing requests.
-            - cost-based-routing: Picks deployment based on the lowest cost.
-            - usage-based-routing-v2: routes to deployment with lowest TPM usage.
-    cache_responses : Optional[bool], default=None
-        Whether to cache the responses from the LLM. This should be either True or False.
-    redis_host : Optional[str], default=None
-        The host name of the Redis server to use for caching.
-    redis_port : Optional[int], default=None
-        The port number of the Redis server to use for caching.
-    redis_password : Optional[str], default=None
-        The password for the Redis server to use for caching.
-    redis_client_kwargs : Optional[dict[str, Any]], default=None
-        Additional keyword arguments to pass to the Redis client.
-    cache_ttl : int, default=3600
-        The time-to-live (TTL) for the cached responses, in seconds. Cache TTL is the
-        duration for which the cached responses will be stored in the cache.
-    allowed_failures : Optional[int], default=None
-        The maximum number of allowed failures for the LLM requests.
-    allowed_failures_policy : Optional[AllowedFailsPolicy], default=None
-        The policy to use for allowed failures.
-    cooldown_time : Optional[float], default=None
-        The cooldown time to use for the LLM requests, in seconds.
-    retry_after : int, default=2
-        The number of seconds to wait before retrying the request if it fails.
-    num_retries : int, default=4
-        The maximum number of times to retry the request if it fails.
-    retry_policy : Optional[RetryPolicy], default=None
-        The policy to use for retries.
-    seed : Optional[int], default=None
-        The random seed to use for the LLM requests.
-    extra_headers : Optional[dict[str, str]], default=None
-        Additional headers to include in the LLM requests.
-    default_request_level_params : dict[str, Any], default={}
-        Additional request-level parameters to include in the LLM requests.
-        This should be a dictionary of key-value pairs, where the keys are the parameter names
-        and the values are the parameter values.
+    model_id : str
+        The identifier of the model.
+    endpoint : EndpointType, optional
+        The default endpoint type to use (default is "chat_completion").
+    **kwargs
+        Additional keyword arguments for the model.
+    """
 
-    Examples
-    --------
-    >>> from naturalv2.models.lm import LM
+    def __init__(
+        self, model_id: str, endpoint: EndpointType = "chat_completion", **kwargs
+    ) -> None:
+        """Initialize the Model base class."""
+        self.model_id = model_id
+        self.endpoint = endpoint
+        self.kwargs = kwargs
+        self._cost: float = 0.0
 
-    >>> lm = LM(
-    ...     model_name="Llama-3.3-70B-Instruct",
-    ...     deployment_params=[
-    ...         {
-    ...             "model": "hosted_vllm/Llama-3.3-70B-Instruct",
-    ...             "api_key": "EMPTY",
-    ...             "api_base": "http://gpu054:8080/v1",
-    ...         },
-    ...         {
-    ...             "model": "hosted_vllm/Llama-3.3-70B-Instruct",
-    ...             "api_key": "EMPTY",
-    ...             "api_base": "http://gpu051:8080/v1",
-    ...         },
-    ...     ],
-    ...     completion_type="text",
-    ... )
+    @property
+    def cost(self) -> float:
+        """Return the accumulated cost of all requests.
 
-    >>> response = await lm(
-    ...     "What is the significance of the Magna Carta?", max_tokens=256
-    ... )
+        Returns
+        -------
+        float
+            The running cost.
+        """
+        return self._cost
+
+    @abstractmethod
+    def invoke(
+        self, input_data: ModelInput, *args, endpoint: EndpointType = None, **kwargs
+    ) -> ModelResponse | BatchResponse:
+        """Synchronously invoke the model.
+
+        Parameters
+        ----------
+        input_data : ModelInput
+            The input data for the model.
+        endpoint : EndpointType, optional
+            The endpoint to use for this request (overrides default).
+        **kwargs
+            Additional keyword arguments for the request.
+
+        Returns
+        -------
+        ModelResponse or BatchResponse
+            The model's response.
+        """
+        pass
+
+    async def ainvoke(
+        self, input_data: ModelInput, *args, endpoint: EndpointType = None, **kwargs
+    ) -> ModelResponse | BatchResponse:
+        """Asynchronously invoke the model.
+
+        Parameters
+        ----------
+        input_data : ModelInput
+            The input data for the model.
+        endpoint : EndpointType, optional
+            The endpoint to use for this request (overrides default).
+        **kwargs
+            Additional keyword arguments for the request.
+
+        Returns
+        -------
+        ModelResponse or BatchResponse
+            The model's response.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self.invoke, input_data, *args, endpoint=endpoint, **kwargs
+        )
+
+    def _validate_and_normalize_input(
+        self, input_data: ModelInput, endpoint: EndpointType
+    ) -> tuple[Union[list[str], list[dict[str, str]], dict[str, str]], bool]:
+        """Validate and normalize the input data based on the endpoint.
+
+        Returns the normalized input and flag indicating if it's a batch.
+        """
+        is_batch = False
+        if endpoint == "text_completion":
+            if isinstance(input_data, str):
+                return [input_data], is_batch
+
+            if isinstance(input_data, list) and all(
+                isinstance(item, str) for item in input_data
+            ):
+                is_batch = True
+                return input_data, is_batch
+
+            raise ValueError(
+                "For the `'text_completion'` endpoint, `input_data` must be a "
+                "string or a list of strings."
+            )
+
+        if endpoint == "chat_completion":
+            if isinstance(input_data, str):
+                # Convert string to chat message format
+                return [{"role": "user", "content": input_data}], is_batch
+
+            if isinstance(input_data, list) and all(
+                isinstance(item, dict) and "role" in item and "content" in item
+                for item in input_data
+            ):
+                return input_data, is_batch
+
+            raise ValueError(
+                "For the `'chat_completion'` endpoint, `input_data` must be a string or a list of "
+                "dictionaries with 'role' and 'content' keys."
+            )
+
+        if endpoint == "responses":
+            if isinstance(input_data, str):
+                # Convert string to responses format
+                return {"input": input_data}, is_batch
+
+            if isinstance(input_data, dict) and "input" in input_data:
+                return input_data, is_batch
+
+            raise ValueError(
+                "For the `'responses'` endpoint, `input_data` must be a string or a dictionary "
+                "with an 'input' key and optionally an 'instructions' key."
+            )
+
+        raise ValueError(f"Unsupported endpoint: {endpoint}")
+
+
+class VLLMModel(Model):
+    """vLLM model wrapper.
+
+    Parameters
+    ----------
+    model_id : str
+        The identifier/name of the model.
+    model_kwargs : dict, optional
+        Keyword arguments for vLLM model initialization.
+    endpoint : EndpointType, optional
+        The default endpoint type to use (default is "chat_completion").
+    **kwargs
+        Additional keyword arguments for the model.
     """
 
     def __init__(
         self,
-        model_name: str,
-        deployment_params: list[LLMParams],
-        completion_type: Literal["chat", "text"] = "chat",
-        routing_strategy: Literal[
-            "simple-shuffle",
-            "least-busy",
-            "cost-based-routing",
-            "usage-based-routing-v2",
-        ] = "simple-shuffle",
-        # Caching
-        cache_responses: Optional[bool] = None,
-        redis_host: Optional[str] = None,
-        redis_port: Optional[int] = None,
-        redis_password: Optional[str] = None,
-        redis_client_kwargs: Optional[dict[str, Any]] = None,
-        cache_ttl: int = 3600,
-        # Reliability
-        allowed_failures: Optional[int] = None,
-        allowed_failures_policy: Optional[AllowedFailsPolicy] = None,
-        cooldown_time: Optional[float] = None,
-        retry_after: int = 2,
-        num_retries: int = 4,
-        retry_policy: Optional[RetryPolicy] = None,
-        # Request-level parameters (e.g. temperature, top_p, etc.)
-        seed: Optional[int] = None,
-        extra_headers: Optional[dict[str, str]] = None,
-        **default_request_level_params: dict[str, Any],
+        model_id: str,
+        model_kwargs: dict[str, Any] | None = None,
+        endpoint: EndpointType = "chat_completion",
+        **kwargs,
     ) -> None:
-        """Initialize the LM class."""
-        if completion_type not in ["chat", "text"]:
-            raise ValueError(
-                "Expected ``completion_type`` to be one of ['chat', 'text'] but "
-                f"got {completion_type}"
+        """Initialize the VLLMModel."""
+        super().__init__(model_id=model_id, endpoint=endpoint, **kwargs)
+
+        try:
+            import msgspec
+            from vllm import LLM
+            from vllm.transformers_utils.tokenizer import AnyTokenizer
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Please install 'vllm' to use VLLMModel: `pip install vllm`"
+            ) from e
+
+        self.model_kwargs = model_kwargs or {}
+        self.model = LLM(model=model_id, **self.model_kwargs)
+        self.tokenizer: AnyTokenizer = self.model.get_tokenizer()
+        self._default_sampling_params = msgspec.structs.asdict(
+            self.model.get_default_sampling_params()
+        )
+
+    def cleanup(self) -> None:
+        """Clean up the model and free resources."""
+        import gc
+
+        import torch
+        from vllm.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+
+        destroy_model_parallel()
+        if self.model is not None:
+            # taken from https://github.com/vllm-project/vllm/issues/1908#issuecomment-2975218097
+            self.model.llm_engine.engine_core.shutdown()
+        gc.collect()
+        destroy_distributed_environment()
+        torch.cuda.empty_cache()
+
+    async def ainvoke(self, *args, **kwargs) -> ModelResponse:
+        """Asynchronous invocation is not supported for VLLMModel.
+
+        Raises
+        ------
+        NotImplementedError
+        """
+        raise NotImplementedError("VLLMModel does not support async calls.")
+
+    def invoke(
+        self,
+        input_data: ModelInput,
+        endpoint: EndpointType = None,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+        **kwargs,
+    ) -> ModelResponse | BatchResponse:
+        """Synchronously invoke the vLLM model.
+
+        Parameters
+        ----------
+        input_data : ModelInput
+            The input data for the model.
+        endpoint : EndpointType, optional
+            The endpoint to use for this request.
+        response_format : type[BaseModel] or dict, optional
+            The response format for guided decoding.
+        parse_output : bool, optional
+            Whether to parse the output using the response format.
+        **kwargs
+            Additional keyword arguments for the request.
+
+        Returns
+        -------
+        ModelResponse or BatchResponse
+            The model's response.
+        """
+        from vllm import SamplingParams
+
+        endpoint = endpoint or self.endpoint
+        validate_endpoint(
+            endpoint, supported_endpoints=["chat_completion", "text_completion"]
+        )
+
+        inputs, is_batch = self._validate_and_normalize_input(input_data, endpoint)
+
+        # Prepare sampling params
+        # - Sampling params come from 3 places, in order of precedence:
+        #   1. kwargs to this method
+        #   2. self.kwargs (set at model init)
+        #   3. self._default_sampling_params (from vLLM model)
+        # - self.kwargs and kwargs may contain non-sampling params, so we filter them out
+        combined_kwargs = {**self.kwargs, **kwargs}
+
+        # self._default_sampling_params may not contain all possible sampling params,
+        # so we use it as a base and update it with self.kwargs and kwargs
+        sampling_params_dict = self._default_sampling_params.copy()
+        sampling_param_keys = SamplingParams.__annotations__.keys()
+        sampling_kwargs = {}
+        remaining_kwargs = {}
+        for k, v in combined_kwargs.items():
+            if k in sampling_param_keys and v is not None:
+                sampling_kwargs[k] = v
+            else:
+                remaining_kwargs[k] = v
+
+        sampling_params_dict.update(sampling_kwargs)
+
+        # Handle response_format for guided decoding
+        if response_format is not None and (
+            "guided_decoding" not in sampling_params_dict
+            or (sampling_params_dict["guided_decoding"] is None)
+        ):
+            from vllm.sampling_params import GuidedDecodingParams
+
+            sampling_params_dict["guided_decoding"] = GuidedDecodingParams(
+                json=response_format.model_json_schema()
             )
 
-        self._model_name = model_name
-        self._model_list = self._build_model_list(
-            model_name=model_name, deployment_params=deployment_params
-        )
-        self.completion_type = completion_type
-        self.cache_responses = cache_responses
+        sampling_params = SamplingParams(**sampling_params_dict)
 
-        self._num_retries = num_retries
+        if endpoint == "chat_completion":
+            tools = remaining_kwargs.pop("tools", None)
+            inputs = self.tokenizer.apply_chat_template(
+                inputs,
+                tools=tools,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
 
-        self._router = Router(
-            model_list=self._model_list,
-            cache_responses=cache_responses,
-            caching_groups=[(model_name,)] if cache_responses is True else None,
-            redis_host=redis_host,
-            redis_port=redis_port,
-            redis_password=redis_password,
-            cache_kwargs=redis_client_kwargs or {},
-            client_ttl=cache_ttl,
-            routing_strategy=routing_strategy,  # rely on Router class to validate the strategy,
-            allowed_fails=allowed_failures,
-            allowed_fails_policy=allowed_failures_policy,
-            cooldown_time=cooldown_time,
-            retry_after=retry_after,
-            num_retries=num_retries,
-            model_group_retry_policy={model_name: retry_policy} if retry_policy else {},
-            router_general_settings=RouterGeneralSettings(async_mode_only=True),
-            set_verbose=False,
+        response = self.model.generate(
+            inputs, sampling_params=sampling_params, **remaining_kwargs
         )
 
-        verbose_logger.setLevel(logging.WARNING)
-        verbose_router_logger.setLevel(logging.WARNING)
-
-        self._request_params = dict(
-            seed=seed, extra_headers=extra_headers, **default_request_level_params
+        return self._parse_response(
+            response,
+            is_batch=is_batch,
+            response_format=response_format,
+            parse_output=parse_output,
         )
-        self._cost: float = 0.0
-        self._num_input_tokens: int = 0
-        self._num_output_tokens: int = 0
 
-    @property
-    def cost(self) -> float:
-        """Running cost of the LLM requests."""
-        return self._cost
+    def _parse_response(
+        self,
+        response: list["RequestOutput"],
+        is_batch: bool = False,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+    ) -> ModelResponse | BatchResponse:
+        """Parse the vLLM response into ``ModelResponse`` or ``BatchResponse``."""
 
-    @property
-    def total_prompt_tokens(self) -> int:
-        """Total number of input tokens processed by this instance."""
-        return self._num_input_tokens
+        def parse_single_output(output: "RequestOutput") -> ModelResponse:
+            """Parse a single vLLM output into a ``ModelResponse.``"""
+            # Get output text
+            texts: list[str] = []
+            parsed: list[Any] = []
+            sample_logprobs = []
+            for completion_output in output.outputs:
+                text = completion_output.text
+                texts.append(text)
+                if parse_output and response_format is not None:
+                    parsed.append(parse_model_output_with_format(text, response_format))
+                if completion_output.logprobs is not None:
+                    sample_logprobs.append(completion_output.logprobs)
+            output_text = "\n".join(texts)
 
-    @property
-    def total_completion_tokens(self) -> int:
-        """Total number of output tokens generated by this instance."""
-        return self._num_output_tokens
+            def _parse_vllm_logprob_dict(
+                logprob_dict: dict[int, Any],
+            ) -> LogProbs:
+                token_id = next(iter(logprob_dict))
+                logprob_obj = logprob_dict.get(token_id)
+                return token_id, logprob_obj.logprob
 
-    @weave_op(tracing_sample_rate=0.1)
-    async def __call__(  # noqa: PLR0912, PLR0915
-        self, prompt: Optional[str] = None, messages: Optional[list] = None, **kwargs
-    ) -> ResponseType:
-        """Make a request to the LLM.
+            # Get logprobs
+            logprobs: LogProbs | None = None
+            for logprob_list in sample_logprobs:
+                logprobs = []
+                token_ids = []
+                for item in logprob_list:
+                    token_id, logprob = _parse_vllm_logprob_dict(item)
+                    token_ids.append(token_id)
+                    logprobs.append(logprob)
+                logprobs = LogProbs(logprobs=logprobs, tokens=token_ids)
 
-        Parameters
-        ----------
-        prompt : Optional[str], default=None
-            The prompt to use for the LLM request.
-        messages : Optional[list], default=None
-            The messages to use for the LLM request. This should be a list of dictionaries
-            containing the role and content of each message. This is typically used for
-            chat-based models.
-        **kwargs : dict[str, Any]
-            Additional keyword arguments to pass to the LLM request.
+            # Get prompt logprobs
+            prompt_logprobs = output.prompt_logprobs
+            if prompt_logprobs is not None:
+                logprobs = []
+                token_ids = []
+                for item in prompt_logprobs:
+                    if item is None:
+                        continue
+
+                    token_id, logprob = _parse_vllm_logprob_dict(item)
+                    token_ids.append(token_id)
+                    logprobs.append(logprob)
+
+                prompt_logprobs = LogProbs(logprobs=logprobs, tokens=token_ids)
+
+            # Get token usage
+            prompt_tokens = (
+                len(output.prompt_token_ids) if output.prompt_token_ids else 0
+            )
+            completion_tokens = 0.0
+            for completion_output in output.outputs:
+                completion_tokens += len(completion_output.token_ids or [])
+
+            token_usage = TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+
+            return ModelResponse(
+                output_text=output_text,
+                output_parsed=parsed[0]
+                if parsed and len(parsed) == 1
+                else parsed or None,
+                model_id=self.model_id,
+                logprobs=logprobs,
+                prompt_logprobs=prompt_logprobs,
+                token_usage=token_usage,
+                finish_reason=output.outputs[-1].finish_reason,
+                raw_response=output,
+                request_id=output.request_id,
+            )
+
+        if is_batch:
+            responses = [parse_single_output(output) for output in response]
+            return BatchResponse(responses=responses)
+
+        return parse_single_output(response[0])
+
+
+class APIModel(Model):
+    """Base class for models that use an API.
+
+    Parameters
+    ----------
+    model_id : str
+        The identifier of the model.
+    client : Any, optional
+        The API client instance.
+    endpoint : EndpointType, optional
+        The default endpoint type to use (default is "chat_completion").
+    **kwargs
+        Additional keyword arguments for the model.
+    """
+
+    def __init__(
+        self,
+        model_id: str,
+        client: Any | None = None,
+        endpoint: EndpointType = "chat_completion",
+        **kwargs,
+    ) -> None:
+        """Initialize the APIModel."""
+        super().__init__(model_id=model_id, endpoint=endpoint, **kwargs)
+        self.client = client or self.create_client()
+
+    def create_client(self) -> Any:
+        """Create the API client.
 
         Returns
         -------
-        ResponseType
-            The response from the LLM. This will be an instance of ``ModelResponse``
-            if the completion type is "chat", or an instance of ``TextCompletionResponse``
-            if the completion type is "text". The response will contain the generated
-            text, the token usage, and other relevant information. The type of response will
+        Any
+            The API client instance.
 
+        Raises
+        ------
+        NotImplementedError
         """
-        request_params = self._prepare_request_params(
-            prompt=prompt, messages=messages, **kwargs
-        )
-        response: ResponseType = await self._router.acompletion(
-            model=self._model_name,
-            **request_params,
-            text_completion=self.completion_type == "text",
+        raise NotImplementedError(
+            "Subclasses must implement this method to create a client."
         )
 
-        token_usage_info = response.usage
-        logger.debug("Token usage: %s", token_usage_info)
-        self._update_cost(response)
-        self._num_input_tokens += token_usage_info.prompt_tokens
-        self._num_output_tokens += token_usage_info.completion_tokens
 
-        return response
+class LiteLLMModel(APIModel):
+    """Provider-agnostic API model wrapper using LiteLLM.
 
-    @weave_op()
-    def call_sync(
-        self, prompt: Optional[str] = None, messages: Optional[list] = None, **kwargs
-    ) -> ResponseType:
-        """Make a request to the LLM and return the response.
+    Parameters
+    ----------
+    model_id : str
+        The identifier of the model.
+    api_base : str, optional
+        The API base URL.
+    api_key : str, optional
+        The API key.
+    rpm : int, optional
+        Requests per minute limit.
+    tpm : int, optional
+        Tokens per minute limit.
+    rpd : int, optional
+        Requests per day limit.
+    tpd : int, optional
+        Tokens per day limit.
+    max_request_burst : int, optional
+        Maximum request burst.
+    max_token_burst : int, optional
+        Maximum token burst.
+    max_parallel_requests : int, optional
+        Maximum parallel requests.
+    endpoint : EndpointType, optional
+        The default endpoint type to use (default is "chat_completion").
+    **kwargs
+        Additional keyword arguments for the model.
+    """
 
-        This is a synchronous version of the __call__ method. It blocks until the
-        response is received.
+    def __init__(
+        self,
+        model_id: str,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        rpm: int | None = None,
+        tpm: int | None = None,
+        rpd: int | None = None,
+        tpd: int | None = None,
+        max_request_burst: int | None = None,
+        max_token_burst: int | None = None,
+        max_parallel_requests: int | None = None,
+        endpoint: EndpointType = "chat_completion",
+        **kwargs,
+    ):
+        """Initialize the LiteLLMModel."""
+        self.api_base = api_base
+        self.api_key = api_key
+        self.max_parallel_requests = max_parallel_requests
 
-        Parameters
-        ----------
-        prompt : Optional[str], default=None
-            The prompt to use for the LLM request.
-        messages : Optional[list], default=None
-            The messages to use for the LLM request. This should be a list of dictionaries
-            containing the role and content of each message. This is typically used for
-            chat-based models.
-        **kwargs : dict[str, Any]
-            Additional keyword arguments to pass to the LLM request.
+        self._semaphore = (
+            asyncio.Semaphore(max_parallel_requests)
+            if max_parallel_requests is not None
+            else nullcontext()
+        )
+
+        self._rate_limiter: RateLimiter | None = None
+        if rpm or tpm:
+            self._rate_limiter = RateLimiter(
+                requests_per_minute=rpm if rpm is not None else tpm // 1000 // 6,
+                tokens_per_minute=tpm,
+                requests_per_day=rpd,
+                tokens_per_day=tpd,
+                max_request_burst=max_request_burst,
+                max_token_burst=max_token_burst,
+            )
+
+        super().__init__(model_id=model_id, endpoint=endpoint, **kwargs)
+
+    def create_client(self) -> "litellm":
+        """Create the LiteLLM client.
 
         Returns
         -------
-        ResponseType
-            The response from the LLM.
+        litellm
+            The LiteLLM client instance.
+
+        Raises
+        ------
+        ModuleNotFoundError
         """
         try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
+            import litellm
+            import litellm._logging
 
-        if loop and loop.is_running():  # run the async function in a new event loop
-            # NOTE: This is a workaround for running async code in a Jupyter notebook
-            # or other environments where the event loop is already running.
-            import nest_asyncio  # noqa: PLC0415
+            litellm._logging.verbose_logger.setLevel(logging.WARNING)
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Please install 'litellm' to use LiteLLMModel: `pip install litellm`"
+            ) from e
 
-            nest_asyncio.apply()
-            response = loop.run_until_complete(
-                self.__call__(prompt=prompt, messages=messages, **kwargs)
+        return litellm
+
+    def invoke(
+        self,
+        input_data: ModelInput,
+        endpoint: EndpointType = None,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+        **kwargs,
+    ) -> ModelResponse | BatchResponse:
+        """Synchronously invoke the LiteLLM model.
+
+        Parameters
+        ----------
+        input_data : ModelInput
+            The input data for the model.
+        endpoint : EndpointType, optional
+            The endpoint to use for this request.
+        response_format : type[BaseModel] or dict, optional
+            The response format for parsing.
+        parse_output : bool, optional
+            Whether to parse the output using the response format.
+        **kwargs
+            Additional keyword arguments for the request.
+
+        Returns
+        -------
+        ModelResponse or BatchResponse
+            The model's response.
+        """
+        endpoint = endpoint or self.endpoint
+        inputs, is_batch, request_kwargs = self._prepare_request(
+            input_data, endpoint, kwargs
+        )
+
+        if endpoint == "responses":
+            request_kwargs = self._handle_responses_response_format(
+                request_kwargs, response_format
             )
-        else:  # run the async function directly
-            response = asyncio.run(
-                self.__call__(prompt=prompt, messages=messages, **kwargs)
+            response = self.client.responses(
+                model=self.model_id,
+                input=inputs["input"],
+                instructions=inputs.get("instructions", None),
+                **request_kwargs,
+            )
+        else:
+            if is_batch:
+                # Use asyncio to parallelize the requests
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    # No event loop in this thread, create one
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                return loop.run_until_complete(
+                    asyncio.gather(
+                        *[
+                            self.ainvoke(
+                                item,
+                                endpoint=endpoint,
+                                response_format=response_format,
+                                parse_output=parse_output,
+                                **request_kwargs,
+                            )
+                            for item in inputs
+                        ]
+                    )
+                )
+
+            response = self.client.completion(
+                model=self.model_id,
+                messages=inputs,
+                text_completion=(endpoint == "text_completion"),
+                response_format=response_format,
+                **request_kwargs,
+            )
+        self._update_cost(response)
+
+        return self._parse_model_response(
+            response,
+            endpoint,
+            response_format=response_format,
+            parse_output=parse_output,
+        )
+
+    async def ainvoke(
+        self,
+        input_data: ModelInput,
+        endpoint: EndpointType = None,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+        **kwargs,
+    ) -> ModelResponse | BatchResponse:
+        """Asynchronously invoke the LiteLLM model.
+
+        Parameters
+        ----------
+        input_data : ModelInput
+            The input data for the model.
+        endpoint : EndpointType, optional
+            The endpoint to use for this request.
+        response_format : type[BaseModel] or dict, optional
+            The response format for parsing.
+        parse_output : bool, optional
+            Whether to parse the output using the response format.
+        **kwargs
+            Additional keyword arguments for the request.
+
+        Returns
+        -------
+        ModelResponse or BatchResponse
+            The model's response.
+        """
+        endpoint = endpoint or self.endpoint
+        inputs, is_batch, request_kwargs = self._prepare_request(
+            input_data, endpoint, kwargs
+        )
+
+        async def _single_request(
+            input_item: list[dict[str, str]] | dict[str, str],
+            request_kwargs: dict[str, Any],
+        ) -> Any:
+            async with self._semaphore:
+                if self._rate_limiter:
+                    token_count_estimate = estimate_token_count(
+                        self.model_id,
+                        request_kwargs.get("max_tokens", 16),
+                        messages=input_item
+                        if endpoint != "responses"
+                        else [
+                            {
+                                "role": "system",
+                                "content": input_item.get("instructions", ""),
+                            },
+                            {"role": "user", "content": input_item["input"]},
+                        ],
+                    )
+                    await self._rate_limiter.acquire(token_count_estimate)
+
+                if endpoint == "responses":
+                    request_kwargs = self._handle_responses_response_format(
+                        request_kwargs, response_format
+                    )
+                    resp = await self.client.aresponses(
+                        input=input_item["input"],
+                        model=self.model_id,
+                        instructions=input_item.get("instructions", None),
+                        **request_kwargs,
+                    )
+                else:
+                    resp = await self.client.acompletion(
+                        model=self.model_id,
+                        messages=input_item,
+                        atext_completion=(endpoint == "text_completion"),
+                        **request_kwargs,
+                    )
+                self._update_cost(resp)
+                return resp
+
+        if is_batch:
+            responses = await asyncio.gather(
+                *[_single_request(item, request_kwargs) for item in inputs]
+            )
+            result = self._parse_model_response(
+                responses,
+                endpoint,
+                response_format=response_format,
+                parse_output=parse_output,
+            )
+        else:
+            response = await _single_request(inputs, request_kwargs)
+            result = self._parse_model_response(
+                response,
+                endpoint,
+                response_format=response_format,
+                parse_output=parse_output,
+            )
+        return result
+
+    def _handle_responses_response_format(
+        self,
+        request_kwargs: dict[str, Any],
+        response_format: type[BaseModel] | dict | None = None,
+    ) -> dict[str, Any]:
+        """Handle the response format for the 'responses' endpoint.
+
+        Returns Updated request keyword arguments.
+        """
+        if (
+            "text" in request_kwargs
+            and isinstance(request_kwargs["text"], dict)
+            and "format" in request_kwargs["text"]
+            and request_kwargs["text"]["format"]["type"] == "json_schema"
+        ):
+            raise ValueError(
+                "When using the 'responses' endpoint with a JSON schema format, "
+                "please use the 'response_format' parameter instead of setting "
+                "'text.format'."
             )
 
-        return response
+        # Convert response_format to text.format if provided
+        if response_format is not None:
+            request_kwargs["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": response_format.__name__
+                    if hasattr(response_format, "__name__")
+                    else "ResponseFormat",
+                    "schema": response_format.model_json_schema(),
+                }
+            }
+        return request_kwargs
 
-    def _build_model_list(
-        self, model_name: str, deployment_params: list[LLMParams]
-    ) -> list[dict[str, Any]]:
-        """Get the model list from the deployment params."""
-        model_list = []
-        for deployment in deployment_params:
-            model_params = {"model_name": model_name}
-            if deployment.get("model") is None:
-                deployment["model"] = model_name
-            model_params["litellm_params"] = deployment
+    def _parse_model_response(
+        self,
+        response: Union[
+            ChatCompletionResponse,
+            TextCompletionResponse,
+            "ResponsesAPIResponse",
+            list[ChatCompletionResponse],
+            list[TextCompletionResponse],
+            list["ResponsesAPIResponse"],
+        ],
+        endpoint: EndpointType,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+    ) -> ModelResponse | BatchResponse:
+        """Parse the LiteLLM response into ``ModelResponse`` or ``BatchResponse``."""
 
-            model_list.append(model_params)
-        return model_list
+        def parse_single_response(
+            resp: Union[
+                ChatCompletionResponse,
+                TextCompletionResponse,
+                "ResponsesAPIResponse",
+            ],
+        ) -> ModelResponse:
+            if endpoint == "responses":
+                return self._parse_responses_api(resp, response_format, parse_output)
+            return self._parse_completions(resp, response_format, parse_output)
 
-    def _prepare_request_params(
-        self, prompt: str | None, messages: Optional[list] = None, **kwargs
-    ) -> dict[str, Union[str, list]]:
-        """Prepare the request parameters for the LLM request."""
-        cache = kwargs.pop("cache", self.cache_responses)
-        messages = messages or [{"role": "user", "content": prompt or ""}]
-        request_params = {**self._request_params, **kwargs}
+        if isinstance(response, list):
+            responses = [parse_single_response(resp) for resp in response]
+            return BatchResponse(responses=responses)
 
-        if request_params.get("stream"):
+        return parse_single_response(response)
+
+    def _parse_responses_api(
+        self,
+        response: "ResponsesAPIResponse",
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+    ) -> ModelResponse:
+        """Parse a 'responses' endpoint API response.
+
+        Parameters
+        ----------
+        response : ResponsesAPIResponse
+            The raw API response.
+        response_format : type[BaseModel] or dict, optional
+            The response format for parsing.
+        parse_output : bool, optional
+            Whether to parse the output.
+
+        Returns
+        -------
+        ModelResponse
+            The parsed response.
+        """
+        texts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for output in response.output:
+            if output.type == "message":
+                for content in output.content:
+                    if content.type == "output_text":
+                        texts.append(content.text)
+            if output.type == "function_call":
+                tool_calls.append(
+                    ToolCall(
+                        id=output.id,
+                        name=output.name,
+                        arguments=output.arguments,
+                    )
+                )
+
+        output_text, output_parsed = _extract_output_and_parsed(
+            texts, response_format, parse_output
+        )
+        usage = response.usage if hasattr(response, "usage") else response["usage"]
+        token_usage = extract_token_usage(usage, is_responses=True)
+
+        return ModelResponse(
+            request_id=response.id,
+            output_text=output_text,
+            output_parsed=output_parsed,
+            model_id=self.model_id,
+            tool_calls=tool_calls if tool_calls else None,
+            token_usage=token_usage,
+            raw_response=response,
+        )
+
+    def _parse_completions(
+        self,
+        response: ChatCompletionResponse | TextCompletionResponse,
+        response_format: type[BaseModel] | dict | None = None,
+        parse_output: bool = False,
+    ) -> ModelResponse:
+        """Parse a completions endpoint response.
+
+        Parameters
+        ----------
+        response : ChatCompletionResponse or TextCompletionResponse
+            The raw completion response.
+        response_format : type[BaseModel] or dict, optional
+            The response format for parsing.
+        parse_output : bool, optional
+            Whether to parse the output.
+
+        Returns
+        -------
+        ModelResponse
+            The parsed response.
+        """
+        contents = get_message_content(response)
+        output_text, output_parsed = _extract_output_and_parsed(
+            contents, response_format, parse_output
+        )
+        usage = response.usage if hasattr(response, "usage") else response["usage"]
+        token_usage = extract_token_usage(usage)
+
+        return ModelResponse(
+            request_id=response.id,
+            output_text=output_text,
+            output_parsed=output_parsed,
+            model_id=self.model_id,
+            finish_reason=response.choices[-1].finish_reason,
+            logprobs=self._get_logprobs(response),
+            prompt_logprobs=self._get_prompt_logprobs(response),
+            token_usage=token_usage,
+            raw_response=response,
+        )
+
+    @staticmethod
+    def _get_logprobs(
+        response: ChatCompletionResponse | TextCompletionResponse,
+    ) -> LogProbs | None:
+        """Get prompt log probabilities from a completion response."""
+        if not all(hasattr(c, "logprobs") for c in response.choices):
+            return None
+
+        tokens: list[str] = []
+        logprobs: list[float] = []
+        for c in response.choices:
+            if isinstance(response, ChatCompletionResponse):
+                for obj in c.logprobs.content:
+                    if obj is None:
+                        continue
+
+                    tokens.append(obj.token)
+                    logprobs.append(obj.logprob)
+            else:
+                tokens.extend(c.logprobs.tokens)
+                logprobs.extend(c.logprobs.token_logprobs)
+        return LogProbs(tokens=tokens, logprobs=logprobs)
+
+    @staticmethod
+    def _get_prompt_logprobs(
+        response: ChatCompletionResponse | TextCompletionResponse,
+    ) -> LogProbs | None:
+        """Get log probabilities from a completion response."""
+        if isinstance(response, ChatCompletionResponse) and (
+            not hasattr(response, "prompt_logprobs")
+            and "prompt_logprobs" not in response
+        ):
+            return None
+
+        if isinstance(response, TextCompletionResponse) and (
+            not all("prompt_logprobs" in c for c in response.choices)
+        ):
+            return None
+
+        logprobs: list[float] = []
+        token_ids: list[int] = []
+        decoded_tokens: list[str] = []
+
+        def _parse_prompt_logprob_dicts(prompt_logprobs: list[Optional[dict]]) -> None:
+            for item in prompt_logprobs:
+                if item is None:
+                    continue
+
+                key = next(iter(item))
+                values = item.get(key)
+
+                token_ids.append(key)
+                logprobs.append(values["logprob"])
+                decoded_tokens.append(values["decoded_token"])
+
+        if isinstance(response, ChatCompletionResponse):
+            if (
+                not hasattr(response, "prompt_logprobs")
+                or response.prompt_logprobs is None
+            ):
+                return None
+            _parse_prompt_logprob_dicts(response["prompt_logprobs"])
+        else:
+            for c in response.choices:
+                if not hasattr(c, "prompt_logprobs"):
+                    continue
+
+                prompt_logprobs: list[Optional[dict]] = c["prompt_logprobs"]
+                if prompt_logprobs is not None:
+                    _parse_prompt_logprob_dicts(prompt_logprobs)
+
+        return LogProbs(logprobs=logprobs, tokens=decoded_tokens)
+
+    def _validate_and_normalize_input(
+        self, input_data: ModelInput, endpoint: EndpointType
+    ) -> tuple[
+        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]], bool
+    ]:
+        """Validate and normalize the input data for ``LiteLLMModel``.
+
+        Return the normalized input and a flag indicating if it's a batch.
+        """
+        normalized_data, is_batch = super()._validate_and_normalize_input(
+            input_data, endpoint
+        )
+        if endpoint == "text_completion" and not is_batch:
+            normalized_data = [{"role": "user", "content": normalized_data[0]}]
+
+        return normalized_data, is_batch
+
+    def _prepare_request(
+        self, input_data: ModelInput, endpoint: EndpointType, kwargs: Any
+    ) -> tuple[
+        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]],
+        bool,
+        dict[str, Any],
+    ]:
+        """Prepare the request for LiteLLMModel.
+
+        Returns a tuple containing: Inputs, batch flag, and request keyword arguments.
+        """
+        validate_endpoint(endpoint)
+        inputs, is_batch = self._validate_and_normalize_input(input_data, endpoint)
+        request_kwargs = {**self.kwargs, **kwargs}
+        if request_kwargs.get("stream"):
             logger.warning(
                 "Streaming response is not supported for the LM class. "
                 "This parameter will be ignored.",
@@ -410,18 +1033,16 @@ class LM:
             )
             kwargs.pop("stream")
 
-        request_params.update(
-            {
-                "messages": messages,
-                "cache": {"no-cache": not cache, "no-store": not cache},
-            }
-        )
+        if self.api_base:
+            request_kwargs["api_base"] = self.api_base
+        if self.api_key:
+            request_kwargs["api_key"] = self.api_key
 
-        return request_params
+        return inputs, is_batch, request_kwargs
 
-    def _update_cost(self, response: ResponseType) -> None:
+    def _update_cost(self, response: Any) -> None:
         """Update the running cost of the LLM requests."""
-        if self._model_name in model_cost:
+        if self.model_id in model_cost:
             try:
                 self._cost += completion_cost(completion_response=response)
             except Exception as e:
@@ -430,158 +1051,96 @@ class LM:
             logger.debug(f"Running cost: ${float(self._cost):.10f}")
 
 
-# ---------------------------------------------------------------------------- #
-# Helpers
-# ---------------------------------------------------------------------------- #
-@dataclass
-class LogprobsOutput:
-    tokens: list[str]
-    logprobs: list[float]
+class LiteLLMRouterModel(LiteLLMModel):
+    """Class for interacting with multiple instances of a model via LiteLLM Router.
 
+    Parameters
+    ----------
+    deployment_params : dict
+        Deployment parameters for router.
+    client_kwargs : dict, optional
+        Additional client keyword arguments.
+    endpoint : EndpointType, optional
+        The default endpoint type to use (default is "chat_completion").
+    **kwargs
+        Additional keyword arguments for the model.
+    """
 
-@dataclass
-class PromptLogprobsOutput:
-    logprobs: list[float]
-    token_ids: list[int]
-    decoded_tokens: list[str]
-
-
-def get_message_content(response: ResponseType) -> list[Optional[str]]:
-    return [
-        c.message.content if hasattr(c, "message") else c["text"]
-        for c in response.choices
-    ]
-
-
-def extract_list_response(response: ResponseType) -> Optional[list[list[Any]]]:
-    response_strs = get_message_content(response)
-    if not response_strs:
-        return None
-
-    response_list_objs = []
-    for response_str in response_strs:
-        try:
-            response_list_obj = ListResponse.model_validate_json(response_str)
-            response_list_objs.append(response_list_obj.output)
-        except Exception as e:
-            logger.error(f"Failed to parse response: {e}")
-            continue
-
-    return response_list_objs
-
-
-def get_logprobs(response: ResponseType) -> Optional[list[LogprobsOutput]]:
-    assert isinstance(response, (ModelResponse, TextCompletionResponse)), (
-        f"Expected response to be an instance of ModelResponse or TextCompletionResponse "
-        f"but got {type(response)}"
-    )
-    if not all(hasattr(c, "logprobs") for c in response.choices):
-        return None
-
-    outputs: list[LogprobsOutput] = []
-
-    for c in response.choices:
-        tokens: list[str] = []
-        logprobs: list[float] = []
-
-        if isinstance(response, ModelResponse):
-            for obj in c.logprobs.content:
-                if obj is None:
-                    continue
-
-                tokens.append(obj.token)
-                logprobs.append(obj.logprob)
-        else:
-            tokens = c.logprobs.tokens
-            logprobs = c.logprobs.token_logprobs
-
-        outputs.append(LogprobsOutput(tokens=tokens, logprobs=logprobs))
-
-    return outputs
-
-
-def get_prompt_logprobs(response: ResponseType) -> Optional[PromptLogprobsOutput]:
-    if isinstance(response, ModelResponse) and (
-        not hasattr(response, "prompt_logprobs") and "prompt_logprobs" not in response
+    def __init__(
+        self,
+        deployment_params: dict[str, "LiteLLMParamsTypedDict"],
+        client_kwargs: dict[str, Any] | None = None,
+        endpoint: EndpointType = "chat_completion",
+        **kwargs,
     ):
-        return None
-
-    if isinstance(response, TextCompletionResponse) and (
-        not all("prompt_logprobs" in c for c in response.choices)
-    ):
-        return None
-
-    logprobs: list[float] = []
-    token_ids: list[int] = []
-    decoded_tokens: list[str] = []
-
-    def _parse_prompt_logprob_dicts(prompt_logprobs: list[Optional[dict]]) -> None:
-        for item in prompt_logprobs:
-            if item is None:
-                continue
-
-            key = next(iter(item))
-            values = item.get(key)
-
-            token_ids.append(key)
-            logprobs.append(values["logprob"])
-            decoded_tokens.append(values["decoded_token"])
-
-    if isinstance(response, ModelResponse):
-        _parse_prompt_logprob_dicts(response["prompt_logprobs"])
-    else:
-        for c in response.choices:
-            prompt_logprobs: list[Optional[dict]] = c["prompt_logprobs"]
-            if prompt_logprobs is not None:
-                _parse_prompt_logprob_dicts(prompt_logprobs)
-
-    return PromptLogprobsOutput(
-        logprobs=logprobs, token_ids=token_ids, decoded_tokens=decoded_tokens
-    )
-
-
-def estimate_token_count(
-    model: str,
-    max_tokens: int,
-    n: int = 1,
-    text: Optional[Union[str, list[str]]] = None,
-    messages: Optional[list] = None,
-    count_response_tokens: Optional[bool] = False,
-) -> int:
-    assert n > 0, f"Expected `n` to be greater than 0 but got {n}"
-    assert max_tokens > 0, (
-        f"Expected `max_tokens` to be greater than 0 but got {max_tokens}"
-    )
-
-    if "claude-3" in model:
-        warnings.warn(
-            "The model claude-3 is not supported for token counting. "
-            "OpenAI tokenizer will be used, so the token count may not be accurate.",
-            stacklevel=2,
+        """Initialize the LiteLLMRouterModel."""
+        model_list, model_id = self._build_model_list(
+            deployment_params=deployment_params
+        )
+        self.client_kwargs = {
+            "model_list": model_list,
+            **(client_kwargs or {}),
+        }
+        super().__init__(
+            model_id=model_id,
+            endpoint=endpoint,
+            **kwargs,
         )
 
-    # convert the text to messages since the LM class always uses message format
-    messages = messages or [{"role": "user", "content": text}]
+    def create_client(self) -> "litellm.Router":
+        """Create the LiteLLM Router client.
 
-    input_token_count = token_counter(
-        model=model,
-        messages=messages,
-        count_response_tokens=count_response_tokens,
-        default_token_count=0,
-    )
-    output_token_count = max_tokens * n
+        Returns
+        -------
+        litellm.Router
+            The LiteLLM Router client instance.
 
-    return input_token_count + output_token_count
+        Raises
+        ------
+        ModuleNotFoundError
+        """
+        try:
+            import litellm._logging
+            from litellm.router import Router
 
+            litellm._logging.verbose_logger.setLevel(logging.WARNING)
+            litellm._logging.verbose_router_logger.setLevel(logging.WARNING)
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Please install 'litellm' to use LiteLLMRouterModel: `pip install litellm`"
+            ) from e
+        return Router(**self.client_kwargs)
 
-def build_lm_instance_from_cfg(cfg: DictConfig):
-    """Get LM instance from configuration."""
-    # make a deep copy of the config
-    cfg_copy = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    def _build_model_list(
+        self, deployment_params: dict[str, "LiteLLMParamsTypedDict"]
+    ) -> list[dict[str, Any]]:
+        """Build the model list from deployment parameters.
 
-    # change 'deployment' params from dict to list, ignore keys.
-    cfg_copy["deployment_params"] = [
-        value for _, value in cfg_copy["deployment_params"].items()
-    ]
+        Parameters
+        ----------
+        model_id : str
+            The identifier of the model.
+        deployment_params : dict
+            Deployment parameters.
 
-    return LM(**cfg_copy)
+        Returns
+        -------
+        list of dict
+            The model list for the router.
+        """
+        model_list = []
+        model_ids = []
+        for model_name, litellm_params in deployment_params.items():
+            deployment_dict = {"model_name": model_name}
+            model_ids.append(litellm_params["model"])
+            deployment_dict["litellm_params"] = litellm_params
+
+            model_list.append(deployment_dict)
+
+        if len(set(model_ids)) != 1:
+            raise ValueError(
+                "All deployments must use the same model. Found multiple models: "
+                f"{set(model_ids)}"
+            )
+
+        return model_list, model_ids[0]

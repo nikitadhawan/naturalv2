@@ -1,0 +1,15 @@
+_target_: naturalv2.models.lm.LiteLLMModel
+model_id: ???
+endpoint: chat_completion
+api_base: null
+api_key: null
+rpm: null
+tpm: null
+rpd: null
+tpd: null
+max_parallel_requests: null
+
+# kwargs: default sampling parameters per model call
+seed: ${seed}
+max_tokens: 512
+num_retries: 5

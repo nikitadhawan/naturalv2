@@ -1,0 +1,22 @@
+# @package _global_
+_target_: naturalv2.models.lm.LiteLLMRouterModel
+deployment_params: ???
+endpoint: chat_completion
+client_kwargs:
+  routing_strategy: usage-based-routing-v2
+  timeout: 300
+  default_max_parallel_requests: null
+  allowed_fails: 100
+  cooldown_time: 5
+  retry_after: 5
+  num_retries: 10
+  redis_host: ${oc.env:REDIS_HOST,null}
+  redis_port: ${oc.env:REDIS_PORT,null}
+  redis_password: ${oc.env:REDIS_PASSWORD,null}
+  cache_kwargs:
+    ssl: ${oc.env:REDIS_SSL,False}
+    ssl_check_hostname: False
+
+# kwargs: default sampling parameters per model call
+seed: ${seed}
+max_tokens: 512

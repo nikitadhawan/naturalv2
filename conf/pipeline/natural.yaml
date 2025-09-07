@@ -1,6 +1,0 @@
-_target_: naturalv2.pipeline.natural.NATURALPipeline
-experiment:
-source_name:
-estimator_type:
-outcome:
-save_path:

@@ -28,6 +28,7 @@ repos:
     - id: pytest
       name: pytest
       language: system
+      args: ["--ignore=scripts/"]
       entry: python3 -m pytest -m "not integration_test"
       pass_filenames: false
       always_run: true

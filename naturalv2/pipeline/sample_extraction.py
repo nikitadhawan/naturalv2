@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm
 
-from naturalv2.models.lm import build_lm_instance_from_cfg, get_message_content
+from naturalv2.models.utils import TokenTracker
 from naturalv2.pipeline.constants import (
     INCLUSION_COL_NAME,
     OUTCOME_COL_NAME,
@@ -26,7 +26,8 @@ from naturalv2.utils import create_response_format, get_save_path
 
 if TYPE_CHECKING:
     from naturalv2.experiment import Experiment
-    from naturalv2.models.lm import LM, ResponseType
+    from naturalv2.models.lm import APIModel
+    from naturalv2.models.types import ModelResponse
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class SampleExtractionStage(PipelineStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after extraction.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for extraction.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -72,23 +73,16 @@ class SampleExtractionStage(PipelineStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
         """Initialize the class."""
-        super().__init__(model_cfg)
+        super().__init__(model_cfg, name=name)
         self.max_concurrent_workers = max_concurrent_workers
         self.data: pd.DataFrame | None = None
         self.extract_type: str | None = None
-
-    def get_language_model(self) -> "LM":
-        """Return the language model used in this stage.
-
-        Returns
-        -------
-        LM
-            An instance of the language model configured for this stage.
-        """
-        return build_lm_instance_from_cfg(self.model_cfg)
 
     def prompt_template(self) -> dict[str, Any]:
         prompt_data: dict[str, Any] = {}
@@ -132,7 +126,7 @@ class RelevanceFilterStage(SampleExtractionStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after relevance filtering.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for relevance filtering.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -141,9 +135,12 @@ class RelevanceFilterStage(SampleExtractionStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
-        super().__init__(model_cfg, max_concurrent_workers)
+        super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.RELEVANCE.value
 
     async def process(
@@ -177,14 +174,11 @@ class RelevanceFilterStage(SampleExtractionStage):
         )
         filtered_data = await extract_covariates(
             input_df=data,
-            experiment=context.experiment,
-            source_name=context.source_name,
-            outcome=context.outcome,
+            pipeline_context=context,
+            pipeline_stage_name=self.stage_name,
             extract_type=ExtractType.RELEVANCE,
             llm=self.llm,
             model_name=self._model_name,
-            save_path=context.save_path,
-            exp_name=context.exp_name,
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -215,7 +209,7 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after treatment-outcome filtering.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for treatment-outcome filtering.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -224,9 +218,12 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
-        super().__init__(model_cfg, max_concurrent_workers)
+        super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.TY_FILTER.value
 
     async def process(
@@ -264,14 +261,11 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
         )
         ty_samples = await extract_covariates(
             input_df=data,
-            experiment=context.experiment,
-            source_name=context.source_name,
-            outcome=context.outcome,
+            pipeline_context=context,
+            pipeline_stage_name=self.stage_name,
             extract_type=ExtractType.TY_FILTER,
             llm=self.llm,
             model_name=self._model_name,
-            save_path=context.save_path,
-            exp_name=context.exp_name,
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -301,7 +295,7 @@ class KnownsStage(SampleExtractionStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after extracting known covariates.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for covariate extraction.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -311,9 +305,12 @@ class KnownsStage(SampleExtractionStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
-        super().__init__(model_cfg, max_concurrent_workers)
+        super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.KNOWNS.value
 
     async def process(
@@ -352,14 +349,11 @@ class KnownsStage(SampleExtractionStage):
         )
         self.data = await extract_covariates(
             input_df=data,
-            experiment=context.experiment,
-            source_name=context.source_name,
-            outcome=context.outcome,
+            pipeline_context=context,
+            pipeline_stage_name=self.stage_name,
             extract_type=ExtractType.KNOWNS,
             llm=self.llm,
             model_name=self._model_name,
-            save_path=context.save_path,
-            exp_name=context.exp_name,
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -387,7 +381,7 @@ class ImputationsStage(SampleExtractionStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after imputing missing covariates.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for covariate extraction.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -396,9 +390,12 @@ class ImputationsStage(SampleExtractionStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
-        super().__init__(model_cfg, max_concurrent_workers)
+        super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.IMPUTATIONS.value
 
     async def process(
@@ -407,18 +404,15 @@ class ImputationsStage(SampleExtractionStage):
         response_format = create_response_format(
             "ImputationsResponse",
             keys=context.experiment.covariate_names,
-            # types={"Country": str, "Duration": int},
+            types={"Country": str, "Duration": int},
         )
         self.data = await extract_covariates(
             input_df=data,
-            experiment=context.experiment,
-            source_name=context.source_name,
-            outcome=context.outcome,
+            pipeline_context=context,
+            pipeline_stage_name=self.stage_name,
             extract_type=ExtractType.IMPUTATIONS,
             llm=self.llm,
             model_name=self._model_name,
-            save_path=context.save_path,
-            exp_name=context.exp_name,
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -444,7 +438,7 @@ class SampleTYStage(SampleExtractionStage):
         Maximum number of concurrent workers for processing.
     data : pd.DataFrame | None
         DataFrame containing the processed data after imputing missing covariates.
-    llm : LM
+    llm : APIModel
         Lazy-loaded language model instance used for covariate extraction.
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
@@ -453,9 +447,12 @@ class SampleTYStage(SampleExtractionStage):
     """
 
     def __init__(
-        self, model_cfg: DictConfig, max_concurrent_workers: int | None = None
+        self,
+        model_cfg: DictConfig,
+        name: str | None = None,
+        max_concurrent_workers: int | None = None,
     ) -> None:
-        super().__init__(model_cfg, max_concurrent_workers)
+        super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.SAMPLE_TY.value
 
     async def process(
@@ -472,14 +469,11 @@ class SampleTYStage(SampleExtractionStage):
         )
         self.data = await extract_covariates(
             input_df=data,
-            experiment=context.experiment,
-            source_name=context.source_name,
-            outcome=context.outcome,
+            pipeline_context=context,
+            pipeline_stage_name=self.stage_name,
             extract_type=ExtractType.SAMPLE_TY,
             llm=self.llm,
             model_name=self._model_name,
-            save_path=context.save_path,
-            exp_name=context.exp_name,
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
@@ -491,14 +485,11 @@ class SampleTYStage(SampleExtractionStage):
 
 async def extract_covariates(  # noqa: PLR0912
     input_df: pd.DataFrame,
-    experiment: "Experiment",
-    source_name: str,
-    outcome: str,
+    pipeline_context: PipelineContext,
+    pipeline_stage_name: str,
     extract_type: ExtractType,
-    llm: "LM",
+    llm: "APIModel",
     model_name: str,
-    save_path: str,
-    exp_name: str,
     response_format: BaseModel | None = None,
     max_concurrent_requests: int | None = None,
 ) -> pd.DataFrame:
@@ -511,23 +502,13 @@ async def extract_covariates(  # noqa: PLR0912
     ----------
     input_df : pd.DataFrame
         DataFrame containing the reports to be processed.
-    experiment : Experiment
-        Experiment instance containing metadata and prompt templates.
-    source_name : str
-        Name of the source from which the reports are curated.
-    outcome : str
-        The outcome variable for which information is being extracted.
     extract_type : ExtractType
         The type of extraction to perform (e.g., relevance, treatment-outcome,
         known covariates, or imputations).
-    llm : LM
+    llm : APIModel
         Language model instance used for processing the reports.
     model_name : str
         Name of the language model being used.
-    save_path : str
-        Base path where the processed data for this experiment will be saved.
-    exp_name: str
-        Identifier string for a particular run, included in results directory name.
     response_format : BaseModel | None, optional, default=None
         Pydantic model defining the expected format of the LLM response.
         If None, no validation will be performed on the response.
@@ -558,7 +539,12 @@ async def extract_covariates(  # noqa: PLR0912
 
     """
     file_path = get_save_path(
-        save_path, experiment.nct_id, exp_name, model_name, extract_type.value, outcome
+        pipeline_context.save_path,
+        pipeline_context.experiment.nct_id,
+        pipeline_context.exp_name,
+        model_name,
+        extract_type.value,
+        pipeline_context.outcome,
     )
 
     if os.path.exists(file_path):
@@ -588,10 +574,10 @@ async def extract_covariates(  # noqa: PLR0912
         _llm_task_producer(
             prompt_queue,
             input_df,
-            experiment,
+            pipeline_context.experiment,
             extract_type.value,
-            outcome,
-            source_name,
+            pipeline_context.outcome,
+            pipeline_context.source_name,
             producer_pbar,
         ),
         name="LLM-Task-Producer",
@@ -607,6 +593,8 @@ async def extract_covariates(  # noqa: PLR0912
                 llm,
                 worker_pbar,
                 extract_type,
+                pipeline_stage_name,
+                token_tracker=pipeline_context._token_tracker,
                 response_format=response_format,
             ),
             name=f"Prompt-Processor-{worker_id}",
@@ -699,51 +687,6 @@ def _prompt_formatter(
     )
 
 
-def _result_processor(
-    row: pd.Series,
-    response: "ResponseType",
-    extract_type: ExtractType,
-    response_format: BaseModel | None = None,
-) -> dict[str, Any] | None:
-    """Process the LLM response and combine it with the original row data."""
-    response_text = get_message_content(response)[0]
-    if response_text is None:
-        logging.warning(
-            f"No content in LLM response for row index {row.name if hasattr(row, 'name') else 'unknown'}"
-        )
-        return None
-
-    try:
-        if response_format:
-            parsed_data = response_format.model_validate_json(response_text).model_dump(
-                mode="json"
-            )
-        else:  # No Pydantic validation, just return raw text or a simple dict
-            parsed_data = {"llm_response": response_text}
-    except Exception as e:
-        logging.error(
-            "Failed to validate/parse LLM response for row index "
-            f"{row.name if hasattr(row, 'name') else 'unknown'}: {e}. "
-            f"Response text: '{response_text[:200]}...'"
-        )
-        return None  # Signal error
-
-    if extract_type == ExtractType.TY_FILTER:
-        # append "_filter" to each key in the parsed data
-        parsed_data = {f"{key}_filter": value for key, value in parsed_data.items()}
-
-    if extract_type == ExtractType.IMPUTATIONS:
-        # append "_imputed" to each key in the parsed data
-        parsed_data = {f"{key}_imputed": value for key, value in parsed_data.items()}
-
-    # Combine original row data with parsed LLM data
-    parsed_row_data = {"index": row.name}
-    parsed_row_data.update(row.to_dict())
-    parsed_row_data.update(parsed_data)
-
-    return parsed_row_data
-
-
 async def _llm_task_producer(
     queue: asyncio.Queue,
     input_df: pd.DataFrame,
@@ -774,9 +717,11 @@ async def _prompt_processor(
     worker_id: int,
     prompt_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
-    llm: "LM",
+    llm: "APIModel",
     pbar: tqdm,
     extract_type: ExtractType,
+    pipeline_stage_name: str,
+    token_tracker: "TokenTracker",
     response_format: BaseModel | None = None,
 ) -> int:
     """Worker function to process prompts.
@@ -801,13 +746,11 @@ async def _prompt_processor(
                 await result_queue.put(False)  # Signal failure to writer
                 continue
 
-            result = await llm(
-                messages=messages,
-                response_format=response_format or {"type": "json_object"},
+            response = await llm.ainvoke(
+                messages, response_format=response_format, parse_output=True
             )
-            processed_result = _result_processor(
-                row, result, extract_type, response_format=response_format
-            )
+            token_tracker.add(pipeline_stage_name, response)
+            processed_result = _result_processor(row, response, extract_type)
 
             if processed_result is not None:
                 await result_queue.put(processed_result)
@@ -830,3 +773,32 @@ async def _prompt_processor(
             prompt_queue.task_done()
 
     return error_count
+
+
+def _result_processor(
+    row: pd.Series, response: "ModelResponse", extract_type: ExtractType
+) -> dict[str, Any] | None:
+    """Process the LLM response and combine it with the original row data."""
+    output: BaseModel | None = response.output_parsed
+    if output is None:
+        return None  # No output to process
+
+    if extract_type == ExtractType.TY_FILTER:
+        # append "_filter" to each key in the parsed data
+        output = {
+            f"{key}_filter": value
+            for key, value in output.model_dump(mode="json").items()
+        }
+    elif extract_type == ExtractType.IMPUTATIONS:
+        # append "_imputed" to each key in the parsed data
+        output = {
+            f"{key}_imputed": value
+            for key, value in output.model_dump(mode="json").items()
+        }
+
+    # Combine original row data with parsed LLM data
+    parsed_row_data = {"index": row.name}
+    parsed_row_data.update(row.to_dict())
+    parsed_row_data.update(output)
+
+    return parsed_row_data

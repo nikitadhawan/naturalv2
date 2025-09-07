@@ -52,4 +52,4 @@ user_prompt_template: |-
     - '{{ covariate }}'
     {%- endif %}
   {% endfor %}
-  Return only a valid JSON object with no additional text, code blocks, or explanations.
+  Return only a valid JSON object with no additional text, code blocks, or explanations. Unless otherwise specified, use a string for all values.

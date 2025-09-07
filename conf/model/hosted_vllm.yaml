@@ -1,0 +1,6 @@
+defaults:
+  - litellm_model
+
+model_id: ???
+api_key: EMPTY
+api_base: ???

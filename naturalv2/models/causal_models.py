@@ -1,40 +1,14 @@
 """Causal models used by the NaturalMC estimator."""
 
-from dataclasses import dataclass
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 import pandas as pd
 from causallib.estimation import IPW, MarginalOutcomeEstimator, Standardization
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 
-@dataclass
-class CausalData:
-    """Data container for causal estimation."""
-
-    #: Covariates (features) matrix.
-    X: pd.DataFrame
-
-    #: Treatment assignment.
-    T: pd.Series
-
-    #: Observed Outcome.
-    Y: pd.Series
-
-    def __post_init__(self) -> None:
-        """Validate data after initialization."""
-        self.validate()
-
-    def validate(self) -> None:
-        """Validate data consistency."""
-        if len(self.X) != len(self.T) or len(self.T) != len(self.Y):
-            raise ValueError("X, T, and Y must have the same length")
-
-        if self.X.isnull().any().any():
-            raise ValueError("X contains missing values")
-
-        if self.T.isnull().any() or self.Y.isnull().any():
-            raise ValueError("T or Y contains missing values")
+if TYPE_CHECKING:
+    from naturalv2.models.types import CausalData
 
 
 class DifferenceInMeans(object):
@@ -59,7 +33,7 @@ class DifferenceInMeans(object):
         self.outcome_y = outcome_y
         self._model = MarginalOutcomeEstimator(learner=None)
 
-    def fit(self, data: CausalData) -> Self:
+    def fit(self, data: "CausalData") -> Self:
         """Fit the model to the provided causal data.
 
         Parameters
@@ -81,7 +55,7 @@ class DifferenceInMeans(object):
 
         return self
 
-    def get_average_treatment_effects(self, data: CausalData) -> pd.Series:
+    def get_average_treatment_effects(self, data: "CausalData") -> pd.Series:
         """Calculate average treatment effects based on the fitted model.
 
         Parameters
@@ -126,7 +100,7 @@ class IPSW(DifferenceInMeans):
         learner = LogisticRegression(solver="liblinear")
         self._model = IPW(learner=learner)
 
-    def get_individual_treatment_effects(self, data: CausalData) -> pd.Series:
+    def get_individual_treatment_effects(self, data: "CausalData") -> pd.Series:
         """Calculate individual treatment effects using the IPSW method.
 
         Parameters
@@ -174,7 +148,7 @@ class OutcomeImputation(DifferenceInMeans):
         learner = LinearRegression()
         self._model = Standardization(learner=learner)
 
-    def get_individual_treatment_effects(self, data: CausalData) -> pd.DataFrame:
+    def get_individual_treatment_effects(self, data: "CausalData") -> pd.DataFrame:
         """Calculate individual treatment effects using the Outcome Imputation method.
 
         Parameters

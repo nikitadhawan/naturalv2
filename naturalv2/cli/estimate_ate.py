@@ -203,10 +203,11 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 exp_name=cfg.experiment_name,
             )
 
-            pipeline_stages = []
-            for stage_config in cfg.pipeline_stages:
-                stage: PipelineStage = instantiate(stage_config)
-                pipeline_stages.append(stage)
+            pipeline_stages: list[PipelineStage] = []
+            for name, stage_config in cfg.pipeline.stages.items():
+                pipeline_stages.append(
+                    instantiate(stage_config, name=name, _recursive_=False)
+                )
 
             pipeline = NATURALPipeline(pipeline_stages)
 
@@ -269,7 +270,9 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
 
 
 # TODO: improve on relative path for config
-@hydra.main(config_path="../../conf", config_name="config.yaml", version_base="1.2")
+@hydra.main(
+    config_path="../../conf", config_name="estimate_ate.yaml", version_base="1.2"
+)
 def main(cfg: DictConfig) -> None:
     """Main function to estimate average treatment effects."""
     if is_weave_available:

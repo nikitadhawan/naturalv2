@@ -1,5 +1,0 @@
-model: ???
-api_key: ${oc.env:OPENAI_API_KEY}
-tpm: null
-rpm: null
-max_budget: null

@@ -1,0 +1,29 @@
+defaults:
+  - common
+  - model@search_model: openai
+  - _self_
+
+filter_by_date: True
+
+search_model:
+  model_id: openai/gpt-5-mini
+  endpoint: responses
+  reasoning:
+    effort: medium
+  tools:
+    - type: web_search_preview
+      search_context_size: high
+  store: False
+
+curate_max_concurrency: 10
+condition_config:
+  _target_: naturalv2.pipeline.curation.ConditionStage
+  model_cfg: ${sample_model}
+  source_name:
+  max_concurrent_workers: ${curate_max_concurrency}
+synonym_config:
+  _target_: naturalv2.pipeline.curation.SynonymStage
+  model_cfg: ${search_model}
+  source_name:
+  attribute: "treatment"
+  max_concurrent_workers: ${curate_max_concurrency}

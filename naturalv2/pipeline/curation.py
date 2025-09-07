@@ -7,17 +7,18 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import pandas as pd
 import yaml
+from hydra.utils import instantiate as hydra_instantiate
 from omegaconf import DictConfig
 from rich.console import Console
 from rich.pretty import Pretty
 from rich.table import Table
 from tqdm.asyncio import tqdm
 
-from naturalv2.models.lm import LM, build_lm_instance_from_cfg, extract_list_response
+from naturalv2.models.utils import TokenTracker
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.pubmed import PubMedSet
@@ -27,6 +28,7 @@ from naturalv2.utils import ListResponse, sanitize_filename
 
 if TYPE_CHECKING:
     from naturalv2.experiment import Experiment
+    from naturalv2.models.lm import APIModel
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,8 @@ class CurationContext:
     # Identifier string for a particular run, included in curated data directory name.
     exp_name: str
 
+    _token_tracker: TokenTracker = TokenTracker()
+
 
 class CurationStage(ABC):
     """Base class for stages in a pipeline.
@@ -72,7 +76,7 @@ class CurationStage(ABC):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
-    llm : LM | None
+    llm : APIModel | None
         Lazy-loaded language model instance.
     stage_name : str
         Name of the stage, derived from the class name.
@@ -83,7 +87,7 @@ class CurationStage(ABC):
         """Initialize the pipeline stage with model configuration."""
         self.model_cfg = model_cfg
         self.source_name = source_name
-        self._llm: LM | None = None
+        self._llm: Optional["APIModel"] = None
         self._model_name: str = model_cfg.get("model_name", "")
         self._stats: dict[str, Any] = {}
         self.extract_type = None
@@ -94,21 +98,21 @@ class CurationStage(ABC):
         return self.__class__.__name__
 
     @property
-    def llm(self) -> LM:
+    def llm(self) -> "APIModel":
         """Lazy-loaded language model property."""
         if self._llm is None:
             self._llm = self.get_language_model()
         return self._llm
 
-    def get_language_model(self) -> LM:
+    def get_language_model(self) -> "APIModel":
         """Return the language model used in this stage.
 
         Returns
         -------
-        LM
+        APIModel
             An instance of the language model configured for this stage.
         """
-        return build_lm_instance_from_cfg(self.model_cfg)
+        return hydra_instantiate(self.model_cfg, _convert_="partial")
 
     @abstractmethod
     async def process(
@@ -135,7 +139,7 @@ class CurationStage(ABC):
         if self.extract_type:
             prompt_filepath = (
                 importlib.resources.files("naturalv2.prompts.templates")
-                / f"{self.extract_type}.yaml"
+                / f"{self.extract_type}_{self.source_name}.yaml"
             )
             if not prompt_filepath.is_file():
                 raise FileNotFoundError(f"Prompt file not found: {prompt_filepath}")
@@ -148,10 +152,6 @@ class CurationStage(ABC):
         """Return a dictionary of statistics collected during processing."""
         if "cost" not in self._stats:
             self._stats["cost"] = self.llm.cost
-        if "total_prompt_tokens" not in self._stats:
-            self._stats["total_prompt_tokens"] = self.llm.total_prompt_tokens
-        if "total_completion_tokens" not in self._stats:
-            self._stats["total_completion_tokens"] = self.llm.total_completion_tokens
 
         return self._stats
 
@@ -246,10 +246,12 @@ class ConditionStage(CurationStage):
 
         output_df = await extract_curation_info(
             input_df=condition_queries,
+            stage_name=self.stage_name,
             source_name=self.source_name,
             extract_type=self.extract_type,
             llm=self.llm,
             file_path=file_path,
+            token_tracker=context._token_tracker,
             max_concurrent_requests=self.max_concurrent_workers,
         )
         condition_metadata = []
@@ -352,10 +354,12 @@ class SynonymStage(CurationStage):
 
         output_df = await extract_curation_info(
             input_df=input_df,
+            stage_name=self.stage_name,
             source_name=self.source_name,
             extract_type=self.extract_type,
             llm=self.llm,
             file_path=file_path,
+            token_tracker=context._token_tracker,
             max_concurrent_requests=self.max_concurrent_workers,
         )
 
@@ -383,10 +387,12 @@ class SynonymStage(CurationStage):
 
 async def extract_curation_info(  # noqa: PLR0912
     input_df: pd.DataFrame,
+    stage_name: str,
     source_name: str,
     extract_type: str,
-    llm: LM,
+    llm: "APIModel",
     file_path: str,
+    token_tracker: TokenTracker,
     max_concurrent_requests: int | None = None,
 ) -> pd.DataFrame:
     if os.path.exists(file_path):
@@ -432,6 +438,8 @@ async def extract_curation_info(  # noqa: PLR0912
                 result_queue,
                 llm,
                 worker_pbar,
+                stage_name,
+                token_tracker,
             ),
             name=f"Prompt-Processor-{worker_id}",
         )
@@ -506,7 +514,7 @@ async def _llm_task_producer(
             messages = load_prompt(
                 base_dir="naturalv2/prompts/templates",
                 prompt_type=f"{extract_type}_{source_name}",
-                return_format="messages",
+                return_format="responses" if "synonym" in extract_type else "messages",
                 **llm_inputs,
             )
 
@@ -525,8 +533,10 @@ async def _prompt_processor(
     worker_id: int,
     prompt_queue: asyncio.Queue,
     result_queue: asyncio.Queue,
-    llm: LM,
+    llm: "APIModel",
     pbar: tqdm,
+    stage_name: str,
+    token_tracker: TokenTracker,
 ) -> int:
     """Worker function to process prompts.
 
@@ -550,11 +560,14 @@ async def _prompt_processor(
                 await result_queue.put(False)  # Signal failure to writer
                 continue
 
-            result = await llm(messages=messages, response_format=ListResponse)
-            llm_output = extract_list_response(result)[0]
+            response = await llm.ainvoke(
+                messages, response_format=ListResponse, parse_output=True
+            )
+            token_tracker.add(stage_name, response)
+
             processed_result = {"index": index}
             processed_result.update(row.to_dict())
-            processed_result["llm_output"] = llm_output
+            processed_result["llm_output"] = response.output_parsed.output
 
             if processed_result is not None:
                 await result_queue.put(processed_result)

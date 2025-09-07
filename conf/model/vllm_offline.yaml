@@ -1,14 +1,25 @@
-llm_params:
-  model: ???
+# @package _global_
+_target_: naturalv2.models.lm.VLLMModel
+model_id: ???
+endpoint: chat_completion
+model_kwargs:
+  tokenizer: null
+  tokenizer_mode: "auto"
+  skip_tokenizer_init: False
   trust_remote_code: True
+  tensor_parallel_size: 1
+  dtype: "auto"
+  revision: null
+  seed: ${seed}
   gpu_memory_utilization: 0.9
-  max_model_len: 16384
-  tensor_parallel_size: 4
-  seed: ${seed}
+  swap_space: 4
+  cpu_offload_gb: 0
+  enforce_eager: False
+  max_seq_len_to_capture: 8192
+  disable_custom_all_reduce: False
+  disable_async_output_proc: False
+  compilation_config: null
   download_dir: ${oc.env:VLLM_CACHE_ROOT,null}
-sampling_params:
-  seed: ${seed}
-  temperature: 1.0
-  top_p: 1.0
-  max_tokens: 1
-  prompt_logprobs: 0
+
+# kwargs: default sampling parameters per model call
+seed: ${seed}

@@ -6,20 +6,21 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import pandas as pd
+from hydra.utils import instantiate as hydra_instantiate
 from omegaconf import DictConfig
 from rich.console import Console
 from rich.pretty import Pretty
 from rich.table import Table
 
+from naturalv2.models.utils import TokenTracker
+
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.llm import LLM as OfflineLM  # noqa: N811
-
     from naturalv2.experiment import Experiment
-    from naturalv2.models import LM as OnlineLM  # noqa: N811
+    from naturalv2.models.lm import Model
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ class PipelineContext:
     #: Identifier string for a particular run, included in results directory name.
     exp_name: str
 
+    _token_tracker: TokenTracker = TokenTracker()
+
 
 class PipelineStage(ABC):
     """Base class for stages in a pipeline.
@@ -74,32 +77,38 @@ class PipelineStage(ABC):
 
     """
 
-    def __init__(self, model_cfg: DictConfig) -> None:
+    def __init__(self, model_cfg: DictConfig, name: str | None = None) -> None:
         """Initialize the pipeline stage with model configuration."""
         self.model_cfg = model_cfg
-        self._llm: Optional[Union["OnlineLM", "OfflineLM"]] = None
-        self._model_name: str = (
-            model_cfg.get("model_name", None)
-            or model_cfg.get("llm_params", {}).get("model", "").split("/")[-1]
-        )
+        self.name = name
+
+        self._llm: Optional["Model"] = None
+        self._model_name: str = model_cfg.get("model_id", None)
+        if self._model_name is None:
+            deployment_params = model_cfg.get("deployment_params", {})
+            first_inner = next(iter(deployment_params.values()), None)
+            self._model_name = first_inner["model"] if first_inner else ""
+
+        self._model_name = self._model_name.split("/")[
+            -1
+        ]  # Get last part of model name
         self._stats: dict[str, Any] = {}
 
     @property
     def stage_name(self) -> str:
         """Return the name of the stage."""
-        return self.__class__.__name__
+        return self.name or self.__class__.__name__
 
     @property
-    def llm(self) -> Union["OnlineLM", "OfflineLM"]:
+    def llm(self) -> "Model":
         """Lazy-loaded language model property."""
         if self._llm is None:
             self._llm = self.get_language_model()
         return self._llm
 
-    @abstractmethod
-    def get_language_model(self) -> Union["OnlineLM", "OfflineLM"]:
+    def get_language_model(self) -> "Model":
         """Return the language model used in this stage."""
-        pass
+        return hydra_instantiate(self.model_cfg, _convert_="partial")
 
     @abstractmethod
     async def process(
@@ -128,19 +137,7 @@ class PipelineStage(ABC):
     def get_stats(self) -> dict[str, Any]:
         """Return a dictionary of statistics collected during processing."""
         if "cost" not in self._stats:
-            self._stats["cost"] = self.llm.cost if hasattr(self.llm, "cost") else 0.0
-        if "total_prompt_tokens" not in self._stats:
-            self._stats["total_prompt_tokens"] = (
-                self.llm.total_prompt_tokens
-                if hasattr(self.llm, "total_prompt_tokens")
-                else 0
-            )
-        if "total_completion_tokens" not in self._stats:
-            self._stats["total_completion_tokens"] = (
-                self.llm.total_completion_tokens
-                if hasattr(self.llm, "total_completion_tokens")
-                else 0
-            )
+            self._stats["cost"] = self.llm.cost
 
         return self._stats
 
@@ -265,13 +262,12 @@ class NATURALPipeline:
 
                     stage.add_stat("data_count", len(current_data))
                     stage.add_stat("model_name", stage._model_name)
-                    stage.add_stat(
-                        "model_request_params",
-                        stage.llm._request_params
-                        if hasattr(stage.llm, "_request_params")
-                        else {},
+                    stage.add_stat("lm_kwargs", stage.llm.kwargs)
+                    token_counts = context._token_tracker.get_stage_stats(
+                        stage.stage_name
                     )
-                    # TODO: add prompt template to stats
+                    stage._stats.update(token_counts)
+
                     stage_stats = stage.get_stats()
                     logger.info(f"Stage {stage.stage_name} completed successfully.")
                     logger.info(f"Stats:\n{json.dumps(stage.get_stats(), indent=2)}")

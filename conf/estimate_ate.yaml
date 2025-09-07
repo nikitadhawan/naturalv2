@@ -1,0 +1,51 @@
+defaults:
+  - common
+  - model@cheap_model: gemini
+  - model@probs_model: vllm_offline
+  - estimator: natural_ipw
+  - _self_
+
+split: train
+train_ratio: 0.6
+use_imputed_nones: True
+use_inclusion_weights: True
+probs_model:
+  endpoint: text_completion
+  max_tokens: 1
+  prompt_logprobs: 0
+  temperature: 1.0
+
+pipeline_max_concurrent_workers: 8
+
+pipeline:
+  stages:
+    # relevance_filter:
+    #   _target_: naturalv2.pipeline.sample_extraction.RelevanceFilterStage
+    #   model_cfg: ${cheap_model}
+    #   max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    treatment_outcome_filter:
+      _target_: naturalv2.pipeline.sample_extraction.TreatmentOutcomeFilterStage
+      model_cfg: ${cheap_model}
+      max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    knowns:
+      _target_: naturalv2.pipeline.sample_extraction.KnownsStage
+      model_cfg: ${sample_model}
+      max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    imputations:
+      _target_: naturalv2.pipeline.sample_extraction.ImputationsStage
+      model_cfg: ${sample_model}
+      max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    # sample_ty:  # Use this for NATURAL-MC in place of inclusion_prob and conditional_extraction
+    #   _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
+    #   model_cfg: ${sample_model}
+    #   max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    inclusion_prob:
+      _target_: naturalv2.pipeline.conditional_extraction.InclusionProbStage
+      model_cfg: ${probs_model}
+      length_norm: False
+      max_concurrent_workers: ${pipeline_max_concurrent_workers}
+    conditional_extraction:
+      _target_: naturalv2.pipeline.conditional_extraction.ConditionalExtractionStage
+      model_cfg: ${probs_model}
+      length_norm: False
+      max_concurrent_workers: ${pipeline_max_concurrent_workers}

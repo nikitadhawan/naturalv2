@@ -27,6 +27,8 @@ class ListResponse(BaseModel):
 
     output: list[str] | None
 
+    model_config = {"extra": "forbid"}
+
 
 def create_response_format(
     name: str, keys: list[str], types: dict[str, Any] | None = None
@@ -71,6 +73,9 @@ def create_response_format(
 
     # Create base model
     BaseModelClass = create_model(name, **fields)  # noqa: N806
+
+    # Forbid extra fields
+    BaseModelClass.model_config = {"extra": "forbid"}
 
     if not literal_fields:
         return BaseModelClass

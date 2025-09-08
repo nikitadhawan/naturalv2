@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.estimators import NaturalIPW, NaturalMC, NaturalOI
 from naturalv2.experiment import Experiment
 from naturalv2.pipeline import NATURALPipeline, PipelineContext, PipelineStage

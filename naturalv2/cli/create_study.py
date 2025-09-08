@@ -8,6 +8,7 @@ import yaml
 from omegaconf import DictConfig
 from tqdm.contrib.concurrent import process_map
 
+import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.clinical_trial import ClinicalTrial, Mesh, download_clinical_trials
 from naturalv2.study import Study, get_study_filepaths
 from naturalv2.utils import check_trial, get_nested_value

@@ -223,16 +223,16 @@ def test_litelllm_router_model_invoke():
     with pytest.raises(ValueError):
         router = LiteLLMRouterModel(
             deployment_params={
-                "azure/some-model": {"model": "gpt-4"},
-                "openai/gpt-3.5-turbo": {"model": "gpt-3.5-turbo"},
+                "azure---gpt-4": {"model": "gpt-4"},
+                "openai---gpt-3.5-turbo": {"model": "gpt-3.5-turbo"},
             },
         )
 
     # Test success case where "model" is the same
     router = LiteLLMRouterModel(
         deployment_params={
-            "azure/some-model": {"model": "gpt-3.5-turbo"},
-            "openai/gpt-3.5-turbo": {"model": "gpt-3.5-turbo"},
+            "azure---gpt-3.5-turbo": {"model": "openai/gpt-3.5-turbo"},
+            "openai---gpt-3.5-turbo": {"model": "openai/gpt-3.5-turbo"},
         },
     )
     resp = router.invoke(

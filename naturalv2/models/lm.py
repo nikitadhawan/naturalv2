@@ -1064,6 +1064,33 @@ class LiteLLMRouterModel(LiteLLMModel):
         The default endpoint type to use (default is "chat_completion").
     **kwargs
         Additional keyword arguments for the model.
+
+    Examples
+    --------
+    >>> from naturalv2.models.lm import LiteLLMRouterModel
+
+    >>> lm = LiteLLMRouterModel(
+    ...     deployment_params={
+    ...         "local---llama-3.3-70b": {
+    ...             "model": "hosted_vllm/Llama-3.3-70B-Instruct",
+    ...             "api_base": "http://localhost:8080/v1",
+    ...         },
+    ...         "together-ai---llama-3.3-70b: {
+    ...             "model": "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    ...             "api_key": "your_api_key_here",
+    ...         },
+    ...     ],
+    ...     client_kwargs={
+    ...         "routing_strategy": "simple-shuffle",
+    ...     },
+    ...     endpoint="chat_completion",
+    ...     seed=42,
+    ...     temperature=0.7,
+    ... )
+
+    >>> response = await lm.ainvoke(
+    ...     "What is the significance of the Magna Carta?", max_tokens=256
+    ... )
     """
 
     def __init__(
@@ -1129,18 +1156,23 @@ class LiteLLMRouterModel(LiteLLMModel):
             The model list for the router.
         """
         model_list = []
-        model_ids = []
+        model_ids: set[str] = set()
         for model_name, litellm_params in deployment_params.items():
-            deployment_dict = {"model_name": model_name}
-            model_ids.append(litellm_params["model"])
-            deployment_dict["litellm_params"] = litellm_params
+            # Common model_id should be a suffix after '---'
+            model_id = model_name.split("---")[-1]
+            if not model_id:
+                raise ValueError(
+                    f"Invalid model name '{model_name}'. Must be in the format '<unique_prefix>---<model_id>'."
+                )
+            model_ids.add(model_id)
 
+            deployment_dict = {"model_name": model_id}
+            deployment_dict["litellm_params"] = litellm_params
             model_list.append(deployment_dict)
 
-        if len(set(model_ids)) != 1:
+        if len(model_ids) != 1:
             raise ValueError(
-                "All deployments must use the same model. Found multiple models: "
-                f"{set(model_ids)}"
+                f"All model names must share the same base model_id. Found: {model_ids}"
             )
 
-        return model_list, model_ids[0]
+        return model_list, model_ids.pop()

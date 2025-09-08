@@ -168,11 +168,11 @@ def test_litellm_model_text_completion_sync():
     resp2 = model.invoke(
         input_data=["What is 2+2?", "What is the capital of France?"],
         endpoint="text_completion",
-        mock_response="Mocked reponse",
+        mock_response="Mocked response",
     )
 
     for response in resp2:
-        assert response.output_text == "Mocked reponse"
+        assert response.output_text == "Mocked response"
 
 
 def test_litellm_model_chat_completion_sync():

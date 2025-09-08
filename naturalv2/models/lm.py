@@ -1113,7 +1113,7 @@ class LiteLLMRouterModel(LiteLLMModel):
 
     def _build_model_list(
         self, deployment_params: dict[str, "LiteLLMParamsTypedDict"]
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
         """Build the model list from deployment parameters.
 
         Parameters

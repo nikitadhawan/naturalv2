@@ -2,5 +2,5 @@ defaults:
   - litellm_model
 
 model_id: ???
-api_key: ${oc.env:LITELLM_PROXY_API_KEY}
-api_base: ${oc.env:LITELLM_PROXY_API_BASE}
+api_key: ${oc.env:LITELLM_PROXY_API_KEY,null}
+api_base: ${oc.env:LITELLM_PROXY_API_BASE,null}

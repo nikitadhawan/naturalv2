@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 def parse_model_output_with_format(
     output_text: str, response_format: type[BaseModel] | dict | None
 ) -> Any | None:
+    """Parse model output using the provided response format.
+
+    Parameters
+    ----------
+    output_text : str
+        The raw output text from the model.
+    response_format : type[BaseModel] | dict | None
+        The response format to parse the output. Can be a pydantic model class
+        or a dictionary with 'schema' and optional 'name' keys.
+
+    Returns
+    -------
+    Any | None
+        The parsed output as an instance of the response format, or None if parsing
+        fails.
+
+    """
     if not response_format:
         return None
 
@@ -55,6 +72,34 @@ def estimate_token_count(
     messages: list[dict[str, str]] | None = None,
     count_response_tokens: bool | None = False,
 ) -> int:
+    """Estimate the total token count for a request to a language model.
+
+    Parameters
+    ----------
+    model : str
+        The model name.
+    max_tokens : int
+        The maximum number of tokens to generate in the response.
+    n : int, default=1
+        The number of completions to generate.
+    text : str or list of str, optional, default=None
+        The input text prompt(s). Either `text` or `messages` must be provided.
+    messages : list of dict, optional, default=None
+        The input messages in chat format. Either `text` or `messages` must be provided.
+    count_response_tokens : bool, optional, default=False
+        Whether to include the response tokens in the count.
+
+    Returns
+    -------
+    int
+        The estimated total token count.
+
+    Raises
+    ------
+    ValueError
+        If neither `text` nor `messages` is provided.
+    """
+
     assert n > 0, f"Expected `n` to be greater than 0 but got {n}"
     assert max_tokens > 0, (
         f"Expected `max_tokens` to be greater than 0 but got {max_tokens}"
@@ -82,9 +127,23 @@ def estimate_token_count(
 
 
 def validate_endpoint(
-    endpoint: str,
-    supported_endpoints: list[str] | None = None,
+    endpoint: str, supported_endpoints: list[str] | None = None
 ) -> None:
+    """Validate that the endpoint is supported.
+
+    Parameters
+    ----------
+    endpoint : str
+        The endpoint to validate.
+    supported_endpoints : list of str, optional
+        The list of supported endpoints. If None, all EndpointType values are supported.
+
+    Raises
+    ------
+    ValueError
+        If the endpoint is not supported.
+    """
+
     if supported_endpoints is None:
         supported_endpoints = EndpointType.__args__
 
@@ -96,10 +155,22 @@ def validate_endpoint(
 
 
 def extract_token_usage(
-    usage_obj: Any,
-    is_responses: bool = False,
+    usage_obj: Any, is_responses: bool = False
 ) -> Optional[TokenUsage]:
-    """Extract token usage from a usage object."""
+    """Extract token usage from a usage object.
+
+    Parameters
+    ----------
+    usage_obj : Any
+        The usage object from the model response.
+    is_responses : bool, default=False
+        Whether the usage object is from a responses endpoint.
+
+    Returns
+    -------
+    TokenUsage | None
+        The extracted token usage, or None if usage_obj is None.
+    """
     if not usage_obj:
         return None
     if is_responses:
@@ -128,7 +199,18 @@ def extract_token_usage(
 def get_message_content(
     response: Union["ChatCompletionResponse", "TextCompletionResponse"],
 ) -> list[Optional[str]]:
-    """Get message content from a completion response."""
+    """Get message content from a completion response.
+
+    Parameters
+    ----------
+    response : ChatCompletionResponse or TextCompletionResponse
+        The response object from the model.
+
+    Returns
+    -------
+    list of str or None
+        The list of message contents from the response choices.
+    """
     # Handle both dict and object responses
     choices = response.choices if hasattr(response, "choices") else response["choices"]
 
@@ -170,16 +252,17 @@ class TokenTracker:
     """
     Tracks token usage across pipeline stages and for the entire pipeline.
 
-    Usage
-    -----
-    tracker = TokenTracker()
-    tracker.add("stage1", response)
-    tracker.add("stage2", response2)
-    tracker.get_stage_stats("stage1")
-    tracker.get_total_stats()
+    Examples
+    --------
+    >>> tracker = TokenTracker()
+    >>> tracker.add("stage1", response)
+    >>> tracker.add("stage2", response2)
+    >>> tracker.get_stage_stats("stage1")
+    >>> tracker.get_total_stats()
     """
 
     def __init__(self) -> None:
+        """Initialize the TokenTracker."""
         self._stage_tokens: dict[str, dict[str, int]] = {}
         self._total_tokens: dict[str, int] = {
             "prompt_tokens": 0,
@@ -241,7 +324,7 @@ class TokenTracker:
 
         Returns
         -------
-        dict
+        dict[str, int]
             Token usage stats for the stage.
         """
         return self._stage_tokens.get(
@@ -259,7 +342,7 @@ class TokenTracker:
 
         Returns
         -------
-        dict
+        dict[str, int]
             Total token usage stats.
         """
         return dict(self._total_tokens)

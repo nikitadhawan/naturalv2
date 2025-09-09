@@ -54,6 +54,8 @@ class SampleExtractionStage(PipelineStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -117,6 +119,8 @@ class RelevanceFilterStage(SampleExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -200,6 +204,8 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -286,6 +292,8 @@ class KnownsStage(SampleExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -372,6 +380,8 @@ class ImputationsStage(SampleExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional, default=None
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -429,6 +439,8 @@ class SampleTYStage(SampleExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional, default=None
         Maximum number of concurrent workers for processing. If None, defaults to 10.
 
@@ -502,6 +514,11 @@ async def extract_covariates(  # noqa: PLR0912
     ----------
     input_df : pd.DataFrame
         DataFrame containing the reports to be processed.
+    pipeline_context : PipelineContext
+        Context for the pipeline execution, containing experiment and
+        configuration details.
+    pipeline_stage_name : str
+        Name of the current pipeline stage, used for logging and tracking.
     extract_type : ExtractType
         The type of extraction to perform (e.g., relevance, treatment-outcome,
         known covariates, or imputations).

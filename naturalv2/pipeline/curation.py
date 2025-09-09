@@ -56,9 +56,10 @@ class CurationContext:
     #: The path where the processed data will be saved.
     save_path: str
 
-    # Identifier string for a particular run, included in curated data directory name.
+    #: Identifier string for a particular run, included in curated data directory name.
     exp_name: str
 
+    #: Tracker for tokens used in LLM calls.
     _token_tracker: TokenTracker = TokenTracker()
 
 
@@ -71,6 +72,8 @@ class CurationStage(ABC):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    source_name : str
+        Name of the source being curated from (e.g., "pubmed", "reddit").
 
     Attributes
     ----------
@@ -94,7 +97,13 @@ class CurationStage(ABC):
 
     @property
     def stage_name(self) -> str:
-        """Return the name of the stage."""
+        """Return the name of the stage.
+
+        Returns
+        -------
+        str
+            The name of the stage, derived from the class name.
+        """
         return self.__class__.__name__
 
     @property
@@ -124,7 +133,7 @@ class CurationStage(ABC):
         ----------
         exp_list : list[Experiment]
             List of Experiments in a study.
-        context : PipelineContext
+        context : CurationContext
             Context for the pipeline execution.
 
         Returns
@@ -135,6 +144,18 @@ class CurationStage(ABC):
         pass
 
     def prompt_template(self) -> dict[str, Any]:
+        """Return the prompt template used in this stage.
+
+        Returns
+        -------
+        dict[str, Any]
+            The prompt template loaded from the corresponding YAML file.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the prompt file does not exist.
+        """
         prompt_data: dict[str, Any] = {}
         if self.extract_type:
             prompt_filepath = (
@@ -149,7 +170,13 @@ class CurationStage(ABC):
         return prompt_data
 
     def get_stats(self) -> dict[str, Any]:
-        """Return a dictionary of statistics collected during processing."""
+        """Return a dictionary of statistics collected during processing.
+
+        Returns
+        -------
+        dict[str, Any]
+            A dictionary containing statistics collected during processing.
+        """
         if "cost" not in self._stats:
             self._stats["cost"] = self.llm.cost
 
@@ -184,6 +211,21 @@ class CurationStage(ABC):
 
 
 class ConditionStage(CurationStage):
+    """Stage to find data dumps related to condition keywords.
+
+    This stage uses an LLM to determine queries or other information to download data
+    from ``source_name``.
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    source_name : str
+        Name of the source being curated from (e.g., "pubmed", "reddit").
+    max_concurrent_workers : int | None, optional, default=None
+        Maximum number of concurrent workers for LLM requests.
+    """
+
     def __init__(
         self,
         model_cfg: DictConfig,
@@ -264,6 +306,23 @@ class ConditionStage(CurationStage):
 
 
 class SynonymStage(CurationStage):
+    """Stage to find synonyms for a given attribute.
+
+    This stage uses an LLM to find synonyms for a specified attribute (e.g., treatments)
+    from a given source (e.g., "pubmed", "reddit").
+
+    Parameters
+    ----------
+    model_cfg : DictConfig
+        Configuration for the language model used in this stage.
+    source_name : str
+        Name of the source being curated from (e.g., "pubmed", "reddit").
+    attribute : str
+        The attribute for which synonyms are to be found (e.g., "treatments").
+    max_concurrent_workers : int | None, optional, default=None
+        Maximum number of concurrent workers for LLM requests.
+    """
+
     def __init__(
         self,
         model_cfg: DictConfig,
@@ -284,25 +343,25 @@ class SynonymStage(CurationStage):
     ) -> list["Experiment"]:
         """Get synonyms for ``attribute`` found on ``source``.
 
-         This method takes a list of Experiments and generates synonyms for their ``attribute``
-         found on ``source``, using a language model.
+        This method takes a list of Experiments and generates synonyms for their ``attribute``
+        found on ``source``, using a language model.
 
-         Parameters
-         ----------
-         exp_list : list[Experiment]
-             List of Experiments in a study.
-         context : CurationContext
-             Context for the stage execution.
+        Parameters
+        ----------
+        exp_list : list[Experiment]
+            List of Experiments in a study.
+        context : CurationContext
+            Context for the stage execution.
 
-         Returns
-         -------
+        Returns
+        -------
         list[Experiment]
-             List of experiments with updated common names and synonyms.
+            List of experiments with updated common names and synonyms.
 
-         Raises
-         ------
-         Exception
-             If there is an error during the extraction process.
+        Raises
+        ------
+        Exception
+            If there is an error during the extraction process.
         """
         if not exp_list:
             logger.warning("No experiments provided to process.")
@@ -395,6 +454,39 @@ async def extract_curation_info(  # noqa: PLR0912
     token_tracker: TokenTracker,
     max_concurrent_requests: int | None = None,
 ) -> pd.DataFrame:
+    """Extract curation information using an LLM.
+
+    This function processes an input DataFrame using an LLM to extract curation information.
+
+    Parameters
+    ----------
+    input_df : pd.DataFrame
+        DataFrame containing input data for the LLM.
+    stage_name : str
+        Name of the current stage in the pipeline.
+    source_name : str
+        Name of the source being curated from (e.g., "pubmed", "reddit").
+    extract_type : str
+        Type of extraction being performed (e.g., "condition", "synonym_treatments").
+    llm : APIModel
+        An instance of the language model to use for extraction.
+    file_path : str
+        Path to save the output CSV file.
+    token_tracker : TokenTracker
+        Tracker for tokens used in LLM calls.
+    max_concurrent_requests : int | None, optional, default=None
+        Maximum number of concurrent requests to the LLM.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing the extracted curation information.
+
+    Raises
+    ------
+    Exception
+        If there is an error during the extraction process.
+    """
     if os.path.exists(file_path):
         existing_data = pd.read_csv(file_path, index_col=0)
         input_df = input_df.loc[~input_df.index.isin(existing_data.index)]

@@ -51,9 +51,8 @@ class ConditionalExtractionStage(PipelineStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
-    use_offline_inference : bool, optional, default=True
-        Whether to use vLLM offline inference for computing conditional probabilities.
-        If ``False``, an API-based online model is assumed and used.
+    name : str | None, optional, default=None
+        Name of the stage. If None, a default name based on the class name is used.
     length_norm : bool, optional, default=False
         Whether to normalize the log probabilities by the length of the prompt,
         by default False.
@@ -178,6 +177,8 @@ class InclusionProbStage(ConditionalExtractionStage):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str | None, optional, default=None
+        Name of the stage. If None, a default name based on the class name is used.
     length_norm : bool, optional, default=False
         Whether to normalize the log probabilities by the length of the prompt,
         by default False.

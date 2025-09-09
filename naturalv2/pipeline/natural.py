@@ -53,6 +53,7 @@ class PipelineContext:
     #: Identifier string for a particular run, included in results directory name.
     exp_name: str
 
+    #: Token tracker to monitor token usage across stages.
     _token_tracker: TokenTracker = TokenTracker()
 
 
@@ -65,6 +66,8 @@ class PipelineStage(ABC):
     ----------
     model_cfg : DictConfig
         Configuration for the language model used in this stage.
+    name : str, optional, default=None
+        Optional name for the stage. If not provided, the class name will be used.
 
     Attributes
     ----------
@@ -132,10 +135,26 @@ class PipelineStage(ABC):
         pass
 
     def prompt_template(self) -> dict[str, Any]:
+        """Return the prompt template used in this stage, if applicable.
+
+        Override in subclasses to provide stage-specific prompt details.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary containing prompt template details. Empty by default.
+        """
         return {}
 
     def get_stats(self) -> dict[str, Any]:
-        """Return a dictionary of statistics collected during processing."""
+        """Return a dictionary of statistics collected during processing.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary containing statistics such as cost, token usage, and
+            other relevant metrics.
+        """
         if "cost" not in self._stats:
             self._stats["cost"] = self.llm.cost
 

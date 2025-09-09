@@ -66,8 +66,11 @@ class Model(ABC):
     ----------
     model_id : str
         The identifier of the model.
-    endpoint : EndpointType, optional
-        The default endpoint type to use (default is "chat_completion").
+    endpoint : EndpointType, optional, default="chat_completion"
+        The default endpoint type to use. The options are:
+        - "chat_completion": "/v1/chat/completions" endpoint
+        - "text_completion": "/v1/completions" endpoint
+        - "responses": "/v1/responses" endpoint
     **kwargs
         Additional keyword arguments for the model.
     """
@@ -79,6 +82,7 @@ class Model(ABC):
         self.model_id = model_id
         self.endpoint = endpoint
         self.kwargs = kwargs
+
         self._cost: float = 0.0
 
     @property
@@ -102,8 +106,8 @@ class Model(ABC):
         ----------
         input_data : ModelInput
             The input data for the model.
-        endpoint : EndpointType, optional
-            The endpoint to use for this request (overrides default).
+        endpoint : EndpointType, optional, default=None
+            The endpoint to use for this request (overrides default class-level endpoint).
         **kwargs
             Additional keyword arguments for the request.
 
@@ -123,8 +127,8 @@ class Model(ABC):
         ----------
         input_data : ModelInput
             The input data for the model.
-        endpoint : EndpointType, optional
-            The endpoint to use for this request (overrides default).
+        endpoint : EndpointType, optional, default=None
+            The endpoint to use for this request (overrides default class-level endpoint).
         **kwargs
             Additional keyword arguments for the request.
 
@@ -200,10 +204,13 @@ class VLLMModel(Model):
     ----------
     model_id : str
         The identifier/name of the model.
-    model_kwargs : dict, optional
-        Keyword arguments for vLLM model initialization.
-    endpoint : EndpointType, optional
-        The default endpoint type to use (default is "chat_completion").
+    model_kwargs : dict, optional, default=None
+        Keyword arguments for vLLM model initialization i.e. the arguments to pass to
+        ``vllm.LLM()``.
+    endpoint : EndpointType, optional, default="chat_completion"
+        The default endpoint type to use. This class supports:
+        - "chat_completion": "/v1/chat/completions" endpoint for chat-based models.
+        - "text_completion": "/v1/completions" endpoint for text-based models.
     **kwargs
         Additional keyword arguments for the model.
     """
@@ -269,18 +276,19 @@ class VLLMModel(Model):
         parse_output: bool = False,
         **kwargs,
     ) -> ModelResponse | BatchResponse:
-        """Synchronously invoke the vLLM model.
+        """Make a request to the vLLM model.
 
         Parameters
         ----------
         input_data : ModelInput
             The input data for the model.
-        endpoint : EndpointType, optional
-            The endpoint to use for this request.
-        response_format : type[BaseModel] or dict, optional
+        endpoint : EndpointType, optional, default=None
+            The endpoint to use for this request (overrides default class-level endpoint).
+        response_format : type[BaseModel] or dict, optional, default=None
             The response format for guided decoding.
-        parse_output : bool, optional
-            Whether to parse the output using the response format.
+        parse_output : bool, optional. Default is False.
+            Whether to parse the output using the response format. If ``True``,
+            the output ``ModelResponse.output_parsed`` will be populated.
         **kwargs
             Additional keyword arguments for the request.
 
@@ -452,10 +460,13 @@ class APIModel(Model):
     ----------
     model_id : str
         The identifier of the model.
-    client : Any, optional
+    client : Any, optional, default=None
         The API client instance.
-    endpoint : EndpointType, optional
-        The default endpoint type to use (default is "chat_completion").
+    endpoint : EndpointType, optional, default="chat_completion"
+        The default endpoint type to use. The options are:
+        - "chat_completion": "/v1/chat/completions" endpoint for conversations.
+        - "text_completion": "/v1/completions" endpoint for text continuation.
+        - "responses": "/v1/responses" endpoint.
     **kwargs
         Additional keyword arguments for the model.
     """
@@ -495,26 +506,29 @@ class LiteLLMModel(APIModel):
     ----------
     model_id : str
         The identifier of the model.
-    api_base : str, optional
+    api_base : str, optional, default=None
         The API base URL.
-    api_key : str, optional
+    api_key : str, optional, default=None
         The API key.
-    rpm : int, optional
+    rpm : int, optional, default=None
         Requests per minute limit.
-    tpm : int, optional
+    tpm : int, optional, default=None
         Tokens per minute limit.
-    rpd : int, optional
+    rpd : int, optional, default=None
         Requests per day limit.
-    tpd : int, optional
+    tpd : int, optional, default=None
         Tokens per day limit.
-    max_request_burst : int, optional
+    max_request_burst : int, optional, default=None
         Maximum request burst.
-    max_token_burst : int, optional
+    max_token_burst : int, optional, default=None
         Maximum token burst.
-    max_parallel_requests : int, optional
+    max_parallel_requests : int, optional, default=None
         Maximum parallel requests.
-    endpoint : EndpointType, optional
-        The default endpoint type to use (default is "chat_completion").
+    endpoint : EndpointType, optional, default="chat_completion"
+        The default endpoint type to use. The options are:
+        - "chat_completion": "/v1/chat/completions" endpoint
+        - "text_completion": "/v1/completions" endpoint
+        - "responses": "/v1/responses" endpoint
     **kwargs
         Additional keyword arguments for the model.
     """
@@ -564,7 +578,7 @@ class LiteLLMModel(APIModel):
         Returns
         -------
         litellm
-            The LiteLLM client instance.
+            The litellm module.
 
         Raises
         ------
@@ -596,12 +610,14 @@ class LiteLLMModel(APIModel):
         ----------
         input_data : ModelInput
             The input data for the model.
-        endpoint : EndpointType, optional
-            The endpoint to use for this request.
-        response_format : type[BaseModel] or dict, optional
-            The response format for parsing.
+        endpoint : EndpointType, optional, default=None
+            The endpoint to use for this request (overrides default class-level endpoint).
+        response_format : type[BaseModel] or dict, optional, default=None
+            The response format for structured output.
         parse_output : bool, optional
-            Whether to parse the output using the response format.
+            Whether to parse the output using the response format. If ``True``,
+            the output ``ModelResponse.output_parsed`` will be populated after
+            successful parsing.
         **kwargs
             Additional keyword arguments for the request.
 
@@ -679,12 +695,14 @@ class LiteLLMModel(APIModel):
         ----------
         input_data : ModelInput
             The input data for the model.
-        endpoint : EndpointType, optional
-            The endpoint to use for this request.
-        response_format : type[BaseModel] or dict, optional
-            The response format for parsing.
+        endpoint : EndpointType, optional, default=None
+            The endpoint to use for this request (overrides default class-level endpoint).
+        response_format : type[BaseModel] or dict, optional, default=None
+            The response format for structured output.
         parse_output : bool, optional
-            Whether to parse the output using the response format.
+            Whether to parse the output using the response format. If ``True``,
+            the output ``ModelResponse.output_parsed`` will be populated after
+            successful parsing.
         **kwargs
             Additional keyword arguments for the request.
 
@@ -758,6 +776,52 @@ class LiteLLMModel(APIModel):
                 parse_output=parse_output,
             )
         return result
+
+    def _validate_and_normalize_input(
+        self, input_data: ModelInput, endpoint: EndpointType
+    ) -> tuple[
+        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]], bool
+    ]:
+        """Validate and normalize the input data for ``LiteLLMModel``.
+
+        Return the normalized input and a flag indicating if it's a batch.
+        """
+        normalized_data, is_batch = super()._validate_and_normalize_input(
+            input_data, endpoint
+        )
+        if endpoint == "text_completion" and not is_batch:
+            normalized_data = [{"role": "user", "content": normalized_data[0]}]
+
+        return normalized_data, is_batch
+
+    def _prepare_request(
+        self, input_data: ModelInput, endpoint: EndpointType, kwargs: Any
+    ) -> tuple[
+        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]],
+        bool,
+        dict[str, Any],
+    ]:
+        """Prepare the request for LiteLLMModel.
+
+        Returns a tuple containing: Inputs, batch flag, and request keyword arguments.
+        """
+        validate_endpoint(endpoint)
+        inputs, is_batch = self._validate_and_normalize_input(input_data, endpoint)
+        request_kwargs = {**self.kwargs, **kwargs}
+        if request_kwargs.get("stream"):
+            logger.warning(
+                "Streaming response is not supported for the LM class. "
+                "This parameter will be ignored.",
+                stacklevel=2,
+            )
+            kwargs.pop("stream")
+
+        if self.api_base:
+            request_kwargs["api_base"] = self.api_base
+        if self.api_key:
+            request_kwargs["api_key"] = self.api_key
+
+        return inputs, is_batch, request_kwargs
 
     def _handle_responses_response_format(
         self,
@@ -994,52 +1058,6 @@ class LiteLLMModel(APIModel):
 
         return LogProbs(logprobs=logprobs, tokens=decoded_tokens)
 
-    def _validate_and_normalize_input(
-        self, input_data: ModelInput, endpoint: EndpointType
-    ) -> tuple[
-        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]], bool
-    ]:
-        """Validate and normalize the input data for ``LiteLLMModel``.
-
-        Return the normalized input and a flag indicating if it's a batch.
-        """
-        normalized_data, is_batch = super()._validate_and_normalize_input(
-            input_data, endpoint
-        )
-        if endpoint == "text_completion" and not is_batch:
-            normalized_data = [{"role": "user", "content": normalized_data[0]}]
-
-        return normalized_data, is_batch
-
-    def _prepare_request(
-        self, input_data: ModelInput, endpoint: EndpointType, kwargs: Any
-    ) -> tuple[
-        Union[list[dict[str, str]], list[list[dict[str, str]]], dict[str, str]],
-        bool,
-        dict[str, Any],
-    ]:
-        """Prepare the request for LiteLLMModel.
-
-        Returns a tuple containing: Inputs, batch flag, and request keyword arguments.
-        """
-        validate_endpoint(endpoint)
-        inputs, is_batch = self._validate_and_normalize_input(input_data, endpoint)
-        request_kwargs = {**self.kwargs, **kwargs}
-        if request_kwargs.get("stream"):
-            logger.warning(
-                "Streaming response is not supported for the LM class. "
-                "This parameter will be ignored.",
-                stacklevel=2,
-            )
-            kwargs.pop("stream")
-
-        if self.api_base:
-            request_kwargs["api_base"] = self.api_base
-        if self.api_key:
-            request_kwargs["api_key"] = self.api_key
-
-        return inputs, is_batch, request_kwargs
-
     def _update_cost(self, response: Any) -> None:
         """Update the running cost of the LLM requests."""
         if self.model_id in model_cost:
@@ -1056,12 +1074,17 @@ class LiteLLMRouterModel(LiteLLMModel):
 
     Parameters
     ----------
-    deployment_params : dict
-        Deployment parameters for router.
-    client_kwargs : dict, optional
-        Additional client keyword arguments.
-    endpoint : EndpointType, optional
-        The default endpoint type to use (default is "chat_completion").
+    deployment_params : dict[str, LiteLLMParamsTypedDict]
+        Deployment parameters for router. The keys should follow the format
+        "<unique_prefix>---<model_id>" where <model_id> is common across all deployments.
+    client_kwargs : dict, optional, default=None
+        Additional client keyword arguments. These are passed to the ``litellm.Router``
+        class.
+    endpoint : EndpointType, optional, default="chat_completion"
+        The default endpoint type to use for this model. The options are:
+        - "chat_completion": "/v1/chat/completions" endpoint
+        - "text_completion": "/v1/completions" endpoint
+        - "responses": "/v1/responses" endpoint
     **kwargs
         Additional keyword arguments for the model.
 
@@ -1120,7 +1143,7 @@ class LiteLLMRouterModel(LiteLLMModel):
         Returns
         -------
         litellm.Router
-            The LiteLLM Router client instance.
+            An instance of the `litellm.Router` class.
 
         Raises
         ------
@@ -1145,15 +1168,21 @@ class LiteLLMRouterModel(LiteLLMModel):
 
         Parameters
         ----------
-        model_id : str
-            The identifier of the model.
-        deployment_params : dict
+        deployment_params : dict[str, LiteLLMParamsTypedDict]
             Deployment parameters.
 
         Returns
         -------
-        list of dict
-            The model list for the router.
+        list[dict[str, Any]], str
+            A tuple containing:
+            - The model list for the router.
+            - The common model_id.
+
+        Raises
+        ------
+        ValueError
+            If model names are not in the correct format or if model_ids do not match.
+
         """
         model_list = []
         model_ids: set[str] = set()

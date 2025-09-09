@@ -1,6 +1,7 @@
 defaults:
   - common
   - model@cheap_model: gemini
+  - model@sample_model: gemini
   - model@probs_model: vllm_offline
   - estimator: natural_ipw
   - _self_

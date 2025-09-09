@@ -1,5 +1,4 @@
 defaults:
-  - model@sample_model: gemini
   - source@sources.reddit: reddit
   - _self_
 

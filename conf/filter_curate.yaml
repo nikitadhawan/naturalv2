@@ -1,5 +1,6 @@
 defaults:
   - common
+  - model@sample_model: gemini
   - model@search_model: openai
   - _self_
 

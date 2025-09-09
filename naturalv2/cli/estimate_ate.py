@@ -179,7 +179,7 @@ def _get_nct_ids(split: str, study: Study) -> list[str]:
     return [list(trial.keys())[0] for trial in study.test_trials]
 
 
-def _process_trial(cfg: DictConfig, nct_id: str) -> None:
+async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
     """Process a single trial to estimate treatment effects."""
 
     # Load the experiment configuration
@@ -236,7 +236,7 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 )
 
                 # Run the pipeline
-                extractions = asyncio.run(pipeline.run(curated_df, pipeline_context))
+                extractions = await pipeline.run(curated_df, pipeline_context)
                 if extractions.empty:
                     logger.warning(
                         f"No extractions found for {source_name} and outcome '{outcome}'. "
@@ -278,17 +278,8 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 continue
 
 
-# TODO: improve on relative path for config
-@hydra.main(
-    config_path="../../conf", config_name="estimate_ate.yaml", version_base="1.2"
-)
-def main(cfg: DictConfig) -> None:
-    """Main function to estimate average treatment effects."""
-    if is_weave_available:
-        import weave  # type: ignore # noqa: PLC0415
-
-        weave.init("naturalv2")
-
+async def _process_all_trials(cfg: DictConfig) -> None:
+    """Process all trials in the specified split to estimate treatment effects."""
     # Load study object from YAML file
     study_file = get_study_filepaths(cfg.save_path, cfg.conditions[0])["study"]
     study = Study.from_yaml(study_file)
@@ -303,7 +294,21 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Processing {len(nct_ids)} trials for split '{cfg.split}'.")
 
     for nct_id in nct_ids:
-        _process_trial(cfg, nct_id)
+        await _process_trial(cfg, nct_id)
+
+
+# TODO: improve on relative path for config
+@hydra.main(
+    config_path="../../conf", config_name="estimate_ate.yaml", version_base="1.2"
+)
+def main(cfg: DictConfig) -> None:
+    """Main function to estimate average treatment effects."""
+    if is_weave_available:
+        import weave  # type: ignore # noqa: PLC0415
+
+        weave.init("naturalv2")
+
+    asyncio.run(_process_all_trials(cfg))
 
 
 if __name__ == "__main__":

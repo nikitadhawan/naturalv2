@@ -59,18 +59,21 @@ def _get_nct_ids(study: Study) -> list[str]:
         + ["test"] * len(test_ncts)
     )
     # TODO: remove after testing
-    all_ncts = ["NCT03828539"]
-    splits = ["val"]
+    # all_ncts = ["NCT03828539"]
+    # splits = ["val"]
     return all_ncts, splits
 
 
 def _get_curated_dataset(exp_list, context, source_name, clean_data_paths):
     all_exp_data_paths, all_exp_data_sizes = {}, {}
+    exp_dir = os.path.join(context.save_path, "experiments")
     for exp in exp_list:
         exp_data_path, exp_data_size = context.source_dataset.curate_experiment_data(
             exp, context.condition, context.filter_by_date, clean_data_paths
         )
-        exp.source_paths.setdefault(source_name, []).append(exp_data_path)
+        exp.source_paths[source_name] = exp_data_path
+        exp_file = os.path.join(exp_dir, f"{exp.nct_id}.yaml")
+        exp.to_yaml(exp_file)
 
         all_exp_data_paths[exp.nct_id] = exp_data_path
         all_exp_data_sizes[exp.nct_id] = exp_data_size
@@ -142,11 +145,14 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
             )
 
             # Get condition related queries to download data from ``source_name``.
-            condition_metadata = await condition_stage.process(
-                exp_list, curation_context
-            )
-            study_dataset.sources[source_name] = condition_metadata
-            study_dataset.to_yaml(study_dataset_file)
+            if study_dataset.sources[source_name]:
+                condition_metadata = study_dataset.sources[source_name]
+            else:
+                condition_metadata = await condition_stage.process(
+                    exp_list, curation_context
+                )
+                study_dataset.sources[source_name] = condition_metadata
+                study_dataset.to_yaml(study_dataset_file)
 
             logger.info(f"Stage {condition_stage.stage_name} completed successfully.")
             token_counts = curation_context._token_tracker.get_stage_stats(

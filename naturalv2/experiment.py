@@ -144,7 +144,7 @@ class Experiment:
     language_repr : dict[str, dict[int, str]]
         Dictionary mapping feature names to their language representations,
         where each integer index is mapped to its corresponding feature value.
-    source_paths : dict[str, list]
+    source_paths : dict[str, str]
         Dictionary storing paths to curated data for the experiment, for each source.
 
     """
@@ -265,7 +265,7 @@ class Experiment:
         self._language_repr: dict[str, dict[int, str]] = {}
 
         # Store list of paths to curated data for the experiment, one per source
-        self.source_paths: dict[str, list] = {}
+        self.source_paths: dict[str, str] = {}
 
     @property
     def nct_id(self) -> str:
@@ -691,7 +691,7 @@ class Experiment:
                 f"`{imputation_col_name}` column is missing from extractions."
             )
 
-        knowns = extractions[covariate_name].copy()
+        knowns = extractions[covariate_name].copy().astype(str)
         unknowns = knowns.str.lower().isin(["unknown", ""]) | knowns.isna()
         covariate_data = knowns.mask(unknowns, extractions[imputation_col_name])
         all_answers = covariate_data.unique()

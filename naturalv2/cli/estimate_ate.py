@@ -124,24 +124,31 @@ def _calculate_treatment_effects(
     for i, treat1 in enumerate(experiment.treatment_names):
         for j, treat2 in enumerate(experiment.treatment_names):
             if i < j:
-                pred_ate = weighted_effects[j] - weighted_effects[i]
-                results = {
-                    "estimator": estimator.__class__.__name__,
-                    "outcome": outcome,
-                    "treatments": f"{treat2}-{treat1}",
-                    "pred_ate": pred_ate,
-                }
-                logger.info(f"Predicted ATE: {pred_ate}")
-                if experiment.status == "completed":
-                    effect_idx = experiment.outcome_treatment.index(
-                        [outcome, [treat1, treat2]]
+                try:
+                    pred_ate = weighted_effects[j] - weighted_effects[i]
+                    results = {
+                        "estimator": estimator.__class__.__name__,
+                        "outcome": outcome,
+                        "treatments": f"{treat2}-{treat1}",
+                        "pred_ate": pred_ate,
+                    }
+                    logger.info(f"Predicted ATE: {pred_ate}")
+                    if experiment.status == "completed":
+                        effect_idx = experiment.outcome_treatment.index(
+                            [outcome, [treat1, treat2]]
+                        )
+                        true_ate = experiment.effect_sizes[effect_idx]
+                        error = abs(pred_ate - true_ate)
+                        results.update({"true_ate": true_ate, "abs_error": error})
+                        logger.info(f"True ATE: {true_ate}")
+                        logger.info(f"Absolute Error: {error}")
+                    result_dicts.append(results)
+
+                except:
+                    logger.info(
+                        f"ATE prediction errored for {treat1}, {treat2}, {outcome}."
                     )
-                    true_ate = experiment.effect_sizes[effect_idx]
-                    error = abs(pred_ate - true_ate)
-                    results.update({"true_ate": true_ate, "abs_error": error})
-                    logger.info(f"True ATE: {true_ate}")
-                    logger.info(f"Absolute Error: {error}")
-                result_dicts.append(results)
+                    continue
 
     return result_dicts
 
@@ -174,8 +181,6 @@ def _get_nct_ids(split: str, study: Study) -> list[str]:
 
 def _process_trial(cfg: DictConfig, nct_id: str) -> None:
     """Process a single trial to estimate treatment effects."""
-    if "NCT03828539" not in nct_id:
-        return  # use only NCT03828539 for testing purposes; TODO: remove later
 
     # Load the experiment configuration
     try:
@@ -189,7 +194,9 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
         )
         return
     os.makedirs(
-        os.path.join(cfg.save_path, "results", f"{experiment.nct_id}"),
+        os.path.join(
+            cfg.save_path, "results", f"{experiment.nct_id}_{cfg.experiment_name}"
+        ),
         exist_ok=True,
     )
 
@@ -219,17 +226,11 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 )
 
                 # Load curated data
-                curated_df = pd.concat(
-                    [
-                        pd.read_csv(path, index_col=0)
-                        for path in experiment.source_paths[source_name]
-                    ],
-                    ignore_index=True,
-                )
+                curated_df = pd.read_csv(experiment.source_paths[source_name])
                 # TODO: remove subsampling after testing
-                curated_df = curated_df.sample(
-                    frac=0.05, random_state=cfg.seed, ignore_index=True
-                )
+                # curated_df = curated_df.sample(
+                #     frac=0.05, random_state=cfg.seed, ignore_index=True
+                # )
                 logger.info(
                     f"Initial number of curated reports: {len(curated_df)} reports."
                 )
@@ -240,6 +241,13 @@ def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                     logger.warning(
                         f"No extractions found for {source_name} and outcome '{outcome}'. "
                         "Cannot calculate treatment effects."
+                    )
+                    result = {}
+                    result.update(pipeline._data_flow)
+                    result["source_name"] = source_name
+                    result["initial_curated"] = len(curated_df)
+                    _save_results(
+                        [result], cfg.save_path, experiment.nct_id, cfg.experiment_name
                     )
                     continue
 

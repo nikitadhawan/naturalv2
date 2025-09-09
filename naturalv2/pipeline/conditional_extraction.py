@@ -158,7 +158,6 @@ class ConditionalExtractionStage(PipelineStage):
             f"{len(self.data)} reports."
         )
         self.prompt_example = prompt_example
-        self.data = context.experiment.discretize_ty(self.data)
 
         if self._is_offline_inference:
             # Shutdown vLLM engine to free up resources and reinitialize for next use

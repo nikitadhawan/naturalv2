@@ -3,7 +3,7 @@ system_prompt: |-
   Your task is to construct a complete, clinically plausible patient profile by combining explicit evidence with logical inference and domain knowledge and adhering to given rules.
   Your final answer must always be a single, well-formed JSON object with no additional text, explanations, or formatting.
 user_prompt_template: |-
-  You will be given a patient report and some criteria that they are known to satisfy. Complete a comprehensive patient profile by analyzing the provided report, extracting information about given covariates, and applying logical inference to fill any missing information such that it continues to satisfiy the provided criteria. The following covariate information must be structured into a JSON object.
+  You will be given a patient report, some known covariate information about them, and some criteria that they are known to satisfy. Complete a comprehensive patient profile by analyzing the provided report, extracting information about a larger set of covariates, and applying logical inference to fill any missing information such that it continues to satisfiy the provided criteria. The following covariate information must be structured into a JSON object.
   {%- for covariate in covariates %}
     {%- if covariate in covariate_desc %}
       - Covariate: '{{ covariate }}'
@@ -41,6 +41,11 @@ user_prompt_template: |-
   ```
   {{ report }}
   ```
+
+  **Known covariate information about the patient:**
+  {%- for covariate in covariate_answers.keys() %}
+    - {{ covariate }}: {{ covariate_answers[covariate] }}
+  {%- endfor %}
 
   **Criteria that the patient satisfies:**
   {{ inclusion_criteria }}

@@ -1,21 +1,22 @@
 """Pipeline for filtering and curating experiments using LLMs."""
 
-import asyncio
-import json
 import logging
 import os
-from typing import Literal, Union
+from typing import Literal
 
 import hydra
 from dotenv import load_dotenv
-from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.experiment import Experiment
-from naturalv2.pipeline import CurationContext, CurationStage
-from naturalv2.sources import PubMedSet, RedditSource
+from naturalv2.sources.curation import (
+    CurationContext,
+    CurationStage,
+    FilterCurateRunner,
+)
 from naturalv2.study import Study, StudyDataset, get_study_filepaths
+from naturalv2.utils import get_experiment_filepath
 
 
 load_dotenv()
@@ -77,6 +78,14 @@ def _get_curated_dataset(exp_list, context, source_name, clean_data_paths):
     return all_exp_data_paths, all_exp_data_sizes
 
 
+def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
+    stages: list[CurationStage] = []
+    for name, stage_cfg in source_cfg.stages.items():
+        if stage_cfg is not None:
+            stages.append(hydra.utils.instantiate(stage_cfg, name=name))
+    return FilterCurateRunner(stages)
+
+
 # TODO: improve on relative path for config
 @hydra.main(
     config_path="../../conf/", config_name="filter_curate.yaml", version_base="1.2"
@@ -92,13 +101,6 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
     # Load study from yaml
     study = Study.from_yaml(study_filepaths["study"])
 
-    if cfg.nct_id:
-        all_ncts = [cfg.nct_id]
-        splits = [cfg.split]
-        logger.info(f"Curating data for trial {cfg.nct_id}.")
-    else:
-        all_ncts, splits = _get_nct_ids(study)
-
     # Create study dataset
     study_dataset_file = study_filepaths["study_dataset"]
     if os.path.exists(study_dataset_file):
@@ -106,101 +108,52 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
     else:
         study_dataset = StudyDataset(study.conditions, cfg.sources)
 
-    async def process_all_sources() -> None:
-        for source_name in cfg.sources:
-            source_dataset: Union[RedditSource, PubMedSet] = instantiate(
-                cfg.sources[source_name]
-            )
+    if cfg.nct_id:
+        all_ncts = [cfg.nct_id]
+        splits = [cfg.split]
+        logger.info(f"Curating data for trial {cfg.nct_id}.")
+    else:
+        all_ncts, splits = _get_nct_ids(study)
 
-            curation_context = CurationContext(
-                condition=cfg.conditions[0],
-                all_ncts=all_ncts,
-                splits=splits,
-                source_dataset=source_dataset,
-                filter_by_date=cfg.filter_by_date,
-                save_path=cfg.save_path,
-                exp_name=cfg.experiment_name,
+    # Collect experiments for curation
+    experiment_list = []
+    for nct_id, split in zip(all_ncts, splits):
+        experiment_filepath = get_experiment_filepath(cfg.save_path, nct_id)
+        try:
+            # Load existing experiment if available
+            experiment = Experiment.from_yaml(experiment_filepath)
+        except (FileNotFoundError, ValueError):
+            # Otherwise create a new experiment instance
+            status: Literal["completed", "active"] = (
+                "active" if split == "test" else "completed"
             )
+            experiment = Experiment(cfg.data_path, nct_id, status=status)
+        experiment_list.append(experiment)
 
-            # Collect experiments for curation
-            exp_list = []
-            for nct_id, split in zip(all_ncts, splits):
-                # Load or create experiment
-                exp_file = os.path.join(cfg.save_path, "experiments", f"{nct_id}.yaml")
-                try:
-                    exp = Experiment.from_yaml(exp_file)
-                except (FileNotFoundError, ValueError):
-                    status: Literal["completed", "active"] = (
-                        "active" if split == "test" else "completed"
-                    )
-                    exp = Experiment(cfg.data_path, nct_id, status=status)
-                exp_list.append(exp)
+    for source_name, source_cfg in cfg.sources.items():
+        logger.info("Running pipeline for source %s", source_name)
+        context = CurationContext(
+            source_name=source_name,
+            condition=cfg.conditions[0],
+            experiments=experiment_list,
+            splits=splits,
+            save_dir=cfg.save_path,
+            filter_by_date=cfg.filter_by_date,
+            extras={
+                "study_dataset_path": study_filepaths["study_dataset"],
+                "study_dataset": study_dataset,
+            },
+        )
 
-            condition_stage: CurationStage = instantiate(
-                cfg.condition_config, source_name=source_name, _recursive_=False
-            )
-            treat_synonym_stage: CurationStage = instantiate(
-                cfg.synonym_config,
-                source_name=source_name,
-                attribute="treatment",
-                _recursive_=False,
-            )
+        pipeline: FilterCurateRunner = _build_pipeline(source_cfg)
+        final_state = pipeline.run(context)
+        # logger.info(
+        #     "Source %s completed with payload: %s",
+        #     source_name,
+        #     json.dumps(final_state.payload, default=str),
+        # )
 
-            # Get condition related queries to download data from ``source_name``.
-            condition_metadata = study_dataset.sources.get(source_name, {})
-            condition_metadata = await condition_stage.process(
-                exp_list, curation_context, condition_metadata
-            )
-            study_dataset.sources[source_name] = condition_metadata
-            study_dataset.to_yaml(study_dataset_file)
-
-            logger.info(f"Stage {condition_stage.stage_name} completed successfully.")
-            token_counts = curation_context._token_tracker.get_stage_stats(
-                condition_stage.stage_name
-            )
-            condition_stage._stats.update(token_counts)
-            logger.info(f"Stats:\n{json.dumps(condition_stage.get_stats(), indent=2)}")
-            for key, value in condition_stage.prompt_template().items():
-                logger.info(f"{key}\n{str(value)}")
-            condition_stage.render_stats_table()
-
-            # Clean and download data.
-            all_clean_paths = await source_dataset.clean_data(
-                exp_list, condition_metadata
-            )
-            study_dataset.data_paths[f"{source_name}_cleaned"] = all_clean_paths
-            study_dataset.to_yaml(study_dataset_file)
-            logger.info(f"Data cleaning for {source_name} completed successfully.")
-
-            # Get treatment synonyms and curate data based on string-matching.
-            exp_list = await treat_synonym_stage.process(exp_list, curation_context)
-
-            logger.info(
-                f"Stage {treat_synonym_stage.stage_name} completed successfully."
-            )
-            token_counts = curation_context._token_tracker.get_stage_stats(
-                treat_synonym_stage.stage_name
-            )
-            treat_synonym_stage._stats.update(token_counts)
-            logger.info(
-                f"Stats:\n{json.dumps(treat_synonym_stage.get_stats(), indent=2)}"
-            )
-            for key, value in treat_synonym_stage.prompt_template().items():
-                logger.info(f"{key}\n{str(value)}")
-            treat_synonym_stage.render_stats_table()
-
-            # Get curated dataset and its size for each experiment.
-            all_exp_data_paths, all_exp_data_sizes = _get_curated_dataset(
-                exp_list, curation_context, source_name, all_clean_paths
-            )
-            logger.info(f"Curation for {source_name} completed successfully.")
-            logger.info(f"Data sizes:\n{json.dumps(all_exp_data_sizes, indent=2)}")
-
-            study_dataset.data_paths.update(all_exp_data_paths)
-            study_dataset.data_sizes.update(all_exp_data_sizes)
-            study_dataset.to_yaml(study_dataset_file)
-
-    asyncio.run(process_all_sources())
+        study_dataset.to_yaml(study_filepaths["study_dataset"])
 
 
 if __name__ == "__main__":

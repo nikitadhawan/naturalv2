@@ -139,21 +139,14 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
             splits=splits,
             save_dir=cfg.save_path,
             filter_by_date=cfg.filter_by_date,
-            extras={
-                "study_dataset_path": study_filepaths["study_dataset"],
-                "study_dataset": study_dataset,
-            },
+            study_dataset=study_dataset,
+            extras={"study_dataset_path": study_filepaths["study_dataset"]},
         )
 
         pipeline: FilterCurateRunner = _build_pipeline(source_cfg)
-        final_state = pipeline.run(context)
-        # logger.info(
-        #     "Source %s completed with payload: %s",
-        #     source_name,
-        #     json.dumps(final_state.payload, default=str),
-        # )
+        _ = pipeline.run(context)
 
-        study_dataset.to_yaml(study_filepaths["study_dataset"])
+        context.study_dataset.to_yaml(study_filepaths["study_dataset"])
 
 
 if __name__ == "__main__":

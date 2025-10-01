@@ -1,11 +1,10 @@
 stages:
-  condition_filter:
-    _target_: naturalv2.sources.pubmed.stages.PubMedCaseReportFetcher
+  trial_filter:
+    _target_: naturalv2.sources.pubmed.stages.PubMedConditionFilter
+  fetch_and_clean:
+    _target_: naturalv2.sources.pubmed.stages.PubMedFetchAndClean
     api_key: ${oc.env:PUBMED_API_KEY,null}
     max_concurrent_requests: 10
-  clean:
-    _target_: naturalv2.sources.pubmed.stages.PubMedCleanStage
-    overwrite_existing: True
   curate:
     _target_: naturalv2.sources.pubmed.stages.PubMedCurateStage
     overwrite_existing: False

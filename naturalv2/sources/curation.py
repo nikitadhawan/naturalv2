@@ -11,6 +11,7 @@ from naturalv2.models.utils import TokenTracker
 
 if TYPE_CHECKING:
     from naturalv2.experiment import Experiment
+    from naturalv2.study import StudyDataset
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,8 @@ class CurationContext:
 
     #: Whether or not the curated data should be filtered according to date.
     filter_by_date: bool
+
+    study_dataset: "StudyDataset"
 
     #: Additional context-specific information.
     extras: dict[str, Any] = field(default_factory=dict)

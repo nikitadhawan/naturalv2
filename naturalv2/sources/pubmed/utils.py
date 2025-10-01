@@ -34,27 +34,24 @@ _BASE_WAIT_STRATEGY = wait_random_exponential(multiplier=1, min=0.7, max=60)
 
 
 def _parse_retry_after(header_value: str | None) -> float | None:
-    if not header_value:
+    delay = None
+    if header_value:
+        value = header_value.strip()
+        if value:
+            try:
+                delay = float(value)
+            except ValueError:
+                try:
+                    retry_dt = parsedate_to_datetime(value)
+                    if retry_dt is not None:
+                        if retry_dt.tzinfo is None:
+                            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+                        now = datetime.now(tz=timezone.utc)
+                        delay = (retry_dt - now).total_seconds()
+                except (TypeError, ValueError):
+                    delay = None
+    if delay is None:
         return None
-    value = header_value.strip()
-    if not value:
-        return None
-    try:
-        delay = float(value)
-    except ValueError:
-        try:
-            retry_dt = parsedate_to_datetime(value)
-        except (TypeError, ValueError):
-            return None
-        if retry_dt is None:
-            return None
-        if retry_dt.tzinfo is None:
-            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(tz=timezone.utc)
-        delay = (retry_dt - now).total_seconds()
-        if delay < 0:
-            return 0.0
-        return delay
     if delay < 0:
         return 0.0
     return delay

@@ -1,7 +1,6 @@
-"""Config-driven PubMed stages without legacy dependencies."""
+"""PubMed curation pipeline stages."""
 
 import asyncio
-import csv
 import logging
 import os
 import re
@@ -26,7 +25,6 @@ _TOKEN_PATTERN = re.compile(r"\b[\w-]+\b")
 
 def _normalize_condition_key(condition: str | None) -> str:
     """Normalise condition names for consistent lookups."""
-
     return sanitize_filename((condition or "").strip()).lower()
 
 
@@ -38,8 +36,93 @@ def _tokenize_casefold(text: str) -> set[str]:
     return set(_TOKEN_PATTERN.findall(text.casefold()))
 
 
-class PubMedCaseReportFetcher(CurationStage):
-    """Download PubMed case reports that match experiment conditions.
+class PubMedConditionFilter(CurationStage):
+    """Stage to construct PubMed queries for each experiment condition.
+
+    Parameters
+    ----------
+    name : str | None, optional, default=None
+        Custom stage name used for logging.
+    """
+
+    def __init__(self, *, name: str | None = None):
+        super().__init__(name=name)
+
+    async def run(self, context: CurationContext, state: StageState) -> StageState:
+        """Construct PubMed queries for each experiment and update state.
+
+        Parameters
+        ----------
+        context : CurationContext
+            The pipeline context.
+        state : StageState
+            The current stage state.
+
+        Returns
+        -------
+        StageState
+            Updated state with constructed queries.
+        """
+        trial_query_map: dict[str, list[str]] = defaultdict(list)
+
+        for experiment in context.experiments:
+            for condition in experiment.conditions:
+                query = self._build_search_query(condition, experiment)
+                if query not in trial_query_map[experiment.nct_id]:
+                    trial_query_map[experiment.nct_id].append(query)
+
+        state.payload = trial_query_map
+        state.update(trial_query_map=trial_query_map)
+        logger.info(
+            "%s: constructed PubMed queries for %d experiments",
+            self.stage_name,
+            len(trial_query_map),
+        )
+        return state
+
+    @staticmethod
+    def _build_search_query(
+        condition: str, experiment: Experiment, context: CurationContext
+    ) -> str:
+        """Construct a PubMed search query for the given condition.
+
+        Parameters
+        ----------
+        condition : str
+            Condition keyword for the current experiment.
+        experiment : Experiment
+            Experiment metadata containing MeSH annotations.
+        context : CurationContext
+            The pipeline context.
+
+        Returns
+        -------
+        str
+            A PubMed query string that limits results to English case reports
+            involving humans.
+        """
+
+        mesh_terms = " OR ".join(
+            [f'"{mesh}"[MeSH Terms]' for mesh in experiment.trial_disease_mesh]
+        )
+        treatment_terms = " OR ".join(
+            [
+                f'"{treatment}[All Fields]"'
+                for treatment in experiment.get_all_treatment_names_for_source(
+                    context.source_name
+                )
+            ]
+        )
+
+        return (
+            f'(("{condition}") AND ({mesh_terms})) AND ({treatment_terms}) '
+            f"AND ((fha[Filter]) AND (casereports[Filter]) "
+            f"AND (humans[Filter]) AND (english[Filter]))"
+        )
+
+
+class PubMedFetchAndClean(CurationStage):
+    """Download and normalize PubMed case reports for experiments.
 
     This stage issues PubMed queries for each experiment condition, writes the
     resulting case reports to disk as CSV files, and records the successfully
@@ -80,7 +163,7 @@ class PubMedCaseReportFetcher(CurationStage):
         self.api_key = api_key
         self.max_concurrent_requests = max_concurrent_requests
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
+    async def run(self, context: CurationContext, state: StageState) -> StageState:  # noqa: PLR0912
         """Fetch and persist PubMed case reports.
 
         Parameters
@@ -97,334 +180,312 @@ class PubMedCaseReportFetcher(CurationStage):
         StageState
             Updated state containing the list of file paths written during the
             stage execution.
+
+        Raises
+        ------
+        ValueError
+            If `trial_query_map` is missing from `state.metadata`.
         """
+        trial_query_map: dict[str, list[str]] = state.metadata.get(
+            "trial_query_map", {}
+        )
+        if not trial_query_map:
+            raise ValueError(
+                f"{self.stage_name}: missing trial_query_map; "
+                "ensure that PubMedConditionFilter has been run previously."
+            )
+
         source_dir = os.path.join(context.save_dir, f"{context.source_name}_data")
         os.makedirs(source_dir, exist_ok=True)
 
-        fetched_data_paths: list[str] = []
-        fetched_paths_by_condition: defaultdict[str, list[str]] = defaultdict(list)
-        path_conditions: defaultdict[str, set[str]] = defaultdict(set)
-        seen_pairs: set[tuple[str, str]] = set()
+        nctid_clean_path_map: dict[str, str] = {}
+        query_trial_map: dict[str, set[str]] = {}
         semaphore = asyncio.Semaphore(self.max_concurrent_requests)
 
-        total_case_reports = 0
         with ThreadPoolExecutor() as executor:
             fetch_tasks = []
             for experiment in context.experiments:
-                for condition in experiment.conditions:
-                    query = self._build_search_query(condition, experiment)
-                    pair = (condition, query)
-                    if pair in seen_pairs:
+                for query in trial_query_map.get(experiment.nct_id, []):
+                    if query in query_trial_map:
+                        query_trial_map[query].add(experiment.nct_id)
                         continue
-                    seen_pairs.add(pair)
 
-                    normalized_condition = _normalize_condition_key(condition)
-                    filename = sanitize_filename(
-                        f"{normalized_condition or 'condition'}_case_reports.csv"
-                    ).lower()
-                    data_path = os.path.join(source_dir, filename)
-                    path_conditions[data_path].add(condition)
+                    query_trial_map.setdefault(query, set()).add(experiment.nct_id)
 
-                    if os.path.exists(data_path):
-                        fetched_data_paths.append(data_path)
-                        if (
-                            data_path
-                            not in fetched_paths_by_condition[normalized_condition]
-                        ):
-                            fetched_paths_by_condition[normalized_condition].append(
-                                data_path
-                            )
-
-                        # add to total count; avoid loading csv into memory, if possible
-                        try:
-                            with open(data_path, "r", encoding="utf-8") as f:
-                                reader = csv.reader(f)
-                                total_case_reports += sum(1 for _ in reader) - 1
-                        except Exception as e:
-                            logger.warning(
-                                "Failed to read existing case report file %s: %s",
-                                data_path,
-                                str(e),
-                            )
+                    filename = os.path.join(
+                        source_dir, f"{experiment.nct_id}_case_reports.csv"
+                    )
+                    if os.path.exists(filename):  # Query processed in previous run
+                        nctid_clean_path_map[experiment.nct_id] = filename
                         continue
 
                     fetch_tasks.append(
                         concurrency_limited(
                             self._download_case_reports(
                                 query,
-                                condition,
                                 source_dir,
-                                data_path,
+                                experiment=experiment,
                                 executor=executor,
                             ),
                             semaphore,
                         )
                     )
 
-            no_case_report_conditions: set[str] = set()
-            if fetch_tasks:
-                for coro in tqdm_asyncio.as_completed(
-                    fetch_tasks,
-                    total=len(fetch_tasks),
-                    desc="Fetching PubMed case reports per condition",
-                    unit="condition",
-                    position=0,
-                    leave=False,
-                    dynamic_ncols=True,
-                ):
-                    case_reports, condition, file_path = await coro
-                    if not case_reports:
-                        logger.debug(
-                            "No case reports found for condition %s", condition
-                        )
-                        no_case_report_conditions.add(condition)
-                        continue
+            num_case_reports_fetched = 0
+            num_case_reports_cleaned = 0
+            trials_with_no_case_reports: set[str] = set(trial_query_map.keys())
+            for fut in tqdm_asyncio.as_completed(
+                fetch_tasks,
+                total=len(fetch_tasks),
+                desc="Fetching PubMed case reports",
+                unit="query",
+                position=0,
+                leave=False,
+                dynamic_ncols=True,
+                disable=(len(fetch_tasks) == 0),
+            ):
+                case_reports, (query, experiment) = await fut
+                if not case_reports:
+                    logger.warning(
+                        "%s: No case reports fetched for query '%s' (experiment %s)",
+                        self.stage_name,
+                        query,
+                        experiment.nct_id,
+                    )
+                    continue
 
-                    case_reports_df = pd.DataFrame(case_reports)
-                    total_case_reports += len(case_reports_df)
+                fetched_case_reports = pd.DataFrame(case_reports)
 
+                # Track number of case reports downloaded
+                num_case_reports_fetched += len(fetched_case_reports)
+
+                # Clean dataframe
+                cleaned_case_reports = self.clean(
+                    fetched_case_reports,
+                    experiment=experiment,
+                    apply_date_filter=context.filter_by_date,
+                )
+                if cleaned_case_reports is None:
+                    continue
+
+                # Track number of case reports after cleaning
+                num_case_reports_cleaned += len(cleaned_case_reports)
+
+                # Save dataframe(s)
+                for nct_id in query_trial_map[query]:
+                    file_path = os.path.join(source_dir, f"{nct_id}_case_reports.csv")
                     if os.path.exists(file_path):
                         existing_df = pd.read_csv(file_path).drop(
                             columns=["Unnamed: 0"], errors="ignore"
                         )
-                        case_reports_df = (
-                            pd.concat([existing_df, case_reports_df])
+                        combined_df = (
+                            pd.concat([existing_df, cleaned_case_reports])
                             .drop_duplicates(subset=["pmid"])
                             .reset_index(drop=True)
                         )
+                        combined_df.to_csv(file_path, index=False)
+                    else:
+                        cleaned_case_reports.to_csv(file_path, index=False)
 
-                    case_reports_df.to_csv(file_path, index=False)
-                    fetched_data_paths.append(file_path)
-                    associated_conditions = path_conditions.get(file_path, {condition})
-                    for cond in associated_conditions:
-                        norm_cond = _normalize_condition_key(cond)
-                        if file_path not in fetched_paths_by_condition[norm_cond]:
-                            fetched_paths_by_condition[norm_cond].append(file_path)
+                    nctid_clean_path_map[nct_id] = file_path
+                    if nct_id in trials_with_no_case_reports:
+                        trials_with_no_case_reports.remove(nct_id)
 
-        state.payload = fetched_data_paths
+        state.payload = nctid_clean_path_map
         state.update(
-            fetched_data_paths=fetched_data_paths,
-            fetched_paths_by_condition={
-                key: list(paths) for key, paths in fetched_paths_by_condition.items()
-            },
+            cleaned_paths=nctid_clean_path_map,
             source_dir=source_dir,
-            total_case_reports=total_case_reports,
-            no_case_report_conditions=list(no_case_report_conditions),
+            num_case_reports_fetched=num_case_reports_fetched,
+            num_case_reports_cleaned=num_case_reports_cleaned,
+            trials_with_no_case_reports=list(trials_with_no_case_reports),
         )
         logger.info(
-            "%s: fetched %d PubMed case reports across %d files",
+            "%s: fetched %d case reports from PubMed (%d after cleaning) across %s experiments",
             self.stage_name,
-            total_case_reports,
-            len(fetched_data_paths),
+            num_case_reports_fetched,
+            num_case_reports_cleaned,
+            len(nctid_clean_path_map),
         )
 
-        if no_case_report_conditions:
+        if trials_with_no_case_reports:
             logger.info(
-                "%s: no case reports found for conditions: %s",
+                "%s: no case reports were found for the following %d experiments: %s",
                 self.stage_name,
-                ", ".join(sorted(no_case_report_conditions)),
+                len(trials_with_no_case_reports),
+                ", ".join(sorted(trials_with_no_case_reports)),
             )
+
+        context.study_dataset.data_paths[f"{context.source_name}_cleaned"] = list(
+            nctid_clean_path_map.values()
+        )
+        context.study_dataset.to_yaml(context.extras["study_dataset_file"])
         return state
+
+    def clean(
+        self,
+        adf: pd.DataFrame,
+        *,
+        experiment: Experiment,
+        apply_date_filter: bool = True,
+    ) -> pd.DataFrame | None:
+        """Clean and normalize the fetched case reports DataFrame.
+
+        Parameters
+        ----------
+        adf : pd.DataFrame
+            Raw DataFrame of fetched case reports.
+        experiment : Experiment
+            The experiment metadata.
+        apply_date_filter : bool, default=True
+            Whether to filter by experiment date.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            Cleaned DataFrame, or None if no valid rows remain.
+        """
+        if adf.empty:
+            return None
+
+        # If "full_text" column is missing, add it as all-NA
+        if "full_text" not in adf.columns:
+            adf["full_text"] = pd.NA
+
+        # Check for the existence of key columns
+        required_columns = {
+            "pmid",
+            "title",
+            "authors",
+            "abstract",
+            "full_text",
+            "publication_date",
+        }
+        missing_columns = required_columns - set(adf.columns)
+        if missing_columns:
+            logger.warning(
+                "Missing required columns in fetched case reports: %s", missing_columns
+            )
+            return None
+
+        # Normalise duplicated quotes ahead of text field usage
+        adf["title"] = (
+            adf["title"]
+            .fillna("")
+            .astype(str)
+            .str.replace(r'"{2,}', '"', regex=True)
+            .str.strip()
+        )
+        adf["title"] = adf["title"].replace("", pd.NA)
+
+        adf["authors"] = (
+            adf["authors"]
+            .fillna("")
+            .astype(str)
+            .str.replace(r'"{2,}', '"', regex=True)
+            .str.replace(r"\s{2,}", " ", regex=True)
+            .str.strip()
+        )
+        adf["authors"] = adf["authors"].replace("", pd.NA)
+
+        if "pmc_id" in adf.columns:
+            # Treat empty and placeholder PMC identifiers as missing
+            pmc_series = adf["pmc_id"].fillna("").astype(str).str.strip().str.upper()
+            pmc_series = pmc_series.replace({"": pd.NA, "NAN": pd.NA, "NONE": pd.NA})
+            adf["pmc_id"] = pmc_series
+
+        # Drop rows where both `full_text` and a meaningful abstract are missing
+        abstract_normalized = (
+            adf["abstract"].fillna("").astype(str).str.strip().str.casefold()
+        )
+        missing_text_mask = adf["full_text"].isna() & (
+            (abstract_normalized == "")
+            | (abstract_normalized == "no abstract available")
+        )
+        df = adf.loc[~missing_text_mask].copy()
+        if df.empty:
+            logger.warning(
+                "All rows dropped after removing entries with missing text for experiment %s",
+                experiment.nct_id,
+            )
+            return None
+
+        # If 'full_text' is missing fallback to title+abstract, if available
+        title_fallback = df["title"].fillna("").astype(str).str.strip()
+        abstract_fallback = df["abstract"].fillna("").astype(str).str.strip()
+        fallback_text = title_fallback.str.cat(
+            abstract_fallback, sep="\n\n"
+        ).str.strip()
+
+        full_text_series = df["full_text"].fillna("").astype(str).str.strip()
+        missing_full_text = full_text_series == ""
+        df.loc[missing_full_text, "full_text"] = fallback_text[missing_full_text]
+
+        # Rename 'full_text' column to 'report'
+        df.rename(columns={"full_text": "report"}, inplace=True)
+
+        if apply_date_filter and experiment.date:
+            df = filter_by_date(df, experiment.date, "publication_date")
+            if df.empty:
+                logger.warning(
+                    "All rows dropped after date filtering for experiment %s",
+                    experiment.nct_id,
+                )
+                return None
+
+        return df
 
     async def _download_case_reports(
         self,
         query: str,
-        condition: str,
         save_dir: str,
-        file_path: str,
         *,
+        experiment: Experiment,
         executor: ThreadPoolExecutor,
-    ) -> tuple[list[dict[str, str]], str, str]:
+    ) -> list[dict[str, str]]:
         """Execute a PubMed query and collect case reports.
 
         Parameters
         ----------
         query : str
             Fully constructed PubMed search query.
-        condition : str
-            Condition label associated with the query.
         save_dir : str
             Directory used by the lower-level fetch utilities for temporary
             storage (caching).
-        file_path : str
-            Target CSV path for the results.
+        experiment : Experiment
+            The Experiment object associated with the query.
         executor : ThreadPoolExecutor
             Executor used for XML parsing and file I/O.
 
         Returns
         -------
-        list[dict[str, str]], str, str
-            Tuple containing the retrieved case reports (if any), the
-            originating condition, and the destination file path.
+        list[dict[str, str]], tuple[str, Experiment]
+            The retrieved case reports (if any) and the original query and experiment
+            object.
         """
 
         webenv, query_key = await search_pubmed(query, self.api_key, executor)
-        case_reports = await fetch_articles(
-            webenv, query_key, save_dir, self.api_key, executor
-        )
-
-        return case_reports, condition, file_path
-
-    @staticmethod
-    def _build_search_query(condition: str, experiment: Experiment) -> str:
-        """Construct a PubMed search query for the given condition.
-
-        Parameters
-        ----------
-        condition : str
-            Condition keyword for the current experiment.
-        experiment : Experiment
-            Experiment metadata containing MeSH annotations.
-
-        Returns
-        -------
-        str
-            A PubMed query string that limits results to English case reports
-            involving humans.
-        """
-
-        mesh_terms = " OR ".join(
-            [f'"{mesh}"[MeSH Terms]' for mesh in experiment.trial_disease_mesh]
-        )
-
-        return (
-            f'(("{condition}") AND ({mesh_terms})) '
-            f"AND ((fha[Filter]) AND (casereports[Filter]) "
-            f"AND (humans[Filter]) AND (english[Filter]))"
-        )
-
-
-class PubMedCleanStage(CurationStage):
-    """Clean PubMed case reports."""
-
-    def __init__(
-        self, *, name: str | None = None, overwrite_existing: bool = True
-    ) -> None:
-        super().__init__(name=name)
-        self.overwrite_existing = overwrite_existing
-
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
-        download_paths: list[str] = state.metadata.get(
-            "fetched_data_paths", state.payload or []
-        )
-        fetched_by_condition: dict[str, list[str]] = state.metadata.get(
-            "fetched_paths_by_condition", {}
-        )
-        cleaned_paths: list[str] = []
-        cleaned_by_condition: defaultdict[str, list[str]] = defaultdict(list)
-
-        for path in download_paths:
-            if not os.path.exists(path):
-                continue
-
-            df = pd.read_csv(path).drop(columns=["Unnamed: 0"], errors="ignore")
-            if df.empty:
-                logger.warning(f"Skipping empty DataFrame at {path}")
-                continue
-
-            # if "full_text" column is missing, add it as all-NA
-            if "full_text" not in df.columns:
-                df["full_text"] = pd.NA
-
-            # check for the existence of key columns
-            required_columns = {
-                "pmid",
-                "title",
-                "authors",
-                "abstract",
-                "full_text",
-                "publication_date",
-            }
-            missing_columns = required_columns - set(df.columns)
-            if missing_columns:
-                logger.warning(
-                    f"Skipping DataFrame at {path} missing columns: {missing_columns}"
-                )
-                continue
-
-            # normalise duplicated quotes ahead of text field usage
-            df["title"] = (
-                df["title"]
-                .fillna("")
-                .astype(str)
-                .str.replace(r'"{2,}', '"', regex=True)
-                .str.strip()
+        if query_key == "-1":
+            logger.warning(
+                "No valid `<QueryKey>` was returned from esearch for query '%s'", query
             )
-            df["title"] = df["title"].replace("", pd.NA)
-
-            df["authors"] = (
-                df["authors"]
-                .fillna("")
-                .astype(str)
-                .str.replace(r'"{2,}', '"', regex=True)
-                .str.replace(r"\s{2,}", " ", regex=True)
-                .str.strip()
+            case_reports = []
+        else:
+            case_reports = await fetch_articles(
+                webenv, query_key, save_dir, self.api_key, executor
             )
-            df["authors"] = df["authors"].replace("", pd.NA)
-
-            if "pmc_id" in df.columns:
-                # treat empty and placeholder PMC identifiers as missing
-                pmc_series = df["pmc_id"].fillna("").astype(str).str.strip().str.upper()
-                pmc_series = pmc_series.replace(
-                    {"": pd.NA, "NAN": pd.NA, "NONE": pd.NA}
-                )
-                df["pmc_id"] = pmc_series
-
-            # drop rows where both `full_text` and a meaningful abstract are missing
-            abstract_normalized = (
-                df["abstract"].fillna("").astype(str).str.strip().str.casefold()
-            )
-            missing_text_mask = df["full_text"].isna() & (
-                (abstract_normalized == "")
-                | (abstract_normalized == "no abstract available")
-            )
-            df = df.loc[~missing_text_mask]
-            if df.empty:
-                logger.warning(f"Skipping DataFrame with no valid text at {path}")
-                continue
-
-            base, ext = os.path.splitext(os.path.basename(path))
-            suffix = "" if self.overwrite_existing else "_cleaned"
-            output_filepath = os.path.join(
-                os.path.dirname(path), f"{base}{suffix}{ext}"
-            )
-
-            df.to_csv(output_filepath, index=False)
-            cleaned_paths.append(output_filepath)
-
-            associated_conditions = [
-                condition
-                for condition, sources in fetched_by_condition.items()
-                if path in sources
-            ]
-            if not associated_conditions:
-                base_name = os.path.basename(path)
-                inferred_condition = base_name.rsplit("_case_reports", 1)[0]
-                associated_conditions = [inferred_condition]
-
-            for condition in associated_conditions:
-                normalized_key = _normalize_condition_key(condition)
-                condition_paths = cleaned_by_condition[normalized_key]
-                if output_filepath not in condition_paths:
-                    condition_paths.append(output_filepath)
-
-        state.payload = cleaned_paths
-        state.update(
-            cleaned_paths=cleaned_paths,
-            cleaned_paths_by_condition={
-                key: list(paths) for key, paths in cleaned_by_condition.items()
-            },
-        )
-        logger.info(
-            "%s: cleaned PubMed datasets for %d files",
-            self.stage_name,
-            len(cleaned_paths),
-        )
-        return state
+        return case_reports, (query, experiment)
 
 
 class PubMedCurateStage(CurationStage):
-    """Curate PubMed articles per experiment."""
+    """Curate PubMed articles per experiment.
+
+    Parameters
+    ----------
+    name : str | None, optional, default=None
+        Custom stage name used for logging.
+    overwrite_exisiting : bool, default=False
+        If `True` overwrites existing cleaned data.
+    """
 
     def __init__(
         self,
@@ -435,52 +496,64 @@ class PubMedCurateStage(CurationStage):
         super().__init__(name=name)
         self.overwrite_existing = overwrite_existing
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
-        cleaned_paths = state.metadata.get("cleaned_paths", state.payload or [])
-        cleaned_paths = [p for p in cleaned_paths if os.path.exists(p)]
-        cleaned_by_condition: dict[str, list[str]] = state.metadata.get(
-            "cleaned_paths_by_condition", {}
-        )
+    async def run(self, context: CurationContext, state: StageState) -> StageState:  # noqa: PLR0915
+        """Curate and filter PubMed case reports for each experiment.
 
-        condition_segment = _normalize_condition_key(context.condition) or "pubmed"
-        experiment_dir = os.path.join(
+        Parameters
+        ----------
+        context : CurationContext
+            The pipeline context.
+        state : StageState
+            The current stage state.
+
+        Returns
+        -------
+        StageState
+            Updated state with curated file paths.
+        """
+        cleaned_paths_map: dict[str, str] = state.metadata.get(
+            "nctid_clean_path_map", {}
+        )
+        if not cleaned_paths_map:
+            raise ValueError(
+                f"{self.stage_name}: No cleaned case report paths found in state."
+            )
+
+        condition_segment = _normalize_condition_key(context.condition)
+        condition_dir = os.path.join(
             state.metadata.get("source_dir", context.save_dir), condition_segment
         )
-        os.makedirs(experiment_dir, exist_ok=True)
+        os.makedirs(condition_dir, exist_ok=True)
 
         curated_paths: dict[str, str] = {}
+        curated_data_sizes: dict[str, int] = {}
         total_rows = 0
 
         for experiment in context.experiments:
-            candidate_paths: list[str] = []
-            for key in experiment.conditions:
-                normalized_key = _normalize_condition_key(key)
-                candidate_paths.extend(cleaned_by_condition.get(normalized_key, []))
-
-            if not candidate_paths:  # fallback to basename matching
-                candidate_paths = [
-                    path
-                    for path in cleaned_paths
-                    if any(
-                        _normalize_condition_key(key) in os.path.basename(path).lower()
-                        for key in experiment.conditions
-                    )
-                ]
-
-            candidate_paths = list(dict.fromkeys(candidate_paths))
-            if not candidate_paths:
+            file_path = cleaned_paths_map.get(experiment.nct_id)
+            if not os.path.exists(file_path):
                 logger.warning(
-                    "No cleaned PubMed data files found for experiment %s (conditions=%s)",
+                    "%s: Cleaned case report file missing for experiment %s at %s",
+                    self.stage_name,
                     experiment.nct_id,
-                    experiment.conditions,
+                    file_path,
                 )
                 continue
 
-            filename = sanitize_filename(f"pubmed_{experiment.nct_id}.csv").lower()
-            save_path = os.path.join(experiment_dir, filename)
+            df = pd.read_csv(file_path).drop(columns=["Unnamed: 0"], errors="ignore")
+            if df.empty:
+                logger.warning(
+                    "%s: Cleaned case report file is empty for experiment %s at %s",
+                    self.stage_name,
+                    experiment.nct_id,
+                    file_path,
+                )
+                continue
+
+            save_path = os.path.join(condition_dir, f"pubmed_{experiment.nct_id}.csv")
 
             if os.path.exists(save_path) and not self.overwrite_existing:
-                logger.info(
+                logger.debug(
                     "%s: reusing existing curated file for experiment %s at %s",
                     self.stage_name,
                     experiment.nct_id,
@@ -508,79 +581,34 @@ class PubMedCurateStage(CurationStage):
                 )
                 continue
 
-            curated_frames: list[pd.DataFrame] = []
+            reports = df["report"].fillna("").astype(str)
+            report_tokens = reports.apply(_tokenize_casefold)
 
-            for path in candidate_paths:
-                df = pd.read_csv(path).drop(columns=["Unnamed: 0"], errors="ignore")
-                if df.empty:
-                    logger.warning("Skipping empty DataFrame at %s", path)
-                    continue
-
-                if context.filter_by_date and experiment.date:
-                    df = filter_by_date(df, experiment.date, "publication_date")
-                    if df.empty:
-                        logger.warning(
-                            "Skipping DataFrame with no valid dates at %s", path
-                        )
-                        continue
-
-                title_fallback = df["title"].fillna("").astype(str).str.strip()
-                abstract_fallback = df["abstract"].fillna("").astype(str).str.strip()
-                fallback_text = title_fallback.str.cat(
-                    abstract_fallback, sep="\n\n"
-                ).str.strip()
-
-                full_text_series = df["full_text"].fillna("").astype(str).str.strip()
-                missing_full_text = full_text_series == ""
-                df.loc[missing_full_text, "full_text"] = fallback_text[
-                    missing_full_text
+            def match_treatments(tokens, alias_token_map=alias_token_map):
+                return [
+                    alias
+                    for alias, alias_tokens in alias_token_map.items()
+                    if alias_tokens <= tokens
                 ]
 
-                full_text_series = df["full_text"].fillna("").astype(str).str.strip()
-                df["full_text"] = full_text_series.replace("", pd.NA)
-                if df["full_text"].isna().all():
-                    logger.debug("Skipping file %s due to missing report text", path)
-                    continue
+            matched_treatments = report_tokens.apply(match_treatments)
 
-                df = df.copy()
-                df.rename(columns={"full_text": "report"}, inplace=True)
-
-                reports = df["report"].fillna("").astype(str)
-                report_tokens = reports.apply(_tokenize_casefold)
-
-                def match_treatments(tokens, alias_token_map=alias_token_map):
-                    return [
-                        alias
-                        for alias, alias_tokens in alias_token_map.items()
-                        if alias_tokens <= tokens
-                    ]
-
-                matched_treatments = report_tokens.apply(match_treatments)
-
-                has_treatment = matched_treatments.apply(bool)
-                if not has_treatment.any():
-                    continue
-
-                result = df.loc[has_treatment].copy()
-                result["treatments_mentioned"] = matched_treatments[has_treatment]
-                result["source_path"] = path
-                curated_frames.append(result)
-
-            if not curated_frames:
+            has_treatment = matched_treatments.apply(bool)
+            if not has_treatment.any():
                 logger.info(
-                    "%s: no matching PubMed reports found for experiment %s",
+                    "%s: No treatments matched in any report for experiment %s",
                     self.stage_name,
                     experiment.nct_id,
                 )
                 continue
 
-            curated_df = pd.concat(curated_frames, ignore_index=True)
-            if "pmid" in curated_df.columns:
-                curated_df = curated_df.drop_duplicates(subset=["pmid"])
+            result = df.loc[has_treatment].copy()
+            result["treatments_mentioned"] = matched_treatments[has_treatment]
 
-            curated_df.to_csv(save_path, index=False)
+            result.to_csv(save_path, index=False)
             curated_paths[experiment.nct_id] = save_path
-            total_rows += len(curated_df)
+            curated_data_sizes[experiment.nct_id] = len(result)
+            total_rows += len(result)
 
         state.payload = curated_paths
         state.update(curated_paths=curated_paths)
@@ -590,4 +618,7 @@ class PubMedCurateStage(CurationStage):
             len(curated_paths),
             total_rows,
         )
+        context.study_dataset.data_paths.update(curated_paths)
+        context.study_dataset.data_sizes.update(curated_data_sizes)
+        context.study_dataset.to_yaml(context.extras["study_dataset_file"])
         return state

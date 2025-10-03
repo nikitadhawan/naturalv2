@@ -23,11 +23,6 @@ logger = logging.getLogger(__name__)
 _TOKEN_PATTERN = re.compile(r"\b[\w-]+\b")
 
 
-def _normalize_condition_key(condition: str | None) -> str:
-    """Normalise condition names for consistent lookups."""
-    return sanitize_filename((condition or "").strip()).lower()
-
-
 def _tokenize_casefold(text: str) -> set[str]:
     """Return a casefolded token set for exact token matching."""
 
@@ -67,9 +62,22 @@ class PubMedConditionFilter(CurationStage):
 
         for experiment in context.experiments:
             for condition in experiment.conditions:
-                query = self._build_search_query(condition, experiment)
+                query = self._build_search_query(condition, experiment, context)
                 if query not in trial_query_map[experiment.nct_id]:
                     trial_query_map[experiment.nct_id].append(query)
+
+        # Create pandas dataframe and save as CSV for inspection/debugging
+        df = pd.DataFrame(
+            [
+                {"nct_id": nct_id, "query": query}
+                for nct_id, queries in trial_query_map.items()
+                for query in queries
+            ]
+        )
+        query_log_path = os.path.join(
+            context.save_dir, f"{context.source_name}_data", "queries.csv"
+        )
+        df.to_csv(query_log_path, index=False)
 
         state.payload = trial_query_map
         state.update(trial_query_map=trial_query_map)
@@ -78,6 +86,7 @@ class PubMedConditionFilter(CurationStage):
             self.stage_name,
             len(trial_query_map),
         )
+        logger.info("%s: saved PubMed queries to %s", self.stage_name, query_log_path)
         return state
 
     @staticmethod
@@ -102,12 +111,9 @@ class PubMedConditionFilter(CurationStage):
             involving humans.
         """
 
-        mesh_terms = " OR ".join(
-            [f'"{mesh}"[MeSH Terms]' for mesh in experiment.trial_disease_mesh]
-        )
         treatment_terms = " OR ".join(
             [
-                f'"{treatment}[All Fields]"'
+                f"{treatment}"
                 for treatment in experiment.get_all_treatment_names_for_source(
                     context.source_name
                 )
@@ -115,7 +121,7 @@ class PubMedConditionFilter(CurationStage):
         )
 
         return (
-            f'(("{condition}") AND ({mesh_terms})) AND ({treatment_terms}) '
+            f"{condition} AND ({treatment_terms}) "
             f"AND ((fha[Filter]) AND (casereports[Filter]) "
             f"AND (humans[Filter]) AND (english[Filter]))"
         )
@@ -130,14 +136,14 @@ class PubMedFetchAndClean(CurationStage):
 
     Parameters
     ----------
-    name : str, optional
-        Custom stage name used for logging.
     api_key : str, optional
         PubMed API key.  If omitted, the environment variable ``PUBMED_API_KEY``
         will be attempted.  If neither is provided, requests will be unauthenticated
         and might be subject to stricter rate limits.
     max_concurrent_requests : int, default=10
         Limit on the number of concurrent network requests issued to PubMed.
+    name : str, optional, default=None
+        Custom stage name used for logging.
 
     Raises
     ------
@@ -150,9 +156,9 @@ class PubMedFetchAndClean(CurationStage):
     def __init__(
         self,
         *,
-        name: str | None = None,
         api_key: str | None = None,
         max_concurrent_requests: int = 10,
+        name: str | None = None,
     ) -> None:
         super().__init__(name=name)
         if not isinstance(api_key, (str, type(None))):
@@ -163,7 +169,7 @@ class PubMedFetchAndClean(CurationStage):
         self.api_key = api_key
         self.max_concurrent_requests = max_concurrent_requests
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:  # noqa: PLR0912
+    async def run(self, context: CurationContext, state: StageState) -> StageState:
         """Fetch and persist PubMed case reports.
 
         Parameters
@@ -198,98 +204,20 @@ class PubMedFetchAndClean(CurationStage):
         source_dir = os.path.join(context.save_dir, f"{context.source_name}_data")
         os.makedirs(source_dir, exist_ok=True)
 
-        nctid_clean_path_map: dict[str, str] = {}
-        query_trial_map: dict[str, set[str]] = {}
         semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-
         with ThreadPoolExecutor() as executor:
-            fetch_tasks = []
-            for experiment in context.experiments:
-                for query in trial_query_map.get(experiment.nct_id, []):
-                    if query in query_trial_map:
-                        query_trial_map[query].add(experiment.nct_id)
-                        continue
-
-                    query_trial_map.setdefault(query, set()).add(experiment.nct_id)
-
-                    filename = os.path.join(
-                        source_dir, f"{experiment.nct_id}_case_reports.csv"
-                    )
-                    if os.path.exists(filename):  # Query processed in previous run
-                        nctid_clean_path_map[experiment.nct_id] = filename
-                        continue
-
-                    fetch_tasks.append(
-                        concurrency_limited(
-                            self._download_case_reports(
-                                query,
-                                source_dir,
-                                experiment=experiment,
-                                executor=executor,
-                            ),
-                            semaphore,
-                        )
-                    )
-
-            num_case_reports_fetched = 0
-            num_case_reports_cleaned = 0
-            trials_with_no_case_reports: set[str] = set(trial_query_map.keys())
-            for fut in tqdm_asyncio.as_completed(
-                fetch_tasks,
-                total=len(fetch_tasks),
-                desc="Fetching PubMed case reports",
-                unit="query",
-                position=0,
-                leave=False,
-                dynamic_ncols=True,
-                disable=(len(fetch_tasks) == 0),
-            ):
-                case_reports, (query, experiment) = await fut
-                if not case_reports:
-                    logger.warning(
-                        "%s: No case reports fetched for query '%s' (experiment %s)",
-                        self.stage_name,
-                        query,
-                        experiment.nct_id,
-                    )
-                    continue
-
-                fetched_case_reports = pd.DataFrame(case_reports)
-
-                # Track number of case reports downloaded
-                num_case_reports_fetched += len(fetched_case_reports)
-
-                # Clean dataframe
-                cleaned_case_reports = self.clean(
-                    fetched_case_reports,
-                    experiment=experiment,
-                    apply_date_filter=context.filter_by_date,
-                )
-                if cleaned_case_reports is None:
-                    continue
-
-                # Track number of case reports after cleaning
-                num_case_reports_cleaned += len(cleaned_case_reports)
-
-                # Save dataframe(s)
-                for nct_id in query_trial_map[query]:
-                    file_path = os.path.join(source_dir, f"{nct_id}_case_reports.csv")
-                    if os.path.exists(file_path):
-                        existing_df = pd.read_csv(file_path).drop(
-                            columns=["Unnamed: 0"], errors="ignore"
-                        )
-                        combined_df = (
-                            pd.concat([existing_df, cleaned_case_reports])
-                            .drop_duplicates(subset=["pmid"])
-                            .reset_index(drop=True)
-                        )
-                        combined_df.to_csv(file_path, index=False)
-                    else:
-                        cleaned_case_reports.to_csv(file_path, index=False)
-
-                    nctid_clean_path_map[nct_id] = file_path
-                    if nct_id in trials_with_no_case_reports:
-                        trials_with_no_case_reports.remove(nct_id)
+            (
+                nctid_clean_path_map,
+                num_case_reports_fetched,
+                num_case_reports_cleaned,
+                trials_with_no_case_reports,
+            ) = await self._fetch_and_clean_case_reports(
+                context,
+                trial_query_map,
+                source_dir,
+                semaphore,
+                executor,
+            )
 
         state.payload = nctid_clean_path_map
         state.update(
@@ -298,13 +226,6 @@ class PubMedFetchAndClean(CurationStage):
             num_case_reports_fetched=num_case_reports_fetched,
             num_case_reports_cleaned=num_case_reports_cleaned,
             trials_with_no_case_reports=list(trials_with_no_case_reports),
-        )
-        logger.info(
-            "%s: fetched %d case reports from PubMed (%d after cleaning) across %s experiments",
-            self.stage_name,
-            num_case_reports_fetched,
-            num_case_reports_cleaned,
-            len(nctid_clean_path_map),
         )
 
         if trials_with_no_case_reports:
@@ -318,7 +239,7 @@ class PubMedFetchAndClean(CurationStage):
         context.study_dataset.data_paths[f"{context.source_name}_cleaned"] = list(
             nctid_clean_path_map.values()
         )
-        context.study_dataset.to_yaml(context.extras["study_dataset_file"])
+        context.study_dataset.to_yaml(context.extras["study_dataset_path"])
         return state
 
     def clean(
@@ -434,6 +355,130 @@ class PubMedFetchAndClean(CurationStage):
 
         return df
 
+    async def _fetch_and_clean_case_reports(
+        self,
+        context: CurationContext,
+        trial_query_map: dict[str, list[str]],
+        source_dir: str,
+        semaphore: asyncio.Semaphore,
+        executor: ThreadPoolExecutor,
+    ) -> tuple[dict[str, str], int, int, set[str]]:
+        """Fetch and clean PubMed case reports for each experiment."""
+        trials_with_no_case_reports: set[str] = set(trial_query_map.keys())
+
+        def _unmark_trials_with_case_reports(nct_id: str) -> None:
+            trials_with_no_case_reports.discard(nct_id)
+
+        existing_nctid_clean_path_map: dict[str, str] = {}
+        query_trial_map: dict[str, set[str]] = {}
+
+        fetch_tasks = []
+        for experiment in context.experiments:
+            for query in trial_query_map.get(experiment.nct_id, []):
+                if query in query_trial_map:
+                    query_trial_map[query].add(experiment.nct_id)
+                    continue
+
+                query_trial_map.setdefault(query, set()).add(experiment.nct_id)
+
+                filename = os.path.join(
+                    source_dir, f"{experiment.nct_id}_case_reports.csv"
+                )
+                if os.path.exists(filename):  # Query processed in previous run
+                    existing_nctid_clean_path_map[experiment.nct_id] = filename
+                    _unmark_trials_with_case_reports(experiment.nct_id)
+                    continue
+
+                fetch_tasks.append(
+                    concurrency_limited(
+                        self._download_case_reports(
+                            query,
+                            source_dir,
+                            experiment=experiment,
+                            executor=executor,
+                        ),
+                        semaphore,
+                    )
+                )
+
+        num_case_reports_fetched = 0
+        num_case_reports_cleaned = 0
+        new_nctid_clean_path_map: dict[str, str] = {}
+        for fut in tqdm_asyncio.as_completed(
+            fetch_tasks,
+            total=len(fetch_tasks),
+            desc="Fetching PubMed case reports",
+            unit="query",
+            position=0,
+            leave=False,
+            dynamic_ncols=True,
+            disable=(len(fetch_tasks) == 0),
+        ):
+            case_reports, (query, experiment) = await fut
+            if not case_reports:
+                logger.warning(
+                    "%s: No case reports fetched for query '%s' (experiment %s)",
+                    self.stage_name,
+                    query,
+                    experiment.nct_id,
+                )
+                continue
+
+            fetched_case_reports = pd.DataFrame(case_reports)
+
+            # Track number of case reports downloaded
+            num_case_reports_fetched += len(fetched_case_reports)
+
+            # Clean dataframe
+            cleaned_case_reports = self.clean(
+                fetched_case_reports,
+                experiment=experiment,
+                apply_date_filter=context.filter_by_date,
+            )
+            if cleaned_case_reports is None:
+                continue
+
+            # Track number of case reports after cleaning
+            num_case_reports_cleaned += len(cleaned_case_reports)
+
+            # Save dataframe(s)
+            for nct_id in query_trial_map[query]:
+                file_path = os.path.join(source_dir, f"{nct_id}_case_reports.csv")
+                if os.path.exists(file_path):
+                    existing_df = pd.read_csv(file_path).drop(
+                        columns=["Unnamed: 0"], errors="ignore"
+                    )
+                    combined_df = (
+                        pd.concat([existing_df, cleaned_case_reports])
+                        .drop_duplicates(subset=["pmid"])
+                        .reset_index(drop=True)
+                    )
+                    combined_df.to_csv(file_path, index=False)
+                else:
+                    cleaned_case_reports.to_csv(file_path, index=False)
+
+                new_nctid_clean_path_map[nct_id] = file_path
+                _unmark_trials_with_case_reports(nct_id)
+
+        logger.info(
+            "%s: fetched %d case reports from PubMed (%d after cleaning) across %s experiments",
+            self.stage_name,
+            num_case_reports_fetched,
+            num_case_reports_cleaned,
+            len(existing_nctid_clean_path_map),
+        )
+
+        nctid_clean_path_map = {
+            **existing_nctid_clean_path_map,
+            **new_nctid_clean_path_map,
+        }
+        return (
+            nctid_clean_path_map,
+            num_case_reports_fetched,
+            num_case_reports_cleaned,
+            trials_with_no_case_reports,
+        )
+
     async def _download_case_reports(
         self,
         query: str,
@@ -481,10 +526,10 @@ class PubMedCurateStage(CurationStage):
 
     Parameters
     ----------
-    name : str | None, optional, default=None
-        Custom stage name used for logging.
     overwrite_exisiting : bool, default=False
         If `True` overwrites existing cleaned data.
+    name : str | None, optional, default=None
+        Custom stage name used for logging.
     """
 
     def __init__(
@@ -519,7 +564,7 @@ class PubMedCurateStage(CurationStage):
                 f"{self.stage_name}: No cleaned case report paths found in state."
             )
 
-        condition_segment = _normalize_condition_key(context.condition)
+        condition_segment = sanitize_filename(context.condition.lower())
         condition_dir = os.path.join(
             state.metadata.get("source_dir", context.save_dir), condition_segment
         )

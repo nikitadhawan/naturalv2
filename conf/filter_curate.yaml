@@ -17,16 +17,3 @@ search_model:
     - type: web_search_preview
       search_context_size: high
   store: False
-
-default_max_concurrent_workers: 8
-condition_config:
-  _target_: naturalv2.pipeline.curation.ConditionStage
-  model_cfg: ${sample_model}
-  source_name:
-  max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
-synonym_config:
-  _target_: naturalv2.pipeline.curation.SynonymStage
-  model_cfg: ${search_model}
-  source_name:
-  attribute: "treatment"
-  max_concurrent_workers: ${coalesce:search_model.max_parallel_requests, search_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}

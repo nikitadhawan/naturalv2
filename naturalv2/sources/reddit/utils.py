@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import warnings
-from typing import Generator, Literal, Optional
+from typing import TYPE_CHECKING, Generator, Literal, Optional
 from urllib import error, request
 
 import asyncpraw
@@ -26,7 +26,9 @@ from tenacity import (
 )
 from tqdm.asyncio import tqdm
 
-from naturalv2.sources.anonymizer import Anonymizer
+
+if TYPE_CHECKING:
+    from naturalv2.sources.anonymizer import Anonymizer
 
 
 warnings.simplefilter("ignore", UserWarning)

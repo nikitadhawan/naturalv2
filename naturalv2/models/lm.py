@@ -916,16 +916,27 @@ class LiteLLMModel(APIModel):
         texts: list[str] = []
         tool_calls: list[ToolCall] = []
         for output in response.output:
-            if output.type == "message":
-                for content in output.content:
+            output_type = output.type if hasattr(output, "type") else output["type"]
+            if output_type == "message":
+                output_contents = (
+                    output.content if hasattr(output, "content") else output["content"]
+                )
+                for content in output_contents or []:
                     if content.type == "output_text":
                         texts.append(content.text)
-            if output.type == "function_call":
+            if output_type == "function_call":
+                output_id = output.id if hasattr(output, "id") else output["id"]
+                output_name = output.name if hasattr(output, "name") else output["name"]
+                output_arguments = (
+                    output.arguments
+                    if hasattr(output, "arguments")
+                    else output["arguments"]
+                )
                 tool_calls.append(
                     ToolCall(
-                        id=output.id,
-                        name=output.name,
-                        arguments=output.arguments,
+                        id=output_id,
+                        name=output_name,
+                        arguments=output_arguments,
                     )
                 )
 

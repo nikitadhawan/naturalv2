@@ -1,5 +1,6 @@
 defaults:
   - source@sources.pubmed: pubmed
+  - source@sources.reddit: reddit
   - _self_
 
 seed: 42

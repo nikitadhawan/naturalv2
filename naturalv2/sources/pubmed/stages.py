@@ -565,10 +565,10 @@ class PubMedCurateStage(CurationStage):
             )
 
         condition_segment = sanitize_filename(context.condition.lower())
-        condition_dir = os.path.join(
+        study_dir = os.path.join(
             state.metadata.get("source_dir", context.save_dir), condition_segment
         )
-        os.makedirs(condition_dir, exist_ok=True)
+        os.makedirs(study_dir, exist_ok=True)
 
         curated_paths: dict[str, str] = {}
         curated_data_sizes: dict[str, int] = {}
@@ -595,7 +595,7 @@ class PubMedCurateStage(CurationStage):
                 )
                 continue
 
-            save_path = os.path.join(condition_dir, f"pubmed_{experiment.nct_id}.csv")
+            save_path = os.path.join(study_dir, f"pubmed_{experiment.nct_id}.csv")
 
             if os.path.exists(save_path) and not self.overwrite_existing:
                 logger.debug(

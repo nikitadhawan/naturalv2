@@ -40,6 +40,7 @@ class CurationContext:
     filter_by_date: bool
 
     study_dataset: "StudyDataset"
+    experiment_name: str
 
     #: Additional context-specific information.
     extras: dict[str, Any] = field(default_factory=dict)

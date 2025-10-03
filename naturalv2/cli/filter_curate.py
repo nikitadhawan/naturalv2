@@ -82,7 +82,9 @@ def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
     stages: list[CurationStage] = []
     for name, stage_cfg in source_cfg.stages.items():
         if stage_cfg is not None:
-            stages.append(hydra.utils.instantiate(stage_cfg, name=name))
+            stages.append(
+                hydra.utils.instantiate(stage_cfg, name=name, _convert_="partial")
+            )
     return FilterCurateRunner(stages)
 
 
@@ -140,6 +142,7 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
             save_dir=cfg.save_path,
             filter_by_date=cfg.filter_by_date,
             study_dataset=study_dataset,
+            experiment_name=cfg.experiment_name,
             extras={"study_dataset_path": study_filepaths["study_dataset"]},
         )
 

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 _RETMAX = "100000"  # Maximum number of records to return in a single request
+_MAX_GET_TERM_LENGTH = 1800  # PubMed GET requests start failing beyond ~2KB URLs
 
 
 _MAX_RATE_LIMIT_WAIT_SECONDS = 300  # Cap server-directed sleeps to 5 minutes.
@@ -34,6 +35,7 @@ _BASE_WAIT_STRATEGY = wait_random_exponential(multiplier=1, min=0.7, max=60)
 
 
 def _parse_retry_after(header_value: str | None) -> float | None:
+    """Parse the Retry-After header value and return the delay in seconds."""
     delay = None
     if header_value:
         value = header_value.strip()
@@ -58,6 +60,7 @@ def _parse_retry_after(header_value: str | None) -> float | None:
 
 
 def _rate_limit_aware_wait(retry_state: RetryCallState) -> float:
+    """Custom wait strategy that respects Retry-After headers for 429 responses."""
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     if isinstance(exception, aiohttp.ClientResponseError) and exception.status == 429:
         headers = getattr(exception, "headers", None)
@@ -72,6 +75,7 @@ def _rate_limit_aware_wait(retry_state: RetryCallState) -> float:
 
 
 def _should_retry(exception: Exception) -> bool:
+    """Determine if the exception is transient and should be retried."""
     if isinstance(exception, aiohttp.ClientResponseError):
         if exception.status == 429:
             return True
@@ -84,6 +88,24 @@ def _should_retry(exception: Exception) -> bool:
 async def search_pubmed(
     query: str, api_key: str | None, executor: ThreadPoolExecutor
 ) -> tuple[str | None, str | None]:
+    """Search PubMed for the given query and return WebEnv and QueryKey.
+
+    Returns (WebEnv, QueryKey) or (None, None) on failure.
+
+    Parameters
+    ----------
+    query : str
+        The search query string.
+    api_key : str | None
+        Optional PubMed API key.
+    executor : ThreadPoolExecutor
+        Executor for blocking operations.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        A tuple containing WebEnv and QueryKey, or (None, None) on failure.
+    """
     search_url = _PUBMED_BASE_URL + "esearch.fcgi"
     params = {
         "db": "pubmed",
@@ -96,9 +118,15 @@ async def search_pubmed(
     if pubmed_api_key:
         params["api_key"] = pubmed_api_key
 
+    http_method = "POST" if len(query) > _MAX_GET_TERM_LENGTH else "GET"
+
     try:
         root = await _get_xml_root(
-            search_url, params, "Failed to retrieve PubMed search results", executor
+            search_url,
+            params,
+            "Failed to retrieve PubMed search results",
+            executor,
+            http_method=http_method,
         )
     except aiohttp.ClientResponseError as e:
         if e.status == 429:
@@ -136,6 +164,26 @@ async def fetch_articles(
     api_key: str | None,
     executor: ThreadPoolExecutor,
 ) -> list[dict[str, str]]:
+    """Fetch articles from PubMed using WebEnv and QueryKey.
+
+    Parameters
+    ----------
+    webenv : str | None
+        The WebEnv string from PubMed search results.
+    query_key : str | None
+        The QueryKey string from PubMed search results.
+    data_path : str
+        Path to store cached full texts.
+    api_key : str | None
+        Optional PubMed API key.
+    executor : ThreadPoolExecutor
+        Executor for blocking operations.
+
+    Returns
+    -------
+    list[dict[str, str]]
+        A list of dictionaries containing article metadata and full text.
+    """
     if webenv is None:
         logger.error("WebEnv is None, cannot fetch articles.")
         return []
@@ -195,6 +243,7 @@ async def _extract_case_reports(
     api_key: str | None,
     executor: ThreadPoolExecutor,
 ) -> list[dict[str, str]]:
+    """Extract case reports from the list of articles."""
     case_reports: list[dict[str, str]] = []
     batch_size = 100
     loop = asyncio.get_running_loop()
@@ -253,6 +302,8 @@ async def _fetch_and_process_fulltexts(
     api_key: str | None,
     executor: ThreadPoolExecutor,
 ) -> list[dict[str, str]]:
+    """Fetch and process full texts for the given PMC IDs."""
+
     async def _fetch_with_id(pmc_id: str) -> tuple[str, dict[str, str] | None]:
         result = await _fetch_pmc_fulltext(pmc_id, data_path, api_key, executor)
         return pmc_id, result
@@ -295,6 +346,7 @@ async def _fetch_pmc_fulltext(
     api_key: str | None,
     executor: ThreadPoolExecutor,
 ) -> dict[str, str] | None:
+    """Fetch and process the full text of a PMC article by its PMC ID."""
     # Return cached full text if available
     cache_dir = os.path.join(data_path, ".pmc_cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -365,10 +417,21 @@ async def _get_xml_root(
     params: dict[str, str],
     client_error_msg: str,
     executor: ThreadPoolExecutor,
+    *,
+    http_method: str = "GET",
 ) -> ET.Element | None:
+    """Fetch XML content from the given URL with parameters and return the root element."""
+    method = http_method.upper()
+    if method not in {"GET", "POST"}:
+        raise ValueError(f"Unsupported HTTP method: {http_method}")
+
+    request_kwargs: dict[str, dict[str, str]]
+    request_kwargs = {"params": params} if method == "GET" else {"data": params}
+
     try:
         async with aiohttp.ClientSession() as session:  # noqa: SIM117
-            async with session.get(url, params=params) as response:
+            requester = session.get if method == "GET" else session.post
+            async with requester(url, **request_kwargs) as response:
                 response.raise_for_status()
                 content = await response.read()
     except aiohttp.ClientResponseError as e:
@@ -433,6 +496,7 @@ async def _get_xml_root(
 
 
 def _is_case_report(article: ET.Element) -> bool:
+    """Check if the article is a case report based on its PublicationType."""
     return any(
         pub_type.text and pub_type.text.lower() == "case reports"
         for pub_type in article.findall(".//PublicationType")
@@ -459,6 +523,7 @@ def _extract_common_metadata(
 
 
 def _extract_basic_metadata(article: ET.Element) -> dict[str, str] | None:
+    """Extract basic metadata (PMID and title) from the article."""
     pmid_element = article.find(".//PMID")
     title_element = article.find(".//ArticleTitle")
 
@@ -474,6 +539,7 @@ def _extract_basic_metadata(article: ET.Element) -> dict[str, str] | None:
 
 
 def _extract_abstract(article: ET.Element) -> str:
+    """Extract the abstract text from the article."""
     abstract_element = article.find(".//Abstract/AbstractText")
     return (
         abstract_element.text.strip()
@@ -483,6 +549,7 @@ def _extract_abstract(article: ET.Element) -> str:
 
 
 def _extract_authors(article: ET.Element) -> str:
+    """Extract the list of authors from the article."""
     authors = []
     for author in article.findall(".//Author"):
         last_name_elem = author.find("LastName")
@@ -498,6 +565,7 @@ def _extract_authors(article: ET.Element) -> str:
 
 
 def _extract_publication_date(article: ET.Element) -> str:
+    """Extract the publication date from the article."""
     pub_date_elem = article.find(".//PubDate")
     if pub_date_elem is not None:
         year = pub_date_elem.find("Year")
@@ -508,6 +576,7 @@ def _extract_publication_date(article: ET.Element) -> str:
 
 
 def _extract_pmc_ids(article: ET.Element) -> list[str]:
+    """Extract PMC IDs from the article."""
     article_id_list = article.find(".//ArticleIdList")
     pmc_ids = []
     if article_id_list is not None:
@@ -518,6 +587,7 @@ def _extract_pmc_ids(article: ET.Element) -> list[str]:
 
 
 def _parse_fulltext_xml(root: ET.Element) -> dict[str, str]:
+    """Parse the full text XML and return structured text sections."""
     article = root.find(".//article")
     if article is None:
         return {}

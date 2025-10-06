@@ -7,7 +7,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
-from tqdm.asyncio import tqdm as tqdm_asyncio
+from tqdm.asyncio import tqdm_asyncio
 
 from naturalv2.experiment import Experiment
 from naturalv2.sources.components.dates import filter_by_date
@@ -15,7 +15,6 @@ from naturalv2.sources.components.text import tokenize_casefold
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
 from naturalv2.utils import concurrency_limited
-
 
 logger = logging.getLogger(__name__)
 

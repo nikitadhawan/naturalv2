@@ -1,7 +1,5 @@
 """Reddit curation stages compatible with the modern pipeline."""
 
-from __future__ import annotations
-
 import ast
 import asyncio
 import concurrent.futures
@@ -30,7 +28,6 @@ from naturalv2.sources.reddit.operations import (
     search_subreddits,
 )
 from naturalv2.sources.reddit.utils import get_sub_about_info
-
 
 logger = logging.getLogger(__name__)
 
@@ -327,8 +324,10 @@ class RedditDownloadAndClean(SourceStage):
         subreddit_cleaned_path_map: dict[str, str] = {}
         subs_to_filter = []
         for sub in available_subs:
-            clean_sub_path = os.path.join(subs_data_dir, f"{sub}_cleaned.parquet")
-            if os.path.exists(clean_sub_path):
+            clean_sub_path: str | None = os.path.join(
+                subs_data_dir, f"{sub}_cleaned.parquet"
+            )
+            if clean_sub_path and os.path.exists(clean_sub_path):
                 subreddit_cleaned_path_map[sub] = clean_sub_path
             else:
                 subs_to_filter.append(sub)

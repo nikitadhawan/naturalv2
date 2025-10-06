@@ -10,7 +10,6 @@ import pandas as pd
 from naturalv2.sources.components.llm_extraction import extract_curation_info
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 
-
 if TYPE_CHECKING:
     from naturalv2.models.lm import APIModel
 

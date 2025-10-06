@@ -501,44 +501,6 @@ def get_context_post_df(
     )
 
 
-def filter_by_date(
-    adf: pd.DataFrame, cutoff_dt: pd.Timestamp, date_col: str
-) -> pd.DataFrame:
-    """Filter a DataFrame by a date cutoff.
-
-    Parameters
-    ----------
-    adf : pd.DataFrame
-        The DataFrame to filter.
-    cutoff_dt : pd.Timestamp
-        The cutoff timestamp. Only rows with dates before this date will
-        be kept.
-    date_col : str
-        The name of the column in the DataFrame containing date information.
-
-    Returns
-    -------
-    pd.DataFrame
-        A DataFrame filtered to include only rows with dates on or before the cutoff date.
-    """
-    if adf.empty:
-        return pd.DataFrame()
-
-    # Parse date column all at once, try inference and coerce errors
-    date_series: pd.Series = pd.to_datetime(adf[date_col], errors="coerce")
-
-    # Log how many rows have NaN datetime if there are any
-    num_no_date = date_series.isna().sum()
-    if num_no_date > 0:
-        logger.debug(
-            f"Found {num_no_date} rows with NaN values in '{date_col}' column."
-        )
-
-    # Filter rows which have a datetime and are before cutoff
-    mask = (date_series.notna()) & (date_series < cutoff_dt)
-    return adf.loc[mask].reset_index(drop=True)
-
-
 @retry(
     wait=wait_random_exponential(min=1, max=30),
     stop=stop_after_attempt(5),

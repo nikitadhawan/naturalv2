@@ -8,43 +8,34 @@ import concurrent.futures
 import json
 import logging
 import os
-import re
 from functools import partial
 
 import asyncpraw
-import numpy as np
 import pandas as pd
 import psutil
 from aiolimiter import AsyncLimiter
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception,
-    wait_random_exponential,
-)
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 from tqdm.contrib.concurrent import process_map
 
 from naturalv2.models.lm import APIModel
 from naturalv2.sources.anonymizer import Anonymizer
-from naturalv2.sources.curation import CurationContext, CurationStage, StageState
-from naturalv2.sources.reddit.utils import (
-    download_sub_data,
-    filter_by_date,
-    get_context_post_df,
-    get_sub_about_info,
-    is_retryable_error,
-    rule_based_filter,
+from naturalv2.sources.components.llm_extraction import extract_curation_info
+from naturalv2.sources.components.text import build_term_pattern
+from naturalv2.sources.core import CurationContext, SourceStage, StageState
+from naturalv2.sources.reddit.operations import (
+    download_submissions_and_comments,
+    get_study_relevant_posts,
+    search_posts_in_subreddit,
+    search_subreddits,
 )
-from naturalv2.sources.shared import extract_curation_info
-from naturalv2.utils import sanitize_filename
+from naturalv2.sources.reddit.utils import get_sub_about_info
 
 
 logger = logging.getLogger(__name__)
 
 
-class RedditConditionFilter(CurationStage):
+class RedditConditionFilter(SourceStage):
     def __init__(
         self,
         *,
@@ -131,10 +122,7 @@ class RedditConditionFilter(CurationStage):
 
         df = pd.DataFrame(keyword_queries)
 
-        save_dir = sanitize_filename(
-            os.path.join(context.save_dir, "curation_results", context.condition)
-        )
-        os.makedirs(save_dir, exist_ok=True)
+        save_dir = self.results_dir(context)
         file_path = os.path.join(
             save_dir,
             f"{context.source_name}_condition_queries_{context.experiment_name}.csv",
@@ -187,13 +175,13 @@ class RedditConditionFilter(CurationStage):
         ) as reddit_client:
             reddit_rate_limiter = AsyncLimiter(self.reddit_rpm)
 
-            # Get candidate subreddits for each keyword
-            subreddit_tasks = []
+            subreddit_tasks: list[asyncio.Task[list[str]]] = []
+            task_to_keyword: dict[asyncio.Task[list[str]], str] = {}
             for keyword in keywords:
                 task = asyncio.create_task(
-                    self._search_subreddits(keyword, reddit_client, reddit_rate_limiter)
+                    search_subreddits(keyword, reddit_client, reddit_rate_limiter)
                 )
-                task.keyword = keyword
+                task_to_keyword[task] = keyword
                 subreddit_tasks.append(task)
 
             candidate_subs_per_keyword: dict[str, list[str]] = {}
@@ -204,36 +192,41 @@ class RedditConditionFilter(CurationStage):
                 leave=False,
                 dynamic_ncols=True,
             ):
+                keyword = task_to_keyword[task]
                 try:
                     result = await task
-                    candidate_subs_per_keyword[task.keyword] = result
+                    candidate_subs_per_keyword[keyword] = result
                     logger.info(
                         "Found %d candidate subreddits for keyword '%s'",
                         len(result),
-                        task.keyword,
+                        keyword,
                     )
-                except Exception as e:
+                except Exception as exc:  # noqa: BLE001
                     logger.error(
                         "Searching for subreddits with keyword '%s' failed with error: %s",
-                        task.keyword,
-                        e,
+                        keyword,
+                        exc,
                     )
 
-            # Search for posts in each candidate subreddit
-            post_search_tasks: list[str] = []
-            task_metadata: list[tuple[str, str]] = []  # (keyword, subreddit) per task
-
+            post_search_tasks: list[asyncio.Task[list[str]]] = []
+            task_metadata: list[tuple[str, str]] = []
             for keyword, candidate_subs in candidate_subs_per_keyword.items():
                 for subreddit in candidate_subs:
-                    task = self._search_posts_in_subreddit(
-                        subreddit, keyword, reddit_client, reddit_rate_limiter
+                    task = asyncio.create_task(
+                        search_posts_in_subreddit(
+                            subreddit,
+                            keyword,
+                            reddit_client,
+                            reddit_rate_limiter,
+                            limit=self.subreddit_post_limit,
+                            char_limit=self.subreddit_post_char_limit,
+                        )
                     )
                     post_search_tasks.append(task)
                     task_metadata.append((keyword, subreddit))
 
-            post_search_results: list[
-                list[str] | Exception
-            ] = await tqdm_asyncio.gather(
+            post_search_results: list[list[str] | Exception]
+            post_search_results = await tqdm_asyncio.gather(
                 *post_search_tasks,
                 desc="Searching posts",
                 total=len(post_search_tasks),
@@ -242,7 +235,6 @@ class RedditConditionFilter(CurationStage):
                 return_exceptions=True,
             )
 
-            # Group results back by keyword
             results_by_keyword: dict[
                 str, dict[str, list[str] | dict[str, str | list[str]]]
             ] = {}
@@ -256,66 +248,22 @@ class RedditConditionFilter(CurationStage):
                         posts,
                     )
                 else:
-                    if keyword not in results_by_keyword:
-                        results_by_keyword[keyword] = {
+                    results_by_keyword.setdefault(
+                        keyword,
+                        {
                             "candidate_subs": candidate_subs_per_keyword.get(
                                 keyword, []
                             ),
                             "subreddit_posts": [],
-                        }
-                    results_by_keyword[keyword]["subreddit_posts"].append(
+                        },
+                    )["subreddit_posts"].append(
                         {"subreddit": subreddit, "posts": posts}
                     )
 
         return results_by_keyword
 
-    @retry(
-        retry=retry_if_exception(is_retryable_error),
-        wait=wait_random_exponential(multiplier=1, max=60),
-        before_sleep=before_sleep_log(logger, logging.INFO),
-    )
-    async def _search_subreddits(
-        self, keyword: str, reddit_client: asyncpraw.Reddit, limiter: AsyncLimiter
-    ) -> list[str]:
-        """Search for subreddits matching a keyword."""
-        async with limiter:
-            return [
-                subreddit.display_name
-                async for subreddit in reddit_client.subreddits.search(keyword)
-            ]
 
-    @retry(
-        retry=retry_if_exception(is_retryable_error),
-        wait=wait_random_exponential(multiplier=1, max=60),
-        before_sleep=before_sleep_log(logger, logging.INFO),
-    )
-    async def _search_posts_in_subreddit(
-        self,
-        subreddit: str,
-        keyword: str,
-        reddit_client: asyncpraw.Reddit,
-        limiter: AsyncLimiter,
-    ) -> list[str]:
-        """Search for posts in a subreddit matching a keyword."""
-        async with limiter:
-            posts = []
-            subreddit_instance = await reddit_client.subreddit(subreddit)
-
-            async for submission in subreddit_instance.search(
-                keyword, limit=self.subreddit_post_limit
-            ):
-                posts.append(
-                    "**Title**: "
-                    + submission.title
-                    + "\n"
-                    + "**Post content**: "
-                    + (submission.selftext or "")[: self.subreddit_post_char_limit]
-                )
-
-            return posts
-
-
-class RedditDownloadAndClean(CurationStage):
+class RedditDownloadAndClean(SourceStage):
     """Download or synthesise subreddit data for selected candidates."""
 
     def __init__(
@@ -338,8 +286,8 @@ class RedditDownloadAndClean(CurationStage):
         self.anonymizer_batch_size = anonymizer_batch_size
 
     async def run(self, context: CurationContext, state: StageState) -> StageState:
-        condition_to_subreddit_map: dict[str, list[str]] = state.metadata.get(
-            "condition_to_subreddit_map", {}
+        condition_to_subreddit_map: dict[str, list[str]] = state.require_metadata(
+            "condition_to_subreddit_map", stage=self.stage_name
         )
         if not condition_to_subreddit_map:
             raise ValueError(
@@ -360,7 +308,7 @@ class RedditDownloadAndClean(CurationStage):
             )
             return state
 
-        source_dir = os.path.join(context.save_dir, f"{context.source_name}_data")
+        source_dir = self.source_dir(context)
         subs_data_dir = os.path.join(source_dir, "subreddits")
         os.makedirs(subs_data_dir, exist_ok=True)
 
@@ -399,13 +347,14 @@ class RedditDownloadAndClean(CurationStage):
             anonymizer = Anonymizer(score_threshold=self.anonymizer_score_threshold)
 
         if self.max_download_workers > 1:
+            worker = partial(
+                download_submissions_and_comments,
+                data_path=subs_data_dir,
+                anonymizer=anonymizer,
+                batch_size=self.anonymizer_batch_size,
+            )
             results = process_map(
-                partial(
-                    self._download_submissions_and_comments,
-                    data_path=subs_data_dir,
-                    anonymizer=anonymizer,
-                    batch_size=self.anonymizer_batch_size,
-                ),
+                worker,
                 subs_to_filter,
                 max_workers=self.max_download_workers,
                 desc=f"Downloading Reddit data [{self.max_download_workers} workers]",
@@ -413,15 +362,18 @@ class RedditDownloadAndClean(CurationStage):
                 position=0,
                 leave=True,
                 dynamic_ncols=True,
-                disable=len(subs_to_filter) == 0,  # disable if no subs to download
+                disable=len(subs_to_filter) == 0,
             )
             for clean_sub_path, sub in results:
                 if clean_sub_path is not None:
                     subreddit_cleaned_path_map[sub] = clean_sub_path
-        else:  # single-threaded download; avoids multiprocessing overhead
+        else:
             for sub in subs_to_filter:
-                clean_sub_path, _ = self._download_submissions_and_comments(
-                    sub, subs_data_dir, anonymizer, self.anonymizer_batch_size
+                clean_sub_path, _ = download_submissions_and_comments(
+                    sub,
+                    subs_data_dir,
+                    anonymizer=anonymizer,
+                    batch_size=self.anonymizer_batch_size,
                 )
                 if clean_sub_path is not None:
                     subreddit_cleaned_path_map[sub] = clean_sub_path
@@ -436,62 +388,8 @@ class RedditDownloadAndClean(CurationStage):
         )
         return state
 
-    def _download_submissions_and_comments(
-        self, sub: str, data_path: str, anonymizer: Anonymizer | None, batch_size: int
-    ) -> tuple[str | None, str]:
-        """Download submissions and comments for a given subreddit, then clean."""
-        clean_sub_path = os.path.join(data_path, f"{sub}_cleaned.parquet")
-        if os.path.exists(clean_sub_path):
-            return clean_sub_path, sub
 
-        try:
-            submissions_path = os.path.join(data_path, f"{sub}_submissions.parquet")
-            comments_path = os.path.join(data_path, f"{sub}_comments.parquet")
-            if not os.path.exists(submissions_path):
-                download_sub_data(
-                    sub,
-                    "submissions",
-                    data_path,
-                    anonymizer_instance=anonymizer,
-                    batch_size=batch_size,
-                )
-            if not os.path.exists(comments_path):
-                download_sub_data(
-                    sub,
-                    "comments",
-                    data_path,
-                    anonymizer_instance=anonymizer,
-                    batch_size=batch_size,
-                )
-
-            rule_filtered_df = self._clean_sub_data(data_path, sub)
-            rule_filtered_df.to_parquet(
-                clean_sub_path, index=False, compression="snappy"
-            )
-            # Delete the submissions and comments files after cleaning
-            os.remove(submissions_path)
-            os.remove(comments_path)
-        except Exception as e:
-            logger.error(f"Error processing subreddit {sub}: {e}")
-            return None, sub
-
-        return clean_sub_path, sub
-
-    @staticmethod
-    def _clean_sub_data(data_path: str, sub: str) -> pd.DataFrame:
-        """Clean submissions and comments for a given subreddit."""
-        submissions = pd.read_parquet(
-            os.path.join(data_path, f"{sub}_submissions.parquet")
-        )
-        submissions = rule_based_filter(submissions, "selftext")
-
-        comments = pd.read_parquet(os.path.join(data_path, f"{sub}_comments.parquet"))
-        comments = rule_based_filter(comments, "body")
-
-        return get_context_post_df(submissions, comments)
-
-
-class RedditCurateStage(CurationStage):
+class RedditCurateStage(SourceStage):
     """Curate subreddit data for each experiment."""
 
     def __init__(
@@ -504,8 +402,8 @@ class RedditCurateStage(CurationStage):
         self.max_workers = max_workers or max(1, (psutil.cpu_count(logical=False) or 1))
 
     async def run(self, context: CurationContext, state: StageState) -> StageState:
-        subreddit_cleaned_path_map: dict[str, str] = state.metadata.get(
-            "cleaned_paths", {}
+        subreddit_cleaned_path_map: dict[str, str] = state.require_metadata(
+            "cleaned_paths", stage=self.stage_name
         )
         if not subreddit_cleaned_path_map:
             raise ValueError(
@@ -515,11 +413,7 @@ class RedditCurateStage(CurationStage):
                 "run successfully before this stage."
             )
 
-        condition_segment = sanitize_filename(context.condition.lower())
-        study_dir = os.path.join(
-            state.metadata.get("source_dir", context.save_dir), condition_segment
-        )
-        os.makedirs(study_dir, exist_ok=True)
+        study_dir = self.condition_dir(context)
 
         condition_to_subreddit_map = context.study_dataset.sources.get(
             context.source_name, {}
@@ -550,9 +444,7 @@ class RedditCurateStage(CurationStage):
             treatment_names = experiment.get_all_treatment_names_for_source(
                 context.source_name
             )
-
-            # Compile regex pattern once and reuse it for all subreddits
-            treatment_pattern = self._compile_search_pattern(treatment_names)
+            treatment_pattern = build_term_pattern(treatment_names)
 
             cutoff_dt = None
             if context.filter_by_date and experiment.date:
@@ -582,7 +474,7 @@ class RedditCurateStage(CurationStage):
                 futures = []
                 for path in clean_data_paths:
                     future = executor.submit(
-                        self._get_study_relevant_posts,
+                        get_study_relevant_posts,
                         path,
                         treatment_pattern,
                         cutoff_dt,
@@ -662,66 +554,9 @@ class RedditCurateStage(CurationStage):
             self.stage_name,
             len(curated_paths),
         )
-        context.study_dataset.data_paths.update(curated_paths)
-        context.study_dataset.data_sizes.update(curated_data_sizes)
-        context.study_dataset.to_yaml(context.extras["study_dataset_file"])
-        return state
-
-    @staticmethod
-    def _get_study_relevant_posts(
-        clean_data_path: str,
-        treatment_pattern: re.Pattern,
-        cutoff_dt: pd.Timestamp | None,
-    ) -> pd.DataFrame:
-        """Get posts from cleaned Reddit data that mention both treatments and outcomes."""
-        df = pd.read_parquet(clean_data_path)
-        if not df.empty and cutoff_dt is not None:
-            df = filter_by_date(df, cutoff_dt, "date_created")
-
-        if df.empty:
-            return pd.DataFrame()
-
-        text_cols = ["subreddit", "title", "report_text", "initial_post"]
-        for col in text_cols:
-            df[col] = df[col].fillna("").astype(str)
-
-        # Find mentions of treatments and outcomes in each text column
-        treatment_finds = [
-            df[col].str.lower().str.findall(treatment_pattern) for col in text_cols
-        ]
-
-        # Check if ANY column had a match for each row.
-        has_treatment_mask = np.any([s.str.len() > 0 for s in treatment_finds], axis=0)
-
-        result: pd.DataFrame = df[has_treatment_mask].copy()
-        if result.empty:
-            return result
-
-        # Aggregate a unique list of words from the pre-computed finds.
-        valid_treatment_finds = [s[has_treatment_mask] for s in treatment_finds]
-
-        # Create a new DataFrame with unique mentions
-        result["treatments_mentioned"] = [
-            list({item for sublist in row for item in sublist})
-            for row in zip(*valid_treatment_finds)
-        ]
-
-        return result.reset_index(drop=True)
-
-    @staticmethod
-    def _compile_search_pattern(terms: set[str]) -> re.Pattern:
-        """Compile a re pattern for searching terms in text."""
-        if not terms:
-            return re.compile(r"(?!)")  # Always false pattern
-
-        # Sort terms by length (longest first) to allow the regex engine to skip smaller
-        # terms that are substrings of larger terms
-        terms_sorted = sorted(terms, key=len, reverse=True)
-
-        # Escape each name to treat special characters (like '+', '.', '*') literally.
-        escaped_terms = [re.escape(term) for term in terms_sorted]
-
-        # Join the escaped names with the '|' (OR) operator.
-        return re.compile(
-            r"(?:{})".format("|".join(escaped_terms)), flags=re.IGNORECASE
+        self.persist_dataset(
+            context,
+            per_experiment_paths=curated_paths,
+            per_experiment_sizes=curated_data_sizes,
         )
+        return state

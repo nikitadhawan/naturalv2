@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -11,27 +10,17 @@ import pandas as pd
 from tqdm.asyncio import tqdm as tqdm_asyncio
 
 from naturalv2.experiment import Experiment
-from naturalv2.sources.curation import CurationContext, CurationStage, StageState
+from naturalv2.sources.components.dates import filter_by_date
+from naturalv2.sources.components.text import tokenize_casefold
+from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
-from naturalv2.sources.reddit.utils import filter_by_date
-from naturalv2.utils import concurrency_limited, sanitize_filename
+from naturalv2.utils import concurrency_limited
 
 
 logger = logging.getLogger(__name__)
 
 
-_TOKEN_PATTERN = re.compile(r"\b[\w-]+\b")
-
-
-def _tokenize_casefold(text: str) -> set[str]:
-    """Return a casefolded token set for exact token matching."""
-
-    if not text:
-        return set()
-    return set(_TOKEN_PATTERN.findall(text.casefold()))
-
-
-class PubMedConditionFilter(CurationStage):
+class PubMedConditionFilter(SourceStage):
     """Stage to construct PubMed queries for each experiment condition.
 
     Parameters
@@ -74,9 +63,8 @@ class PubMedConditionFilter(CurationStage):
                 for query in queries
             ]
         )
-        query_log_path = os.path.join(
-            context.save_dir, f"{context.source_name}_data", "queries.csv"
-        )
+        source_dir = self.source_dir(context)
+        query_log_path = os.path.join(source_dir, "queries.csv")
         df.to_csv(query_log_path, index=False)
 
         state.payload = trial_query_map
@@ -127,7 +115,7 @@ class PubMedConditionFilter(CurationStage):
         )
 
 
-class PubMedFetchAndClean(CurationStage):
+class PubMedFetchAndClean(SourceStage):
     """Download and normalize PubMed case reports for experiments.
 
     This stage issues PubMed queries for each experiment condition, writes the
@@ -192,17 +180,16 @@ class PubMedFetchAndClean(CurationStage):
         ValueError
             If `trial_query_map` is missing from `state.metadata`.
         """
-        trial_query_map: dict[str, list[str]] = state.metadata.get(
-            "trial_query_map", {}
+        trial_query_map: dict[str, list[str]] = state.require_metadata(
+            "trial_query_map", stage=self.stage_name
         )
         if not trial_query_map:
             raise ValueError(
-                f"{self.stage_name}: missing trial_query_map; "
+                f"{self.stage_name}: empty trial_query_map; "
                 "ensure that PubMedConditionFilter has been run previously."
             )
 
-        source_dir = os.path.join(context.save_dir, f"{context.source_name}_data")
-        os.makedirs(source_dir, exist_ok=True)
+        source_dir = self.source_dir(context)
 
         semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         with ThreadPoolExecutor() as executor:
@@ -222,6 +209,7 @@ class PubMedFetchAndClean(CurationStage):
         state.payload = nctid_clean_path_map
         state.update(
             cleaned_paths=nctid_clean_path_map,
+            nctid_clean_path_map=nctid_clean_path_map,
             source_dir=source_dir,
             num_case_reports_fetched=num_case_reports_fetched,
             num_case_reports_cleaned=num_case_reports_cleaned,
@@ -236,10 +224,12 @@ class PubMedFetchAndClean(CurationStage):
                 ", ".join(sorted(trials_with_no_case_reports)),
             )
 
-        context.study_dataset.data_paths[f"{context.source_name}_cleaned"] = list(
-            nctid_clean_path_map.values()
+        self.persist_dataset(
+            context,
+            namespace_paths={
+                f"{context.source_name}_cleaned": list(nctid_clean_path_map.values())
+            },
         )
-        context.study_dataset.to_yaml(context.extras["study_dataset_path"])
         return state
 
     def clean(
@@ -521,7 +511,7 @@ class PubMedFetchAndClean(CurationStage):
         return case_reports, (query, experiment)
 
 
-class PubMedCurateStage(CurationStage):
+class PubMedCurateStage(SourceStage):
     """Curate PubMed articles per experiment.
 
     Parameters
@@ -556,19 +546,15 @@ class PubMedCurateStage(CurationStage):
         StageState
             Updated state with curated file paths.
         """
-        cleaned_paths_map: dict[str, str] = state.metadata.get(
-            "nctid_clean_path_map", {}
+        cleaned_paths_map: dict[str, str] = state.require_metadata(
+            "nctid_clean_path_map", stage=self.stage_name
         )
         if not cleaned_paths_map:
             raise ValueError(
                 f"{self.stage_name}: No cleaned case report paths found in state."
             )
 
-        condition_segment = sanitize_filename(context.condition.lower())
-        study_dir = os.path.join(
-            state.metadata.get("source_dir", context.save_dir), condition_segment
-        )
-        os.makedirs(study_dir, exist_ok=True)
+        study_dir = self.condition_dir(context)
 
         curated_paths: dict[str, str] = {}
         curated_data_sizes: dict[str, int] = {}
@@ -614,7 +600,7 @@ class PubMedCurateStage(CurationStage):
             for alias in sorted(treatment_names):
                 if not alias:
                     continue
-                tokens = _tokenize_casefold(alias)
+                tokens = tokenize_casefold(alias)
                 if tokens:
                     alias_token_map[alias] = tokens
 
@@ -627,7 +613,7 @@ class PubMedCurateStage(CurationStage):
                 continue
 
             reports = df["report"].fillna("").astype(str)
-            report_tokens = reports.apply(_tokenize_casefold)
+            report_tokens = reports.apply(tokenize_casefold)
 
             def match_treatments(tokens, alias_token_map=alias_token_map):
                 return [
@@ -663,7 +649,9 @@ class PubMedCurateStage(CurationStage):
             len(curated_paths),
             total_rows,
         )
-        context.study_dataset.data_paths.update(curated_paths)
-        context.study_dataset.data_sizes.update(curated_data_sizes)
-        context.study_dataset.to_yaml(context.extras["study_dataset_file"])
+        self.persist_dataset(
+            context,
+            per_experiment_paths=curated_paths,
+            per_experiment_sizes=curated_data_sizes,
+        )
         return state

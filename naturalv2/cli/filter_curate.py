@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 
 import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.experiment import Experiment
-from naturalv2.sources.curation import (
+from naturalv2.sources.core import (
     CurationContext,
     CurationStage,
     FilterCurateRunner,

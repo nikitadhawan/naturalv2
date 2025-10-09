@@ -19,7 +19,6 @@ from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.utils import ListResponse
 
-
 if TYPE_CHECKING:
     from naturalv2.models.lm import APIModel
 
@@ -85,7 +84,9 @@ async def extract_curation_info(  # noqa: PLR0912
             ~extraction_inputs.index.isin(existing_data.index)
         ]
         logger.info(
-            f"Found {len(existing_data)} existing records, {len(extraction_inputs)} left to process."
+            "Found %d existing records, %d left to process.",
+            len(existing_data),
+            len(extraction_inputs),
         )
         if len(extraction_inputs) == 0:
             return existing_data
@@ -174,7 +175,7 @@ async def extract_curation_info(  # noqa: PLR0912
             f"{processing_error_count} errors"
         )
     except BaseException as e:
-        logger.error(f"Error during curation: {e}", exc_info=True)
+        logger.error("Error during curation: %s", e, exc_info=True)
         # Cancel any running tasks
         for task in [csv_writer_task, producer_task] + worker_tasks:
             if not task.done():

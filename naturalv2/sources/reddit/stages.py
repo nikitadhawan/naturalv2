@@ -43,7 +43,6 @@ from naturalv2.sources.reddit.operations import (
 )
 from naturalv2.sources.reddit.utils import get_sub_about_info
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -532,7 +531,7 @@ class RedditDownloadAndClean(SourceStage):
         subs_to_filter: list[str] = []
         for sub in available_subs:
             clean_sub_path = os.path.join(subs_data_dir, f"{sub}_cleaned.parquet")
-            if clean_sub_path and os.path.exists(clean_sub_path):
+            if os.path.exists(clean_sub_path):
                 subreddit_cleaned_path_map[sub] = clean_sub_path
             else:
                 subs_to_filter.append(sub)
@@ -603,7 +602,11 @@ class RedditCurateStage(SourceStage):
         for experiment in context.experiments:
             save_path = os.path.join(study_dir, f"reddit_{experiment.nct_id}.csv")
             if os.path.exists(save_path):
-                # TODO: log
+                logger.info(
+                    "Skipping experiment %s as curated data already exists at %s",
+                    experiment.nct_id,
+                    save_path,
+                )
                 continue
 
             # Get subreddits relevant to this experiment

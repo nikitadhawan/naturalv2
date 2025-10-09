@@ -265,8 +265,7 @@ def normalize_treatment(name: str) -> str:
     )
     # Remove punctuation and extra spaces
     name = re.sub(r"[^a-z\s]", " ", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def check_binary_endpoint(text: str) -> bool:

@@ -15,7 +15,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-_TOKEN_PATTERN = re.compile(r"\b[\p{L}\p{N}_-]+\b")
+# Match runs of unicode word characters and hyphens (letters, digits, underscore, hyphen)
+_TOKEN_PATTERN = re.compile(r"\b[\w-]+\b", flags=re.UNICODE)
 
 
 def tokenize_casefold(text: str) -> set[str]:
@@ -25,7 +26,7 @@ def tokenize_casefold(text: str) -> set[str]:
     ----------
     text : str
         Input text to split into tokens. Tokens are sequences of word
-        characters or hyphens (regex ``\b[\p{L}\p{N}_-]+\b``), matched case-insensitively.
+        characters or hyphens (regex ``\b[\w-]+\b``), matched case-insensitively.
 
     Returns
     -------

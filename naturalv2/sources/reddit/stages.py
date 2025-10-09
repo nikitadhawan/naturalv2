@@ -685,40 +685,9 @@ class RedditCurateStage(SourceStage):
                 continue
 
             # Concatenate all DataFrames, format reports, and save to CSV
-            final_df = pd.concat(curated_experiment_data, ignore_index=True)
-            post_mask = final_df["report_type"] == "submission"
-            final_df.loc[post_mask, "report"] = (
-                "**Subreddit**\nThis post was found on the subreddit r/"
-                + final_df.loc[post_mask, "subreddit"].astype(str)
-                + ".\n\n"
-                + "**Title**\nThis post was titled: "
-                + final_df.loc[post_mask, "title"].astype(str)
-                + "\n\n"
-                + "**Date created**\nThis post was created on "
-                + final_df.loc[post_mask, "date_created"].astype(str)
-                + ".\n\n"
-                + "**Post**\n"
-                + final_df.loc[post_mask, "report_text"].astype(str)
+            final_df = self._format_and_save_curated_data(
+                curated_experiment_data, save_path
             )
-            comment_mask = final_df["report_type"] == "comment"
-            final_df.loc[comment_mask, "report"] = (
-                "**Subreddit**\nThis comment was found on the subreddit r/"
-                + final_df.loc[comment_mask, "subreddit"].astype(str)
-                + ".\n\n"
-                + "**Initial Post**\nThis comment was in response to the following post: "
-                + "\nTitle: "
-                + final_df.loc[comment_mask, "title"].astype(str)
-                + "\nPost content: "
-                + final_df.loc[comment_mask, "initial_post"].astype(str)
-                + "\n\n"
-                + "**Date created**\nThis comment was created on "
-                + final_df.loc[comment_mask, "date_created"].astype(str)
-                + ".\n\n"
-                + "**Comment**\n"
-                + final_df.loc[comment_mask, "report_text"].astype(str)
-            )
-            final_df = final_df.drop_duplicates("report")
-            final_df.to_csv(save_path, index=False)
 
             curated_paths[experiment.nct_id] = save_path
             curated_data_sizes[experiment.nct_id] = len(final_df)
@@ -744,3 +713,45 @@ class RedditCurateStage(SourceStage):
             per_experiment_sizes=curated_data_sizes,
         )
         return state
+
+    def _format_and_save_curated_data(
+        self,
+        curated_experiment_data: list[pd.DataFrame],
+        save_path: str,
+    ) -> pd.DataFrame:
+        """Helper to format and save curated data to CSV."""
+        final_df = pd.concat(curated_experiment_data, ignore_index=True)
+        post_mask = final_df["report_type"] == "submission"
+        final_df.loc[post_mask, "report"] = (
+            "**Subreddit**\nThis post was found on the subreddit r/"
+            + final_df.loc[post_mask, "subreddit"].astype(str)
+            + ".\n\n"
+            + "**Title**\nThis post was titled: "
+            + final_df.loc[post_mask, "title"].astype(str)
+            + "\n\n"
+            + "**Date created**\nThis post was created on "
+            + final_df.loc[post_mask, "date_created"].astype(str)
+            + ".\n\n"
+            + "**Post**\n"
+            + final_df.loc[post_mask, "report_text"].astype(str)
+        )
+        comment_mask = final_df["report_type"] == "comment"
+        final_df.loc[comment_mask, "report"] = (
+            "**Subreddit**\nThis comment was found on the subreddit r/"
+            + final_df.loc[comment_mask, "subreddit"].astype(str)
+            + ".\n\n"
+            + "**Initial Post**\nThis comment was in response to the following post: "
+            + "\nTitle: "
+            + final_df.loc[comment_mask, "title"].astype(str)
+            + "\nPost content: "
+            + final_df.loc[comment_mask, "initial_post"].astype(str)
+            + "\n\n"
+            + "**Date created**\nThis comment was created on "
+            + final_df.loc[comment_mask, "date_created"].astype(str)
+            + ".\n\n"
+            + "**Comment**\n"
+            + final_df.loc[comment_mask, "report_text"].astype(str)
+        )
+        final_df = final_df.drop_duplicates("report")
+        final_df.to_csv(save_path, index=False)
+        return final_df

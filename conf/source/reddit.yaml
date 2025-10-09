@@ -1,8 +1,25 @@
-_target_: naturalv2.sources.reddit.RedditSource
-data_path: ${data_path}/reddit_data
-max_download_workers: null
-reddit_api_qpm: 90 # QPM is 100 with OAuth and 10 without; 90 allows for some buffer
-max_llm_concurrency: 10
-anonymize: False
-anonymizer_score_threshold: 0.85
-anonymizer_batch_size: 1000
+# @package _global_
+
+stages:
+  condition_filter:
+    _target_: naturalv2.sources.reddit.RedditConditionFilter
+    llm: ${sample_model}
+    llm_max_concurrency: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, 10}
+    reddit_rpm: 95 # QPM is 100 with OAuth and 10 without; 95 allows for some buffer
+    subreddit_post_limit: 5
+    subreddit_post_char_limit: 1000
+  download_and_clean:
+    _target_: naturalv2.sources.reddit.RedditDownloadAndClean
+    reddit_rpm: 95
+    max_download_workers: null
+    anonymize: False
+    anonymizer_score_threshold: 0.85
+    anonymizer_batch_size: 1000
+  treatment_synonyms:
+    _target_: naturalv2.sources.stages.SynonymStage
+    attribute: treatment
+    llm: ${search_model}
+    max_concurrent_workers: ${coalesce:search_model.max_parallel_requests, search_model.client_kwargs.default_max_parallel_requests, 10}
+  curate:
+    _target_: naturalv2.sources.reddit.RedditCurateStage
+    max_workers: null

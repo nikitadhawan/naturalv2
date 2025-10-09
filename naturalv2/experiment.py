@@ -453,6 +453,35 @@ class Experiment:
         with open(filename, "w") as file:
             yaml.safe_dump(self.__dict__, file)
 
+    def get_all_treatment_names_for_source(self, source: str) -> list[str]:
+        """Get all treatment names for a given data source.
+
+        This method retrieves all treatment names associated with a specified data
+        source. It combines treatment names from DrugBank aliases and common names
+        specific to the source, ensuring that all names are in lowercase for
+        consistency.
+
+        Parameters
+        ----------
+        source : str
+            The name of the data source for which to retrieve treatment names.
+
+        Returns
+        -------
+        list[str]
+            A list of treatment names associated with the specified data source.
+        """
+        drugbank_names = [
+            item for sublist in self.drugbank_names.values() for item in sublist
+        ]
+        common_names = set()
+        for name, aliases in self.treatment_common_names.get(source, {}).items():
+            common_names.add(name.lower())
+            for alias in aliases:
+                common_names.add(alias.lower())
+
+        return list(common_names.union(set(drugbank_names)))
+
     def hard_filter_ty(self, extractions: pd.DataFrame) -> pd.DataFrame:
         """Filter out rows that don't mention the treatment(s) and outcome(s) of interest.
 

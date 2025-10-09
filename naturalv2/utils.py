@@ -123,6 +123,24 @@ async def concurrency_limited(coro: Coroutine, semaphore: asyncio.Semaphore) -> 
         return await coro
 
 
+def get_experiment_filepath(root_dir: str, nct_id: str) -> str:
+    """Get the file path for an experiment YAML file.
+
+    Parameters
+    ----------
+    root_dir : str
+        The root directory where experiments are stored.
+    nct_id : str
+        The National Clinical Trial ID (NCT ID) of the clinical trial.
+
+    Returns
+    -------
+    str
+        The full file path for the experiment YAML file.
+    """
+    return os.path.join(root_dir, "experiments", f"{nct_id}.yaml")
+
+
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename by replacing disallowed characters with underscores.
 

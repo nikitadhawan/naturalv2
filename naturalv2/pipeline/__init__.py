@@ -9,7 +9,6 @@ from naturalv2.pipeline.constants import (
     OUTCOME_COL_NAME,
     TREATMENT_COL_NAME,
 )
-from naturalv2.pipeline.curation import CurationContext, CurationStage
 from naturalv2.pipeline.natural import NATURALPipeline, PipelineContext, PipelineStage
 from naturalv2.pipeline.sample_extraction import (
     ImputationsStage,

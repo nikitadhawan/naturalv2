@@ -1,5 +1,0 @@
-_target_: naturalv2.sources.pubmed.PubMedSet
-data_path: ${data_path}/pubmed_data/
-download: False
-api_key: 21abb90a946cad9a035d79910df3b36be809 # UofT
-# api_key: 9128a00b7b37cf696e4ee0117f163a6a8708

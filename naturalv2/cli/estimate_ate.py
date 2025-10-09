@@ -18,6 +18,7 @@ from naturalv2.estimators import NaturalIPW, NaturalMC, NaturalOI
 from naturalv2.experiment import Experiment
 from naturalv2.pipeline import NATURALPipeline, PipelineContext, PipelineStage
 from naturalv2.study import Study, get_study_filepaths
+from naturalv2.utils import get_experiment_filepath
 
 
 load_dotenv()
@@ -223,7 +224,7 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
 
     # Load the experiment configuration
     try:
-        exp_file = os.path.join(cfg.save_path, "experiments", f"{nct_id}.yaml")
+        exp_file = get_experiment_filepath(cfg.save_path, nct_id)
         experiment = Experiment.from_yaml(exp_file)
     except (FileNotFoundError, ValueError) as e:
         logger.error(

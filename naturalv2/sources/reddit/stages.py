@@ -238,71 +238,90 @@ class RedditConditionFilter(SourceStage):
         ) as reddit_client:
             reddit_rate_limiter = AsyncLimiter(self.reddit_rpm)
 
-            subreddit_tasks: list[asyncio.Task[list[str]]] = []
-            task_to_keyword: dict[asyncio.Task[list[str]], str] = {}
-            for keyword in keywords:
-                task = asyncio.create_task(
-                    search_subreddits(keyword, reddit_client, reddit_rate_limiter)
-                )
-                task_to_keyword[task] = keyword
-                subreddit_tasks.append(task)
+            async def _search(
+                keyword: str,
+            ) -> tuple[str, list[str] | Exception]:
+                """Search for subreddits with a keyword."""
+                try:
+                    subs = await search_subreddits(
+                        keyword, reddit_client, reddit_rate_limiter
+                    )
+                    return keyword, subs
+                except Exception as exc:  # noqa: BLE001
+                    return keyword, exc
+
+            tasks = [asyncio.create_task(_search(keyword)) for keyword in keywords]
 
             candidate_subs_per_keyword: dict[str, list[str]] = {}
-            for task in tqdm_asyncio.as_completed(
-                subreddit_tasks,
+            for fut in tqdm_asyncio.as_completed(
+                tasks,
                 desc="Searching subreddits",
-                total=len(subreddit_tasks),
+                total=len(tasks),
                 leave=False,
                 dynamic_ncols=True,
             ):
-                keyword = task_to_keyword[task]
-                try:
-                    result = await task
+                keyword, result = await fut
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Searching for subreddits with keyword '%s' failed with error: %s",
+                        keyword,
+                        result,
+                    )
+                else:
                     candidate_subs_per_keyword[keyword] = result
-                    logger.info(
+                    logger.debug(
                         "Found %d candidate subreddits for keyword '%s'",
                         len(result),
                         keyword,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "Searching for subreddits with keyword '%s' failed with error: %s",
-                        keyword,
-                        exc,
-                    )
 
-            post_search_tasks: list[asyncio.Task[list[str]]] = []
-            task_metadata: list[tuple[str, str]] = []
+            async def _fetch_posts(
+                keyword: str, subreddit: str
+            ) -> tuple[str, str, list[str] | Exception]:
+                """Fetch posts for a keyword/subreddit pair and surface errors."""
+                try:
+                    posts = await search_posts_in_subreddit(
+                        subreddit,
+                        keyword,
+                        reddit_client,
+                        reddit_rate_limiter,
+                        limit=self.subreddit_post_limit,
+                        char_limit=self.subreddit_post_char_limit,
+                    )
+                    return keyword, subreddit, posts
+                except Exception as exc:  # noqa: BLE001
+                    return keyword, subreddit, exc
+
+            post_search_tasks: list[
+                asyncio.Task[tuple[str, str, list[str] | Exception]]
+            ] = []
             for keyword, candidate_subs in candidate_subs_per_keyword.items():
                 for subreddit in candidate_subs:
-                    task = asyncio.create_task(
-                        search_posts_in_subreddit(
-                            subreddit,
-                            keyword,
-                            reddit_client,
-                            reddit_rate_limiter,
-                            limit=self.subreddit_post_limit,
-                            char_limit=self.subreddit_post_char_limit,
-                        )
+                    post_search_tasks.append(
+                        asyncio.create_task(_fetch_posts(keyword, subreddit))
                     )
-                    post_search_tasks.append(task)
-                    task_metadata.append((keyword, subreddit))
 
-            post_search_results: list[list[str] | Exception]
-            post_search_results = await tqdm_asyncio.gather(
-                *post_search_tasks,
+            results_by_keyword: dict[
+                str, dict[str, list[str] | dict[str, str | list[str]]]
+            ] = {
+                keyword: {
+                    "candidate_subs": candidate_subs,
+                    "subreddit_posts": [],
+                }
+                for keyword, candidate_subs in candidate_subs_per_keyword.items()
+            }
+
+            if not post_search_tasks:
+                return results_by_keyword
+
+            for fut in tqdm_asyncio.as_completed(
+                post_search_tasks,
                 desc="Searching posts",
                 total=len(post_search_tasks),
                 leave=False,
                 dynamic_ncols=True,
-                return_exceptions=True,
-            )
-
-            results_by_keyword: dict[
-                str, dict[str, list[str] | dict[str, str | list[str]]]
-            ] = {}
-
-            for (keyword, subreddit), posts in zip(task_metadata, post_search_results):
+            ):
+                keyword, subreddit, posts = await fut
                 if isinstance(posts, Exception):
                     logger.error(
                         "Could not fetch posts for subreddit '%s' and keyword '%s': %s",
@@ -311,15 +330,7 @@ class RedditConditionFilter(SourceStage):
                         posts,
                     )
                 else:
-                    results_by_keyword.setdefault(
-                        keyword,
-                        {
-                            "candidate_subs": candidate_subs_per_keyword.get(
-                                keyword, []
-                            ),
-                            "subreddit_posts": [],
-                        },
-                    )["subreddit_posts"].append(
+                    results_by_keyword[keyword]["subreddit_posts"].append(
                         {"subreddit": subreddit, "posts": posts}
                     )
 

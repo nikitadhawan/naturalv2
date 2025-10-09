@@ -19,6 +19,7 @@ from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.utils import ListResponse
 
+
 if TYPE_CHECKING:
     from naturalv2.models.lm import APIModel
 

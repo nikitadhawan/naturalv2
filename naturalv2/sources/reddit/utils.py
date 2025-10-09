@@ -6,8 +6,9 @@ import glob
 import json
 import logging
 import os
+import ssl
 import warnings
-from typing import TYPE_CHECKING, Generator, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Generator, Literal, Optional, TypeVar
 from urllib import error, request
 
 import asyncpraw
@@ -35,6 +36,37 @@ warnings.simplefilter("ignore", UserWarning)
 warnings.simplefilter("ignore", FutureWarning)
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+_INSECURE_SSL_CONTEXT = ssl.create_default_context()
+_INSECURE_SSL_CONTEXT.check_hostname = False
+_INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+
+def _with_tls_fallback(
+    url: str,
+    fetch: Callable[[str, Optional[ssl.SSLContext]], _T],
+    *,
+    description: str,
+) -> _T:
+    """Execute ``fetch`` for ``url`` with an insecure TLS fallback if verification fails."""
+
+    # First attempt uses system verification
+    try:
+        return fetch(url, None)
+    except error.URLError as exc:
+        ssl_error = getattr(exc, "reason", None)
+        is_ssl_failure = isinstance(ssl_error, ssl.SSLCertVerificationError)
+        if not (is_ssl_failure and url.startswith("https://")):
+            raise
+
+        logger.warning(
+            "TLS verification failed while %s from %s; retrying without certificate verification.",
+            description,
+            url,
+        )
+        return fetch(url, _INSECURE_SSL_CONTEXT)
 
 
 def is_retryable_error(exception: BaseException) -> bool:
@@ -204,8 +236,18 @@ def download_subs_list(data_path: str) -> str:
     if not os.path.exists(filepath):
         logger.info("Downloading the list of subreddits from The Eye archive...")
         url = "https://the-eye.eu/redarcs/"
-        response = request.urlopen(url)
-        html: str = response.read().decode("utf-8")
+
+        def _fetch_html(target_url: str, context: Optional[ssl.SSLContext]) -> str:
+            if context is None:
+                with request.urlopen(target_url) as response:
+                    return response.read().decode("utf-8")
+
+            with request.urlopen(target_url, context=context) as response:
+                return response.read().decode("utf-8")
+
+        html: str = _with_tls_fallback(
+            url, _fetch_html, description="fetching subreddit index"
+        )
 
         # Extract subreddit names from links
         subs = []
@@ -281,10 +323,27 @@ def download_sub_data(
         original_cwd = os.getcwd()
         try:
             os.chdir(tmpdir)
-            _ = wget.download(
-                f"https://the-eye.eu/redarcs/files/{subreddit}_{data_type}.zst",
-                out=data_path,
-                bar=None,
+            url = f"https://the-eye.eu/redarcs/files/{subreddit}_{data_type}.zst"
+
+            def _download(target_url: str, context: Optional[ssl.SSLContext]) -> str:
+                if context is None:
+                    return wget.download(target_url, out=data_path, bar=None)
+
+                opener = request.build_opener(request.HTTPSHandler(context=context))
+                previous_opener = request._opener  # type: ignore[attr-defined]
+                try:
+                    request.install_opener(opener)
+                    return wget.download(target_url, out=data_path, bar=None)
+                finally:
+                    if previous_opener is None:
+                        request._opener = None  # type: ignore[attr-defined]
+                    else:
+                        request.install_opener(previous_opener)
+
+            _with_tls_fallback(
+                url,
+                _download,
+                description=f"downloading {subreddit} {data_type} archive",
             )
         finally:
             os.chdir(original_cwd)

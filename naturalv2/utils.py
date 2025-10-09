@@ -238,17 +238,17 @@ def check_noncontrol(intervention_type: ArmGroupType | None) -> bool:
     bool
         True if the intervention type is not a control group, False otherwise.
     """
-    return (
-        intervention_type != ArmGroupType.NO_INTERVENTION
-        and intervention_type != ArmGroupType.PLACEBO_COMPARATOR
-        and intervention_type != ArmGroupType.SHAM_COMPARATOR
+    return intervention_type not in (
+        ArmGroupType.NO_INTERVENTION,
+        ArmGroupType.PLACEBO_COMPARATOR,
+        ArmGroupType.SHAM_COMPARATOR,
     )
 
 
 def check_arm(intervention_type: ArmGroupType | None) -> bool:
-    return (
-        intervention_type == ArmGroupType.ACTIVE_COMPARATOR
-        or intervention_type == ArmGroupType.EXPERIMENTAL
+    return intervention_type in (
+        ArmGroupType.ACTIVE_COMPARATOR,
+        ArmGroupType.EXPERIMENTAL,
     )
 
 

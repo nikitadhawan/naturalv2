@@ -6,8 +6,9 @@ import glob
 import json
 import logging
 import os
+import ssl
 import warnings
-from typing import TYPE_CHECKING, Generator, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Generator, Literal, Optional, TypeVar
 from urllib import error, request
 
 import asyncpraw
@@ -36,9 +37,52 @@ warnings.simplefilter("ignore", FutureWarning)
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
+_INSECURE_SSL_CONTEXT = ssl.create_default_context()
+_INSECURE_SSL_CONTEXT.check_hostname = False
+_INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+
+def _with_tls_fallback(
+    url: str,
+    fetch: Callable[[str, Optional[ssl.SSLContext]], _T],
+    *,
+    description: str,
+) -> _T:
+    """Execute ``fetch`` for ``url`` with an insecure TLS fallback if verification fails."""
+
+    # First attempt uses system verification
+    try:
+        return fetch(url, None)
+    except error.URLError as exc:
+        ssl_error = getattr(exc, "reason", None)
+        is_ssl_failure = isinstance(ssl_error, ssl.SSLCertVerificationError)
+        if not (is_ssl_failure and url.startswith("https://")):
+            raise
+
+        logger.warning(
+            "TLS verification failed while %s from %s; retrying without certificate verification.",
+            description,
+            url,
+        )
+        return fetch(url, _INSECURE_SSL_CONTEXT)
+
 
 def is_retryable_error(exception: BaseException) -> bool:
-    """Check if the exception is retryable."""
+    """Return whether an exception is retryable for Reddit requests.
+
+    Parameters
+    ----------
+    exception : BaseException
+        The exception raised by a request.
+
+    Returns
+    -------
+    bool
+        ``True`` if the exception corresponds to a transient HTTP error that
+        should be retried, ``False`` otherwise.
+    """
     return (
         isinstance(exception, asyncprawcore.exceptions.ResponseException)
         and exception.response.status in [429, 500, 502, 503, 504]
@@ -68,6 +112,12 @@ async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.Dat
     pd.DataFrame
         A DataFrame containing the subreddit names, descriptions, and public
         descriptions.
+
+    Raises
+    ------
+    ValueError
+        If required PRAW environment variables are missing. Required variables:
+        PRAW_CLIENT_ID, PRAW_CLIENT_SECRET, PRAW_PWD, PRAW_USERNAME, PRAW_AGENT.
 
     """
     # Load the CSV file if it exists and return as DataFrame
@@ -105,6 +155,21 @@ async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.Dat
 
     # Fetch about info for remaining subreddits and combine with existing data
     if len(remaining_subs) > 0:
+        # Validate required PRAW environment variables
+        required_vars = [
+            "PRAW_CLIENT_ID",
+            "PRAW_CLIENT_SECRET",
+            "PRAW_PWD",
+            "PRAW_USERNAME",
+            "PRAW_AGENT",
+        ]
+        missing_vars = [var for var in required_vars if not os.environ.get(var)]
+        if missing_vars:
+            raise ValueError(
+                f"Missing required PRAW environment variables: {', '.join(missing_vars)}. "
+                f"Please set all of: {', '.join(required_vars)}"
+            )
+
         async with asyncpraw.Reddit(
             client_id=os.environ.get("PRAW_CLIENT_ID"),
             client_secret=os.environ.get("PRAW_CLIENT_SECRET"),
@@ -171,8 +236,18 @@ def download_subs_list(data_path: str) -> str:
     if not os.path.exists(filepath):
         logger.info("Downloading the list of subreddits from The Eye archive...")
         url = "https://the-eye.eu/redarcs/"
-        response = request.urlopen(url)
-        html: str = response.read().decode("utf-8")
+
+        def _fetch_html(target_url: str, context: Optional[ssl.SSLContext]) -> str:
+            if context is None:
+                with request.urlopen(target_url) as response:
+                    return response.read().decode("utf-8")
+
+            with request.urlopen(target_url, context=context) as response:
+                return response.read().decode("utf-8")
+
+        html: str = _with_tls_fallback(
+            url, _fetch_html, description="fetching subreddit index"
+        )
 
         # Extract subreddit names from links
         subs = []
@@ -248,10 +323,27 @@ def download_sub_data(
         original_cwd = os.getcwd()
         try:
             os.chdir(tmpdir)
-            _ = wget.download(
-                f"https://the-eye.eu/redarcs/files/{subreddit}_{data_type}.zst",
-                out=data_path,
-                bar=None,
+            url = f"https://the-eye.eu/redarcs/files/{subreddit}_{data_type}.zst"
+
+            def _download(target_url: str, context: Optional[ssl.SSLContext]) -> str:
+                if context is None:
+                    return wget.download(target_url, out=data_path, bar=None)
+
+                opener = request.build_opener(request.HTTPSHandler(context=context))
+                previous_opener = request._opener  # type: ignore[attr-defined]
+                try:
+                    request.install_opener(opener)
+                    return wget.download(target_url, out=data_path, bar=None)
+                finally:
+                    if previous_opener is None:
+                        request._opener = None  # type: ignore[attr-defined]
+                    else:
+                        request.install_opener(previous_opener)
+
+            _with_tls_fallback(
+                url,
+                _download,
+                description=f"downloading {subreddit} {data_type} archive",
             )
         finally:
             os.chdir(original_cwd)
@@ -518,7 +610,26 @@ async def _fetch_sub_about(
     save_dir: str,
     rate_limiter: AsyncLimiter,
 ) -> dict[str, str | None]:
-    """Fetch subreddit about information from Reddit API or local JSON file."""
+    """Fetch subreddit about information from Reddit API or local JSON file.
+
+    Parameters
+    ----------
+    subreddit_name : str
+        The subreddit to fetch.
+    reddit_client : asyncpraw.Reddit
+        An authenticated async PRAW client.
+    save_dir : str
+        Directory to write a ``{subreddit_name}_about.json`` record.
+    rate_limiter : AsyncLimiter
+        Async limiter to bound API call rate.
+
+    Returns
+    -------
+    dict[str, str | None]
+        A dictionary with keys ``subreddit``, ``description`` and
+        ``public_description``. On failure, ``subreddit`` is set to ``"error"``
+        and an explanatory ``description`` is provided.
+    """
     about_info = {"subreddit": "error", "description": None, "public_description": None}
     async with rate_limiter:
         try:
@@ -567,7 +678,18 @@ async def _fetch_sub_about(
 
 
 def _read_lines_zst(file_name: str) -> Generator[tuple[str, int], None, None]:
-    """Read lines from a zstandard compressed file."""
+    """Yield lines from a zstandard compressed file.
+
+    Parameters
+    ----------
+    file_name : str
+        Path to a ``.zst`` file.
+
+    Yields
+    ------
+    tuple[str, int]
+        A tuple of the decoded line and the current file position.
+    """
     with open(file_name, "rb") as file_handle:
         buffer = ""
         reader = zstandard.ZstdDecompressor(max_window_size=2**31).stream_reader(
@@ -594,7 +716,32 @@ def _read_and_decode(
     previous_chunk: Optional[bytes] = None,
     bytes_read: int = 0,
 ) -> str:
-    """Read and decode a chunk from the zstandard stream."""
+    """Read and decode a chunk from the zstandard stream.
+
+    Parameters
+    ----------
+    reader : zstandard.ZstdDecompressionReader
+        Open decompression reader.
+    chunk_size : int
+        Number of bytes to read in each chunk.
+    max_window_size : int
+        Maximum total bytes to attempt to decode before giving up.
+    previous_chunk : bytes | None, optional
+        Previous undecoded bytes to prepend to the next chunk.
+    bytes_read : int, default=0
+        Running total of bytes read so far, used for error messages.
+
+    Returns
+    -------
+    str
+        Decoded text for the current chunk or, on partial failures, for the
+        concatenation of previous and current chunks.
+
+    Raises
+    ------
+    UnicodeError
+        If decoding fails after reading more than ``max_window_size`` bytes.
+    """
     chunk = reader.read(chunk_size)
     bytes_read += chunk_size
 
@@ -613,16 +760,49 @@ def _read_and_decode(
 
 
 def _get_submission_permalink(permalink: str) -> str:
-    """Extracts the submission permalink from a full Reddit permalink."""
+    """Extract the submission permalink from a full Reddit permalink.
+
+    Parameters
+    ----------
+    permalink : str
+        Full permalink string from Reddit data.
+
+    Returns
+    -------
+    str
+        A normalized submission permalink of the form ``/comments/<id>/``.
+    """
     return "/" + permalink.split("/")[-2] + "/"
 
 
 def _get_comment_permalink(permalink: str) -> str:
-    """Extracts the comment permalink from a full Reddit permalink."""
+    """Extract the comment permalink from a full Reddit permalink.
+
+    Parameters
+    ----------
+    permalink : str
+        Full permalink string from Reddit data.
+
+    Returns
+    -------
+    str
+        A normalized comment permalink of the form ``/comments/<id>/``.
+    """
     return "/" + permalink.split("/")[-3] + "/"
 
 
 def _get_date(utc_timestamp: float) -> str:
-    """Convert a UTC timestamp to a formatted date string."""
+    """Convert a UTC timestamp to a formatted date string.
+
+    Parameters
+    ----------
+    utc_timestamp : float
+        Seconds since the Unix epoch (UTC).
+
+    Returns
+    -------
+    str
+        A human-friendly date string (e.g., ``"January 01, 2024"``).
+    """
     dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
     return dt.strftime("%B %d, %Y")

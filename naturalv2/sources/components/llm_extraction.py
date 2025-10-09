@@ -1,8 +1,14 @@
-"""Shared curation stages and utilities."""
+"""LLM extraction helpers for curation stages.
+
+This module provides the shared, asynchronous machinery for transforming
+tabular inputs into LLM prompts, invoking the model with bounded
+concurrency, and writing results to disk while tracking token usage.
+"""
 
 import asyncio
 import logging
 import os
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -21,11 +27,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class ExtractType(str, Enum):
+    """Fixed extraction task types used across sources.
+
+    Notes
+    -----
+    Dynamic task types (for example synonym tasks parameterized by an
+    attribute, such as ``"synonym_treatment"``) may still use plain strings.
+    Public APIs in this module accept either this enum or string values.
+    """
+
+    CONDITION = "condition"
+    SYNONYM_TREATMENT = "synonym_treatment"
+
+
 async def extract_curation_info(  # noqa: PLR0912
-    input_df: pd.DataFrame,
+    extraction_inputs: pd.DataFrame,
     stage_name: str,
     source_name: str,
-    extract_type: str,
+    extract_type: ExtractType | str,
     llm: "APIModel",
     file_path: str,
     token_tracker: TokenTracker,
@@ -33,48 +53,47 @@ async def extract_curation_info(  # noqa: PLR0912
 ) -> pd.DataFrame:
     """Extract curation information using an LLM.
 
-    This function processes an input DataFrame using an LLM to extract curation information.
-
     Parameters
     ----------
-    input_df : pd.DataFrame
-        DataFrame containing input data for the LLM.
+    extraction_inputs : pandas.DataFrame
+        Input rows to transform into prompts and process with the LLM.
     stage_name : str
-        Name of the current stage in the pipeline.
+        Name of the current pipeline stage, used for token accounting.
     source_name : str
-        Name of the source being curated from (e.g., "pubmed", "reddit").
-    extract_type : str
-        Type of extraction being performed (e.g., "condition", "synonym_treatments").
+        Name of the source being curated from (e.g., ``"pubmed"``, ``"reddit"``).
+    extract_type : ExtractType or str
+        Extraction task identifier (e.g., ``ExtractType.CONDITION`` or
+        ``"synonym_treatment"``).
     llm : APIModel
-        An instance of the language model to use for extraction.
+        Language model client used to perform extraction.
     file_path : str
-        Path to save the output CSV file.
+        Destination CSV path where results are appended/written.
     token_tracker : TokenTracker
-        Tracker for tokens used in LLM calls.
+        Tracker for accumulating token usage statistics.
     max_concurrent_requests : int | None, optional, default=None
-        Maximum number of concurrent requests to the LLM.
+        Upper bound on concurrent LLM requests. If ``None``, a sensible
+        default based on the input size is used.
 
     Returns
     -------
-    pd.DataFrame
-        DataFrame containing the extracted curation information.
-
-    Raises
-    ------
-    Exception
-        If there is an error during the extraction process.
+    pandas.DataFrame
+        The saved result table if it exists, otherwise an empty DataFrame.
     """
     if os.path.exists(file_path):
         existing_data = pd.read_csv(file_path, index_col=0)
-        input_df = input_df.loc[~input_df.index.isin(existing_data.index)]
+        extraction_inputs = extraction_inputs.loc[
+            ~extraction_inputs.index.isin(existing_data.index)
+        ]
         logger.info(
-            f"Found {len(existing_data)} existing records, {len(input_df)} left to process."
+            "Found %d existing records, %d left to process.",
+            len(existing_data),
+            len(extraction_inputs),
         )
-        if len(input_df) == 0:
+        if len(extraction_inputs) == 0:
             return existing_data
 
     # Set up the prompt and result queues for asynchronous processing
-    num_samples = len(input_df)
+    num_samples = len(extraction_inputs)
     num_workers = min(max_concurrent_requests or 10, num_samples)
     queue_size = max(num_workers * 10, 1000)
 
@@ -87,12 +106,19 @@ async def extract_curation_info(  # noqa: PLR0912
     writer_pbar = _create_progress_bar(total=num_samples, desc="Writing results")
 
     # Create tasks to produce prompts
+    # Normalize extract type to a string for downstream helpers
+    _extract_type_str = (
+        extract_type.value
+        if isinstance(extract_type, ExtractType)
+        else str(extract_type)
+    )
+
     producer_task = asyncio.create_task(
         _llm_task_producer(
             prompt_queue,
-            input_df,
+            extraction_inputs,
             source_name,
-            extract_type,
+            _extract_type_str,
             producer_pbar,
         ),
         name="LLM-Task-Producer",
@@ -150,7 +176,7 @@ async def extract_curation_info(  # noqa: PLR0912
             f"{processing_error_count} errors"
         )
     except BaseException as e:
-        logger.error(f"Error during curation: {e}", exc_info=True)
+        logger.error("Error during curation: %s", e, exc_info=True)
         # Cancel any running tasks
         for task in [csv_writer_task, producer_task] + worker_tasks:
             if not task.done():
@@ -170,20 +196,43 @@ async def extract_curation_info(  # noqa: PLR0912
 
 async def _llm_task_producer(
     queue: asyncio.Queue,
-    input_df: pd.DataFrame,
+    extraction_inputs: pd.DataFrame,
     source_name: str,
-    extract_type: str,
+    extract_type: ExtractType | str,
     pbar: tqdm,
 ) -> None:
-    """Produce prompts for the LLM from the input DataFrame."""
-    for idx, row in input_df.iterrows():
+    """Produce prompts for the LLM from the input DataFrame.
+
+    Parameters
+    ----------
+    queue : asyncio.Queue
+        Queue to receive tuples of ``(index, row, messages)`` for workers.
+    extraction_inputs : pandas.DataFrame
+        Input rows to convert into LLM prompt messages.
+    source_name : str
+        Name of the source being curated (e.g., ``"pubmed"``).
+    extract_type : str
+        Extraction task identifier (e.g., ``"condition"``).
+    pbar : tqdm
+        Progress bar to update per produced prompt.
+    """
+    for idx, row in extraction_inputs.iterrows():
         try:
             llm_inputs = row.to_dict()
             # Format the data for the LLM prompt
+            # Normalize extract type to string
+            _extract_type_str = (
+                extract_type.value
+                if isinstance(extract_type, ExtractType)
+                else str(extract_type)
+            )
+
             messages = load_prompt(
                 base_dir="naturalv2/prompts/templates",
-                prompt_type=f"{extract_type}_{source_name}",
-                return_format="responses" if "synonym" in extract_type else "messages",
+                prompt_type=f"{_extract_type_str}_{source_name}",
+                return_format="responses"
+                if "synonym" in _extract_type_str
+                else "messages",
                 **llm_inputs,
             )
 
@@ -207,9 +256,29 @@ async def _prompt_processor(
     stage_name: str,
     token_tracker: TokenTracker,
 ) -> int:
-    """Worker function to process prompts.
+    """Process prompts with the LLM and enqueue results.
 
-    This function calls the LLM with formatted prompts and processes the results.
+    Parameters
+    ----------
+    worker_id : int
+        Identifier for logging and progress tracking.
+    prompt_queue : asyncio.Queue
+        Queue to consume items of the form ``(index, row, messages)``.
+    result_queue : asyncio.Queue
+        Queue to publish processed result dicts or ``False`` on failure.
+    llm : APIModel
+        Language model client used to perform extraction.
+    pbar : tqdm
+        Progress bar to update after each processed item.
+    stage_name : str
+        Name of the current pipeline stage, used for token accounting.
+    token_tracker : TokenTracker
+        Tracker for accumulating token usage statistics.
+
+    Returns
+    -------
+    int
+        The number of items that failed processing.
     """
     error_count = 0
     while True:

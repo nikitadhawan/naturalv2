@@ -1,4 +1,9 @@
-"""Shared Reddit operations used by both pipeline stages and adapters."""
+"""Reddit data operations used by curation stages and adapters.
+
+This module contains asynchronous search utilities powered by PRAW as well as
+batch-oriented helpers to download, clean, and select study-relevant Reddit
+posts.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from tenacity import (
 )
 
 from naturalv2.sources.anonymizer import Anonymizer
-from naturalv2.sources.components.dates import filter_by_date
+from naturalv2.sources.components import filter_by_date
 from naturalv2.sources.reddit.utils import (
     download_sub_data,
     get_context_post_df,
@@ -38,7 +43,22 @@ logger = logging.getLogger(__name__)
 async def search_subreddits(
     keyword: str, reddit_client: asyncpraw.Reddit, limiter: AsyncLimiter
 ) -> list[str]:
-    """Search for subreddits matching a keyword."""
+    """Search for subreddits matching a keyword.
+
+    Parameters
+    ----------
+    keyword : str
+        Keyword to search for.
+    reddit_client : asyncpraw.Reddit
+        An authenticated async PRAW client.
+    limiter : AsyncLimiter
+        Async rate limiter to bound Reddit API calls.
+
+    Returns
+    -------
+    list[str]
+        Display names of matching subreddits.
+    """
 
     async with limiter:
         return [
@@ -58,10 +78,32 @@ async def search_posts_in_subreddit(
     reddit_client: asyncpraw.Reddit,
     limiter: AsyncLimiter,
     *,
-    limit: int,
-    char_limit: int,
+    limit: int = 5,
+    char_limit: int = 1000,
 ) -> list[str]:
-    """Return formatted post snippets for a subreddit-keyword query."""
+    """Return formatted post snippets for a subreddit-keyword query.
+
+    Parameters
+    ----------
+    subreddit : str
+        Subreddit name (without the ``r/`` prefix).
+    keyword : str
+        Search query to filter submissions.
+    reddit_client : asyncpraw.Reddit
+        An authenticated async PRAW client.
+    limiter : AsyncLimiter
+        Async rate limiter to bound Reddit API calls.
+    limit : int, default=5
+        Maximum number of submissions to fetch.
+    char_limit : int, default=1000
+        Maximum number of characters from the selftext to include in the
+        formatted snippet.
+
+    Returns
+    -------
+    list[str]
+        A list of human-readable snippets combining title and truncated body.
+    """
 
     async with limiter:
         posts: list[str] = []
@@ -78,7 +120,22 @@ async def search_posts_in_subreddit(
 
 
 def clean_subreddit_data(data_path: str, subreddit: str) -> pd.DataFrame:
-    """Load, rule-filter, and join submissions/comments for a subreddit."""
+    """Load, rule-filter, and join submissions/comments for a subreddit.
+
+    Parameters
+    ----------
+    data_path : str
+        Directory containing ``*_submissions.parquet`` and
+        ``*_comments.parquet`` files for the subreddit.
+    subreddit : str
+        Subreddit name used to derive file names.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame where each row represents a submission or comment with
+        additional context fields, filtered using simple rule-based heuristics.
+    """
 
     submissions = pd.read_parquet(
         os.path.join(data_path, f"{subreddit}_submissions.parquet")
@@ -98,7 +155,29 @@ def download_submissions_and_comments(
     anonymizer: Anonymizer | None,
     batch_size: int,
 ) -> tuple[str | None, str]:
-    """Download raw data for a subreddit and return the cleaned parquet path."""
+    """Download raw data for a subreddit and return the cleaned parquet path.
+
+    Downloads submissions and comments if missing, applies rule-based cleaning
+    and anonymization (if configured), then writes a consolidated cleaned
+    parquet file. Original raw parquet files are removed upon success.
+
+    Parameters
+    ----------
+    subreddit : str
+        Subreddit name to download.
+    data_path : str
+        Directory to read/write subreddit parquet files.
+    anonymizer : Anonymizer | None
+        Optional anonymizer to scrub PII from text fields.
+    batch_size : int
+        Batch size used by the anonymizer when processing text.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        A tuple ``(cleaned_parquet_path, subreddit)``. The path is ``None``
+        if an error occurred.
+    """
 
     clean_sub_path = os.path.join(data_path, f"{subreddit}_cleaned.parquet")
     if os.path.exists(clean_sub_path):
@@ -142,7 +221,27 @@ def get_study_relevant_posts(
     *,
     date_column: str = "date_created",
 ) -> pd.DataFrame:
-    """Select posts mentioning treatments before an optional cutoff date."""
+    """Select posts mentioning treatments before an optional cutoff date.
+
+    Parameters
+    ----------
+    clean_data_path : str
+        Path to a cleaned subreddit parquet file created by
+        :func:`download_submissions_and_comments`.
+    treatment_pattern : re.Pattern
+        Compiled regex matching any treatment term of interest.
+    cutoff_dt : pandas.Timestamp | None
+        If provided, only posts with dates before this timestamp are
+        considered.
+    date_column : str, default="date_created"
+        Column name containing the post/comment timestamp.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame of posts mentioning any treatment term, with an additional
+        ``treatments_mentioned`` column listing the matched terms.
+    """
 
     df = pd.read_parquet(clean_data_path)
     if df.empty:

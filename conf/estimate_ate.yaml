@@ -12,7 +12,7 @@ split: train
 train_ratio: 0.6
 use_imputed_nones: True
 use_inclusion_weights: True
-bootstratp_size: 5
+bootstrap_size: 10
 alpha: 0.05
 probs_model:
   endpoint: text_completion

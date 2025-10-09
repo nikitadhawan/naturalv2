@@ -33,10 +33,11 @@ from naturalv2.pipeline.constants import (
 from naturalv2.prompts import load_prompt
 from naturalv2.sources.drugbank_cache import get_drugbank_aliases
 from naturalv2.utils import (
+    check_arm,
     check_binary_endpoint,
-    check_noncontrol,
     check_nonplacebo,
     get_nested_value,
+    normalize_treatment,
 )
 
 
@@ -179,6 +180,12 @@ class Experiment:
                 "protocolSection.statusModule.resultsFirstPostDateStruct.date",
             )
         )
+        self._enrollment: int = get_nested_value(
+            trial, "protocolSection.designModule.enrollmentInfo"
+        ).count
+        self._enrollment_type = str(
+            get_nested_value(trial, "protocolSection.designModule.enrollmentInfo").type
+        )
         self._trial_keywords: list[str] | None = get_nested_value(
             trial, "protocolSection.conditionsModule.keywords"
         )
@@ -283,6 +290,16 @@ class Experiment:
         return self._date
 
     @property
+    def enrollment(self) -> int | None:
+        """Enrollment count of the clinical trial."""
+        return self._enrollment
+
+    @property
+    def enrollment_type(self) -> str | None:
+        """Enrollment type of the clinical trial: ACTUAL or ESTIMATED."""
+        return self._enrollment_type
+
+    @property
     def trial_keywords(self) -> list[str] | None:
         """List of keywords associated with the clinical trial."""
         return self._trial_keywords
@@ -346,6 +363,11 @@ class Experiment:
     def outcome_treatment(self) -> list[list[str | list[str]]]:
         """List of tuples containing outcome and treatment pairs."""
         return self._outcome_treatment
+
+    @property
+    def outcome_treatment_stats(self) -> list[list[str | list[str]]]:
+        """List of tuples containing outcome dispersion type, cohort dispersion, and cohort sizes."""
+        return self._outcome_treatment_stats
 
     @property
     def treatment_desc(self) -> dict[str, str | None]:
@@ -858,6 +880,7 @@ class Experiment:
         and their descriptions.
         """
         self._outcome_treatment: list[list[str | list[str]]] = []
+        self._outcome_treatment_stats: list[list[str | list[float]]] = []
         self._treatment_desc, self._outcome_desc = {}, {}
 
         if self.status == "active":
@@ -911,7 +934,7 @@ class Experiment:
         treatments: list[ArmGroup] = [
             arm
             for arm in arm_groups or []
-            if check_noncontrol(arm.type) and check_nonplacebo(arm.interventionNames)
+            if check_arm(arm.type) and check_nonplacebo([arm.label])
         ]
         return outcomes, treatments
 
@@ -923,9 +946,15 @@ class Experiment:
             for i, arm1 in enumerate(treatments):
                 for j, arm2 in enumerate(treatments):
                     if i < j:
-                        self._outcome_treatment.append(
-                            [outcome.measure, [arm1.label, arm2.label]]
-                        )
+                        normalized = [
+                            normalize_treatment(arm1.label),
+                            normalize_treatment(arm2.label),
+                        ]
+                        unique_treatments = set(normalized)
+                        if len(unique_treatments) > 1:
+                            self._outcome_treatment.append(
+                                [outcome.measure, [arm1.label, arm2.label]]
+                            )
 
     def _get_completed_outcomes_treatments(
         self, trial: ClinicalTrial
@@ -962,6 +991,13 @@ class Experiment:
             for i, cohort1 in enumerate(measure_groups):
                 for j, cohort2 in enumerate(measure_groups):
                     if i < j:
+                        normalized = [
+                            normalize_treatment(cohort1.title),
+                            normalize_treatment(cohort2.title),
+                        ]
+                        unique_treatments = set(normalized)
+                        if len(unique_treatments) <= 1:
+                            continue
                         measure1: Measurement | None = outcome.get_group_stats(cohort1)
                         measure2: Measurement | None = outcome.get_group_stats(cohort2)
                         denom1 = literal_eval(
@@ -978,6 +1014,19 @@ class Experiment:
                         ):
                             effect1: float = literal_eval(measure1.value)
                             effect2: float = literal_eval(measure2.value)
+                            if outcome.dispersionType is not None:
+                                dispersion1 = (
+                                    (measure1.lowerLimit, measure1.upperLimit)
+                                    if "confidence" in outcome.dispersionType.lower()
+                                    else measure1.spread
+                                )
+                                dispersion2 = (
+                                    (measure2.lowerLimit, measure2.upperLimit)
+                                    if "confidence" in outcome.dispersionType.lower()
+                                    else measure2.spread
+                                )
+                            else:
+                                dispersion1, dispersion2 = None, None
                         else:
                             continue
                         unit = (
@@ -994,6 +1043,13 @@ class Experiment:
                         effect_size = effect2 - effect1
                         self._outcome_treatment.append(
                             [outcome.title, [cohort1.title, cohort2.title]]
+                        )
+                        self._outcome_treatment_stats.append(
+                            [
+                                outcome.dispersionType,
+                                [dispersion1, dispersion2],
+                                [denom1, denom2],
+                            ]
                         )
                         self._effect_sizes.append(effect_size)
 

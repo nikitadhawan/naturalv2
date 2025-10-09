@@ -40,12 +40,13 @@ def find_valid_ncts(data_path: str, test: bool = False) -> list[str]:
     stats = {
         "total": 0,
         "randomized": 0,
+        "parallel": 0,
         "multiple_noncontrol": 0,
         "nonhealthy": 0,
         "binary_endpoint": 0,
     }
     trial_path = os.path.join(data_path, "nct_reports" + ("_test" if test else ""))
-    valid_nct_path = os.path.join(trial_path, "valid_binary_nct_ids.txt")
+    valid_nct_path = os.path.join(trial_path, "valid_parallel_binary_nct_ids.txt")
 
     if not os.path.exists(trial_path):
         download_clinical_trials(trial_path, test)
@@ -103,7 +104,7 @@ def find_condition_ncts(
     """
     trial_path = os.path.join(data_path, "nct_reports" + ("_test" if test else ""))
     condition_nct_path = os.path.join(
-        trial_path, f"valid_binary_{conditions[0]}_nct_ids.txt"
+        trial_path, f"valid_parallel_binary_{conditions[0]}_nct_ids.txt"
     )
     condition_trials: list[tuple[str, str | None]] = []
     conditions_set = {cond.replace("_", " ").lower() for cond in conditions}
@@ -152,18 +153,19 @@ def _process_condition_trial(
 
     trial = ClinicalTrial.from_json_file(os.path.join(trial_path, f"{nct_id}.json"))
 
-    mesh_ancestors: list[Mesh] | None = get_nested_value(
-        trial, "derivedSection.conditionBrowseModule.ancestors"
+    # mesh_ancestors: list[Mesh] | None = get_nested_value(
+    #     trial, "derivedSection.conditionBrowseModule.ancestors"
+    # )
+    meshes: list[Mesh] | None = get_nested_value(
+        trial, "derivedSection.conditionBrowseModule.meshes"
     )
-    trial_disease_mesh = (
-        [ancestor.term for ancestor in mesh_ancestors] if mesh_ancestors else []
-    )
+    trial_disease_mesh = [mesh.term for mesh in meshes] if meshes else []
     trial_mesh_set = {mesh.lower() for mesh in trial_disease_mesh}
 
     # Remove "disease" or "diseases" from the set
-    trial_mesh_set = {
-        term for term in trial_mesh_set if term not in {"disease", "diseases"}
-    }
+    # trial_mesh_set = {
+    #     term for term in trial_mesh_set if term not in {"disease", "diseases"}
+    # }
 
     # Check if any of the conditions match the trial's disease mesh
     matching_conditions = [
@@ -206,7 +208,7 @@ def run_study_and_get_stats(cfg: DictConfig) -> dict:
     study.to_yaml(study_filepath)
 
     return {
-        "conditions": cfg.conditions,
+        "conditions": cfg.conditions[0],
         "train_trials": study.num_train_trials,
         "train_labels": study.num_train_labels,
         "val_trials": study.num_val_trials,

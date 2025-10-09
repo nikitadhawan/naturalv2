@@ -96,8 +96,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config_path",
         type=str,
-        default="../conf/config.yaml",
-        help="Path to the config.yaml file",
+        default="../conf/common.yaml",
+        help="Path to the common.yaml file",
     )
     parser.add_argument(
         "--output_dir", type=str, default=".", help="Directory to save the output files"

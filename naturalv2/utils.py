@@ -15,6 +15,7 @@ from naturalv2.clinical_trial import (
     ArmGroupType,
     ClinicalTrial,
     DesignAllocation,
+    InterventionalAssignment,
     Outcome,
 )
 
@@ -225,7 +226,7 @@ def check_nonplacebo(intervention_names: list[str] | None) -> bool:
 
 
 def check_noncontrol(intervention_type: ArmGroupType | None) -> bool:
-    """Check if the intervention type is not a control group.
+    """Check if the intervention type is not a control or placebo or sham comparator group.
 
     Parameters
     ----------
@@ -237,7 +238,34 @@ def check_noncontrol(intervention_type: ArmGroupType | None) -> bool:
     bool
         True if the intervention type is not a control group, False otherwise.
     """
-    return intervention_type != ArmGroupType.NO_INTERVENTION
+    return intervention_type not in (
+        ArmGroupType.NO_INTERVENTION,
+        ArmGroupType.PLACEBO_COMPARATOR,
+        ArmGroupType.SHAM_COMPARATOR,
+    )
+
+
+def check_arm(intervention_type: ArmGroupType | None) -> bool:
+    return intervention_type in (
+        ArmGroupType.ACTIVE_COMPARATOR,
+        ArmGroupType.EXPERIMENTAL,
+    )
+
+
+def normalize_treatment(name: str) -> str:
+    """Normalize treatment name by removing dosage and formulation details."""
+    name = name.lower()
+    # Remove dosage info (e.g. "5 mg", "200-mg", "0.5 ml")
+    name = re.sub(r"\b\d+(\.\d+)?\s*(mg|g|ml|mcg|µg|kg|units?)\b", "", name)
+    # Remove administration/formulation terms
+    name = re.sub(
+        r"\b(oral|tablet|capsule|injection|iv|intravenous|subcutaneous|sc|placebo)\b",
+        "",
+        name,
+    )
+    # Remove punctuation and extra spaces
+    name = re.sub(r"[^a-z\s]", " ", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def check_binary_endpoint(text: str) -> bool:
@@ -298,6 +326,7 @@ def check_trial(trial: ClinicalTrial) -> tuple[dict[str, int], bool]:
     stats = {
         "total": 1,
         "randomized": 0,
+        "parallel": 0,
         "multiple_noncontrol": 0,
         "nonhealthy": 0,
         "binary_endpoint": 0,
@@ -308,33 +337,42 @@ def check_trial(trial: ClinicalTrial) -> tuple[dict[str, int], bool]:
         == DesignAllocation.RANDOMIZED
     ):
         stats["randomized"] = 1
-        arm_groups: list[ArmGroup] | None = get_nested_value(
-            trial, "protocolSection.armsInterventionsModule.armGroups"
-        )
-        noncontrol_arms = [
-            arm for arm in (arm_groups or []) if check_noncontrol(arm.type)
-        ]
-        nonplacebo_arms = [
-            arm for arm in noncontrol_arms if check_nonplacebo(arm.interventionNames)
-        ]
-        if len(nonplacebo_arms) >= 2:
-            stats["multiple_noncontrol"] = 1
+        if (
+            get_nested_value(
+                trial, "protocolSection.designModule.designInfo.interventionModel"
+            )
+            == InterventionalAssignment.PARALLEL
+        ):
+            stats["parallel"] = 1
 
-            inclusion_criteria = trial.protocolSection.eligibilityModule
-            if inclusion_criteria and not inclusion_criteria.healthyVolunteers:
-                stats["nonhealthy"] = 1
-                binary = False
+            arm_groups: list[ArmGroup] | None = get_nested_value(
+                trial, "protocolSection.armsInterventionsModule.armGroups"
+            )
+            # noncontrol_arms = [
+            #     arm for arm in (arm_groups or []) if check_noncontrol(arm.type)
+            # ]
+            # nonplacebo_arms = [
+            #     arm for arm in noncontrol_arms if check_nonplacebo(arm.interventionNames)
+            # ]
+            active_exp_arms = [arm for arm in (arm_groups or []) if check_arm(arm.type)]
+            if len(active_exp_arms) >= 2:
+                stats["multiple_noncontrol"] = 1
 
-                endpoints: list[Outcome] | None = get_nested_value(
-                    trial, "protocolSection.outcomesModule.primaryOutcomes"
-                )
-                for endpoint in endpoints or []:
-                    if check_binary_endpoint(endpoint.measure):
-                        stats["binary_endpoint"] = 1
-                        binary = True
-                        break
-                if binary:
-                    return stats, True
+                inclusion_criteria = trial.protocolSection.eligibilityModule
+                if inclusion_criteria and not inclusion_criteria.healthyVolunteers:
+                    stats["nonhealthy"] = 1
+                    binary = False
+
+                    endpoints: list[Outcome] | None = get_nested_value(
+                        trial, "protocolSection.outcomesModule.primaryOutcomes"
+                    )
+                    for endpoint in endpoints or []:
+                        if check_binary_endpoint(endpoint.measure):
+                            stats["binary_endpoint"] = 1
+                            binary = True
+                            break
+                    if binary:
+                        return stats, True
     return stats, False
 
 

@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from litellm import token_counter
 from pydantic import BaseModel, create_model
+from rich.console import Console
+from rich.table import Table
 
 from naturalv2.models.types import (
     BatchResponse,
@@ -356,3 +358,77 @@ class TokenTracker:
             "total_tokens": 0,
             "reasoning_tokens": 0,
         }
+
+    def get_all_stage_stats(self) -> dict[str, dict[str, int]]:
+        """Return token usage stats for all stages.
+
+        Returns
+        -------
+        dict[str, dict[str, int]]
+            Mapping of stage name to its token usage stats.
+        """
+        return {stage: dict(stats) for stage, stats in self._stage_tokens.items()}
+
+    def log_table(self) -> None:
+        """Log token usage as a Rich table when available, else plain text.
+
+        The output includes per-stage token counts and an overall totals row.
+        """
+        stage_stats = self.get_all_stage_stats()
+        total = self.get_total_stats()
+
+        # Try rich rendering first
+        try:
+            table = Table(title="Token Usage Summary", show_lines=False)
+            table.add_column("Stage", justify="left")
+            table.add_column("Prompt", justify="right")
+            table.add_column("Completion", justify="right")
+            table.add_column("Reasoning", justify="right")
+            table.add_column("Total", justify="right")
+
+            for stage, stats in stage_stats.items():
+                table.add_row(
+                    stage,
+                    str(stats.get("prompt_tokens", 0)),
+                    str(stats.get("completion_tokens", 0)),
+                    str(stats.get("reasoning_tokens", 0)),
+                    str(stats.get("total_tokens", 0)),
+                )
+
+            # Add a totals row
+            table.add_row(
+                "[bold]TOTAL[/bold]",
+                f"[bold]{total.get('prompt_tokens', 0)}[/bold]",
+                f"[bold]{total.get('completion_tokens', 0)}[/bold]",
+                f"[bold]{total.get('reasoning_tokens', 0)}[/bold]",
+                f"[bold]{total.get('total_tokens', 0)}[/bold]",
+            )
+
+            Console().print(table)
+            return
+        except Exception:  # noqa: BLE001
+            # Fall back to plain text logging
+            pass
+
+        # Plain text fallback
+        logger.info("Token Usage Summary:")
+        if not stage_stats:
+            logger.info("  (no stages recorded)")
+        else:
+            for stage, stats in stage_stats.items():
+                logger.info(
+                    "  %s | prompt=%d completion=%d reasoning=%d total=%d",
+                    stage,
+                    stats.get("prompt_tokens", 0),
+                    stats.get("completion_tokens", 0),
+                    stats.get("reasoning_tokens", 0),
+                    stats.get("total_tokens", 0),
+                )
+
+        logger.info(
+            "  TOTAL | prompt=%d completion=%d reasoning=%d total=%d",
+            total.get("prompt_tokens", 0),
+            total.get("completion_tokens", 0),
+            total.get("reasoning_tokens", 0),
+            total.get("total_tokens", 0),
+        )

@@ -1,4 +1,9 @@
-"""LLM-powered synonym expansion stage shared across sources."""
+"""Synonym expansion stage using an LLM.
+
+This module provides a reusable stage that queries a language model to expand
+keyword lists (e.g., treatment) with common names and synonyms for a given
+source (such as ``"pubmed"`` or ``"reddit"``).
+"""
 
 import ast
 import logging
@@ -7,8 +12,9 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from naturalv2.sources.components.llm_extraction import extract_curation_info
+from naturalv2.sources.components import extract_curation_info
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
+
 
 if TYPE_CHECKING:
     from naturalv2.models.lm import APIModel
@@ -18,21 +24,29 @@ logger = logging.getLogger(__name__)
 
 
 class SynonymStage(SourceStage):
-    """Stage to find synonyms for a given attribute.
+    """Find synonyms for a specific experiment attribute.
 
-    This stage uses an LLM to find synonyms for a specified attribute (e.g., treatments)
-    from a given source (e.g., "pubmed", "reddit").
+    The stage queries an LLM to expand a chosen attribute of each experiment
+    (for example, ``"treatment"``) into a set of common names and synonyms
+    that are specific to a source (e.g., ``"pubmed"``, ``"reddit"``). Results
+    are written to per-experiment YAML files and summarized in the stage state.
+
+    Output files are written to ``results_dir(context, "synonyms")`` with the
+    naming pattern ``{attribute}_synonyms_{experiment_name}.csv``.
 
     Parameters
     ----------
-    model_cfg : DictConfig
-        Configuration for the language model used in this stage.
-    source_name : str
-        Name of the source being curated from (e.g., "pubmed", "reddit").
     attribute : str
-        The attribute for which synonyms are to be found (e.g., "treatments").
+        Name of the experiment attribute to expand (e.g., ``"treatment"``).
+        The corresponding fields are expected in ``Experiment`` as
+        ``{attribute}_names``, ``{attribute}_desc``, and
+        ``{attribute}_common_names``.
+    llm : APIModel
+        Language model client used to perform the extraction.
     max_concurrent_workers : int | None, optional, default=None
-        Maximum number of concurrent workers for LLM requests.
+        Maximum number of concurrent workers used during extraction.
+    name : str | None, optional, default=None
+        Optional explicit stage name; defaults to the class name.
     """
 
     def __init__(
@@ -43,7 +57,7 @@ class SynonymStage(SourceStage):
         max_concurrent_workers: int | None = None,
         name: str | None = None,
     ) -> None:
-        """Initialize the class."""
+        """Initialize the stage."""
         super().__init__(name=name)
         self.attribute = attribute
         self.llm = llm
@@ -52,27 +66,21 @@ class SynonymStage(SourceStage):
         self.extract_type = f"synonym_{attribute}"
 
     async def run(self, context: CurationContext, state: StageState) -> StageState:
-        """Get synonyms for ``attribute`` found on ``source``.
-
-        This method takes a list of Experiments and generates synonyms for their ``attribute``
-        found on ``source``, using a language model.
+        """Generate synonyms for ``attribute`` values in the experiments.
 
         Parameters
         ----------
-        exp_list : list[Experiment]
-            List of Experiments in a study.
         context : CurationContext
-            Context for the stage execution.
+            Curation context providing experiments, source name, save paths and
+            token tracking.
+        state : StageState
+            Incoming state from previous stage; will be updated with summary
+            metrics.
 
         Returns
         -------
-        list[Experiment]
-            List of experiments with updated common names and synonyms.
-
-        Raises
-        ------
-        Exception
-            If there is an error during the extraction process.
+        StageState
+            State updated with ``num_keywords`` and ``num_synonyms``.
         """
         if not context.experiments:
             logger.warning("No experiments provided to process.")
@@ -109,8 +117,8 @@ class SynonymStage(SourceStage):
                     }
                 )
 
-        input_df = pd.DataFrame(llm_inputs)
-        if input_df.empty:
+        extraction_inputs = pd.DataFrame(llm_inputs)
+        if extraction_inputs.empty:
             logger.warning("No synonym tasks to process.")
             return state
 
@@ -124,7 +132,7 @@ class SynonymStage(SourceStage):
         exp_dir = os.path.join(context.save_dir, "experiments")
 
         output_df = await extract_curation_info(
-            input_df=input_df,
+            extraction_inputs,
             stage_name=self.stage_name,
             source_name=context.source_name,
             extract_type=self.extract_type,
@@ -152,4 +160,5 @@ class SynonymStage(SourceStage):
             experiment.to_yaml(exp_file)
 
         state.update(num_keywords=num_keywords, num_synonyms=num_synonyms)
+        context._token_tracker.log_table()
         return state

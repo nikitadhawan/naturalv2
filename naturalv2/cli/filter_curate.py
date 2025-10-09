@@ -1,4 +1,4 @@
-"""Pipeline for filtering and curating experiments using LLMs."""
+"""Pipeline for filtering data sources and curating trial-specific data."""
 
 import logging
 import os
@@ -10,11 +10,7 @@ from omegaconf import DictConfig
 
 import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.experiment import Experiment
-from naturalv2.sources.core import (
-    CurationContext,
-    CurationStage,
-    FilterCurateRunner,
-)
+from naturalv2.sources.core import CurationContext, CurationStage, FilterCurateRunner
 from naturalv2.study import Study, StudyDataset, get_study_filepaths
 from naturalv2.utils import get_experiment_filepath
 
@@ -79,6 +75,7 @@ def _get_curated_dataset(exp_list, context, source_name, clean_data_paths):
 
 
 def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
+    """Return `FilterCurateRunner` with curation stages defined in `source_cfg`."""
     stages: list[CurationStage] = []
     for name, stage_cfg in source_cfg.stages.items():
         if stage_cfg is not None:

@@ -331,7 +331,7 @@ class RedditConditionFilter(SourceStage):
                     )
                 else:
                     results_by_keyword[keyword]["subreddit_posts"].append(
-                        {"subreddit": subreddit, "posts": posts}
+                        {"Subreddit": subreddit, "Example Posts": posts}
                     )
 
         return results_by_keyword

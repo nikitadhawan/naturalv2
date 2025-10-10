@@ -198,7 +198,7 @@ async def _llm_task_producer(
     queue: asyncio.Queue,
     extraction_inputs: pd.DataFrame,
     source_name: str,
-    extract_type: ExtractType | str,
+    extract_type: str,
     pbar: tqdm,
 ) -> None:
     """Produce prompts for the LLM from the input DataFrame.
@@ -219,20 +219,10 @@ async def _llm_task_producer(
     for idx, row in extraction_inputs.iterrows():
         try:
             llm_inputs = row.to_dict()
-            # Format the data for the LLM prompt
-            # Normalize extract type to string
-            _extract_type_str = (
-                extract_type.value
-                if isinstance(extract_type, ExtractType)
-                else str(extract_type)
-            )
-
             messages = load_prompt(
                 base_dir="naturalv2/prompts/templates",
-                prompt_type=f"{_extract_type_str}_{source_name}",
-                return_format="responses"
-                if "synonym" in _extract_type_str
-                else "messages",
+                prompt_type=f"{extract_type}_{source_name}",
+                return_format="responses" if "synonym" in extract_type else "messages",
                 **llm_inputs,
             )
 

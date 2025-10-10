@@ -334,7 +334,8 @@ class PubMedFetchAndClean(SourceStage):
         df.rename(columns={"full_text": "report"}, inplace=True)
 
         if apply_date_filter and experiment.date:
-            df = filter_by_date(df, experiment.date, "publication_date")
+            cutoff = pd.to_datetime(experiment.date, errors="raise")
+            df = filter_by_date(df, cutoff, "publication_date")
             if df.empty:
                 logger.warning(
                     "All rows dropped after date filtering for experiment %s",

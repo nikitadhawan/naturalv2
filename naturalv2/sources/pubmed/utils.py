@@ -22,7 +22,6 @@ from tqdm.asyncio import tqdm
 
 from naturalv2.utils import concurrency_limited
 
-
 logger = logging.getLogger(__name__)
 
 _PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
@@ -32,6 +31,8 @@ _MAX_GET_TERM_LENGTH = 1800  # PubMed GET requests start failing beyond ~2KB URL
 
 _MAX_RATE_LIMIT_WAIT_SECONDS = 300  # Cap server-directed sleeps to 5 minutes.
 _BASE_WAIT_STRATEGY = wait_random_exponential(multiplier=1, min=0.7, max=60)
+
+random.seed(42)  # For reproducible jitter in wait times
 
 
 def _parse_retry_after(header_value: str | None) -> float | None:
@@ -74,7 +75,7 @@ def _rate_limit_aware_wait(retry_state: RetryCallState) -> float:
     return _BASE_WAIT_STRATEGY(retry_state)
 
 
-def _should_retry(exception: Exception) -> bool:
+def _should_retry(exception: BaseException) -> bool:
     """Determine if the exception is transient and should be retried."""
     if isinstance(exception, aiohttp.ClientResponseError):
         if exception.status == 429:
@@ -121,13 +122,15 @@ async def search_pubmed(
     http_method = "POST" if len(query) > _MAX_GET_TERM_LENGTH else "GET"
 
     try:
-        root = await _get_xml_root(
-            search_url,
-            params,
-            "Failed to retrieve PubMed search results",
-            executor,
-            http_method=http_method,
-        )
+        async with aiohttp.ClientSession() as session:
+            root = await _get_xml_root(
+                search_url,
+                params,
+                "Failed to retrieve PubMed search results",
+                executor,
+                session,
+                http_method=http_method,
+            )
     except aiohttp.ClientResponseError as e:
         if e.status == 429:
             logger.warning(
@@ -206,12 +209,14 @@ async def fetch_articles(
         params["api_key"] = pubmed_api_key
 
     try:
-        root = await _get_xml_root(
-            fetch_url,
-            params,
-            "Error fetching articles from PubMed",
-            executor,
-        )
+        async with aiohttp.ClientSession() as session:
+            root = await _get_xml_root(
+                fetch_url,
+                params,
+                "Error fetching articles from PubMed",
+                executor,
+                session,
+            )
     except aiohttp.ClientResponseError as e:
         if e.status == 429:
             logger.warning(
@@ -371,9 +376,14 @@ async def _fetch_pmc_fulltext(
         params["api_key"] = pubmed_api_key
 
     try:
-        root = await _get_xml_root(
-            fetch_url, params, "Error fetching full text from PMC", executor
-        )
+        async with aiohttp.ClientSession() as session:
+            root = await _get_xml_root(
+                fetch_url,
+                params,
+                "Error fetching full text from PMC",
+                executor,
+                session,
+            )
     except aiohttp.ClientResponseError as e:
         if e.status == 429:
             logger.warning(
@@ -417,6 +427,7 @@ async def _get_xml_root(
     params: dict[str, str],
     client_error_msg: str,
     executor: ThreadPoolExecutor,
+    session: aiohttp.ClientSession,
     *,
     http_method: str = "GET",
 ) -> ET.Element | None:
@@ -429,11 +440,10 @@ async def _get_xml_root(
     request_kwargs = {"params": params} if method == "GET" else {"data": params}
 
     try:
-        async with aiohttp.ClientSession() as session:  # noqa: SIM117
-            requester = session.get if method == "GET" else session.post
-            async with requester(url, **request_kwargs) as response:
-                response.raise_for_status()
-                content = await response.read()
+        requester = session.get if method == "GET" else session.post
+        async with requester(url, **request_kwargs) as response:
+            response.raise_for_status()
+            content = await response.read()
     except aiohttp.ClientResponseError as e:
         log_params = {k: v for k, v in params.items() if k != "api_key"}
         if e.status == 429:

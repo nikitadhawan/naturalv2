@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.components import extract_curation_info
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 
@@ -123,13 +124,11 @@ class SynonymStage(SourceStage):
             return state
 
         # Set up file path for saving results
-        results_dir = self.results_dir(context, "synonyms")
+        results_dir = self.results_dir(context)
         file_path = os.path.join(
             results_dir,
             f"{self.attribute}_synonyms_{context.experiment_name}.csv",
         )
-
-        exp_dir = os.path.join(context.save_dir, "experiments")
 
         output_df = await extract_curation_info(
             extraction_inputs,
@@ -142,6 +141,7 @@ class SynonymStage(SourceStage):
             max_concurrent_requests=self.max_concurrent_workers,
         )
 
+        experiments_dir = os.path.join(context.save_dir, "experiments")
         num_keywords, num_synonyms = 0, 0
         for experiment in context.experiments:
             synonyms_dict = {}
@@ -156,9 +156,24 @@ class SynonymStage(SourceStage):
                 context.source_name
             ].update(synonyms_dict)
 
-            exp_file = os.path.join(exp_dir, f"{experiment.nct_id}.yaml")
+            exp_file = os.path.join(experiments_dir, f"{experiment.nct_id}.yaml")
             experiment.to_yaml(exp_file)
 
         state.update(num_keywords=num_keywords, num_synonyms=num_synonyms)
+        logger.info(
+            "%s: found %d synonyms for %d keywords",
+            self.stage_name,
+            num_synonyms,
+            num_keywords,
+        )
         context._token_tracker.log_table()
+
+        # Add prompt template to metadata for logging
+        prompt_id = f"{self.extract_type}_{context.source_name}"
+        template = load_prompt(
+            base_dir="naturalv2/prompts/templates",
+            prompt_type=prompt_id,
+            return_format="prompt",
+        )
+        state.metadata.setdefault("prompt_templates", {})[prompt_id] = template
         return state

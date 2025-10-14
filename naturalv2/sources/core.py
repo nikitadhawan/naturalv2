@@ -20,6 +20,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
+from rich.console import Console
+from rich.pretty import Pretty
+from rich.table import Table
+
 from naturalv2.models.utils import TokenTracker
 from naturalv2.utils import sanitize_filename
 
@@ -183,6 +187,32 @@ class CurationStage(ABC):
             The updated state to pass to the next stage.
         """
         raise NotImplementedError
+
+    def render_metadata(self, state: StageState) -> None:
+        """Render avaialable metadata, up to the current stage, as a rich table.
+
+        Parameters
+        ----------
+        state : StageState
+            The state object containing the metadata to render.
+        """
+        rich_table = Table(title=f"Curation pipeline state at stage: {self.stage_name}")
+
+        rich_table.add_column("Key", style="cyan")
+        rich_table.add_column("Value", style="magenta")
+
+        for key, value in state.metadata.items():
+            rich_table.add_row(str(key), Pretty(value, max_length=10))
+
+        console = Console(force_terminal=True)
+
+        # Capture the table in a string instead of writing to the console
+        with console.capture() as capture:
+            console.print(rich_table)
+
+        # Log the captured string.
+        # This should now show up in both the terminal and the log file.
+        logger.info(capture.get())
 
 
 class SourceStage(CurationStage):
@@ -349,6 +379,7 @@ class FilterCurateRunner:
         for stage in self.stages:
             logger.info("Running stage %s", stage.stage_name)
             state = await stage.run(context, state)
+            stage.render_metadata(state)
         return state
 
     def run(self, context: CurationContext) -> StageState:

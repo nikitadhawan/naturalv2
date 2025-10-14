@@ -58,20 +58,15 @@ def _get_nct_ids(study: Study) -> list[str]:
     return all_ncts, splits
 
 
-def _get_curated_dataset(exp_list, context, source_name, clean_data_paths):
-    all_exp_data_paths, all_exp_data_sizes = {}, {}
-    exp_dir = os.path.join(context.save_path, "experiments")
-    for exp in exp_list:
-        exp_data_path, exp_data_size = context.source_dataset.curate_experiment_data(
-            exp, context.condition, context.filter_by_date, clean_data_paths
-        )
-        exp.source_paths[source_name] = exp_data_path
-        exp_file = os.path.join(exp_dir, f"{exp.nct_id}.yaml")
-        exp.to_yaml(exp_file)
-
-        all_exp_data_paths[exp.nct_id] = exp_data_path
-        all_exp_data_sizes[exp.nct_id] = exp_data_size
-    return all_exp_data_paths, all_exp_data_sizes
+def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
+    """Return `FilterCurateRunner` with curation stages defined in `source_cfg`."""
+    stages: list[CurationStage] = []
+    for name, stage_cfg in source_cfg.stages.items():
+        if stage_cfg is not None:
+            stages.append(
+                hydra.utils.instantiate(stage_cfg, name=name, _convert_="partial")
+            )
+    return FilterCurateRunner(stages)
 
 
 def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:

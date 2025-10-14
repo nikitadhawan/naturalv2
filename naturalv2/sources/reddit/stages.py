@@ -146,6 +146,8 @@ class RedditConditionFilter(SourceStage):
         for keyword in trial_conditions:
             if keyword in candidate_subs_and_posts:
                 result = candidate_subs_and_posts[keyword]
+                if not (result["subreddit_posts"] or result["candidate_subs"]):
+                    continue
 
                 # Stringify subreddit posts for LLM input
                 llm_input = json.dumps(result["subreddit_posts"], indent=4)
@@ -189,6 +191,8 @@ class RedditConditionFilter(SourceStage):
             max_concurrent_requests=self.llm_max_concurrency,
         )
 
+        output_df["llm_output"] = output_df["llm_output"].fillna("[]")
+
         for keyword, output in zip(output_df["keyword"], output_df["llm_output"]):
             llm_filtered_subreddits: list[str] = ast.literal_eval(output)
             condition_to_subreddit_map[keyword] = llm_filtered_subreddits
@@ -201,12 +205,17 @@ class RedditConditionFilter(SourceStage):
         state.metadata["condition_metadata"] = condition_to_subreddit_map
         state.metadata["num_unique_subreddits"] = num_unique_subreddits
 
+        # Update and persist metadata in StudyDataset
+        context.study_dataset.sources[context.source_name] = condition_to_subreddit_map
+        context.study_dataset.to_yaml(context.extras["study_dataset_path"])
+
         logger.info(
             "%s: mapped %d trial conditions to %d unique subreddits",
             self.stage_name,
             len(condition_to_subreddit_map),
             num_unique_subreddits,
         )
+        context._token_tracker.log_table()
         return state
 
     async def _collect_candidate_subs_and_posts(
@@ -415,6 +424,7 @@ class RedditDownloadAndClean(SourceStage):
             logger.error(
                 "%s: no relevant subreddits found for any conditions", self.stage_name
             )
+            state.update(cleaned_paths={})
             return state
 
         source_dir, subs_data_dir = self._get_subs_data_dir(context)
@@ -480,8 +490,16 @@ class RedditDownloadAndClean(SourceStage):
                 if clean_sub_path is not None:
                     subreddit_cleaned_path_map[sub] = clean_sub_path
 
+        # Update state
         state.payload = subreddit_cleaned_path_map
         state.update(cleaned_paths=subreddit_cleaned_path_map, source_dir=source_dir)
+
+        # Update and persist metadata in StudyDataset
+        context.study_dataset.sources[f"{context.source_name}_cleaned"] = (
+            subreddit_cleaned_path_map
+        )
+        context.study_dataset.to_yaml(context.extras["study_dataset_path"])
+
         logger.info(
             "%s: downloaded and cleaned %d subreddits for %d experiments",
             self.stage_name,
@@ -509,7 +527,7 @@ class RedditDownloadAndClean(SourceStage):
         return relevant_subreddits
 
     def _get_subs_data_dir(self, context: CurationContext) -> tuple[str, str]:
-        """Return the source directory and ensure the ``subreddits`` subdir.
+        """Return the source directory and ensure the ``subs_data`` subdir exists.
 
         Returns
         -------
@@ -517,7 +535,7 @@ class RedditDownloadAndClean(SourceStage):
             A tuple of ``(source_dir, subs_data_dir)``.
         """
         source_dir = self.source_dir(context)
-        subs_data_dir = os.path.join(source_dir, "subreddits")
+        subs_data_dir = os.path.join(source_dir, "subs_data")
         os.makedirs(subs_data_dir, exist_ok=True)
         return source_dir, subs_data_dir
 
@@ -609,7 +627,6 @@ class RedditCurateStage(SourceStage):
 
         curated_paths: dict[str, str] = {}
         curated_data_sizes: dict[str, int] = {}
-        total_rows = 0
         num_bad_dates = 0
         for experiment in context.experiments:
             save_path = os.path.join(study_dir, f"reddit_{experiment.nct_id}.csv")
@@ -629,10 +646,16 @@ class RedditCurateStage(SourceStage):
                 if sub in subreddit_cleaned_path_map
             }
 
-            # Get cleaned data paths for relevant subreddits, or all if none found
+            # Get cleaned data paths for relevant subreddits
             clean_data_paths = [
                 subreddit_cleaned_path_map[sub] for sub in trial_relevant_subs
-            ] or list(subreddit_cleaned_path_map.values())
+            ]
+            if not clean_data_paths:
+                logger.warning(
+                    "No clean data paths found for experiment with NCT ID: %s",
+                    experiment.nct_id,
+                )
+                continue
 
             treatment_names = experiment.get_all_treatment_names_for_source(
                 context.source_name
@@ -684,12 +707,6 @@ class RedditCurateStage(SourceStage):
                         curated_experiment_data.append(relevant_posts_df)
 
             if not curated_experiment_data:
-                # Save an empty DataFrame so that we don't try to process later
-                # columns = pq.ParquetFile(clean_data_paths[0]).schema.names
-                # empty_df = pd.DataFrame(
-                #     columns=columns + ["treatments_mentioned", "outcome_words"]
-                # )
-                # empty_df.to_csv(save_path, index=False)
                 logger.warning(
                     f"No valid matches found for experiment {experiment.nct_id}"
                 )
@@ -702,7 +719,15 @@ class RedditCurateStage(SourceStage):
 
             curated_paths[experiment.nct_id] = save_path
             curated_data_sizes[experiment.nct_id] = len(final_df)
-            total_rows += len(final_df)
+
+            # Persist save path in experiment yaml
+            experiment.source_paths[context.source_name] = save_path
+            experiment.to_yaml(
+                os.path.join(
+                    context.save_dir, "experiments", f"{experiment.nct_id}.yaml"
+                )
+            )
+
             logger.info(
                 "%s: curated %d relevant Reddit posts for experiment %s",
                 self.stage_name,

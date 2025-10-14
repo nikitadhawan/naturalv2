@@ -22,6 +22,7 @@ from tqdm.asyncio import tqdm
 
 from naturalv2.utils import concurrency_limited
 
+
 logger = logging.getLogger(__name__)
 
 _PUBMED_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"

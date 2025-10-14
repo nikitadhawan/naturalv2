@@ -15,6 +15,7 @@ from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
 from naturalv2.utils import concurrency_limited
 
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:

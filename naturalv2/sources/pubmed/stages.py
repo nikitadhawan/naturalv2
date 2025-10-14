@@ -5,18 +5,20 @@ import logging
 import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import pandas as pd
 from tqdm.asyncio import tqdm_asyncio
 
-from naturalv2.experiment import Experiment
 from naturalv2.sources.components.helpers import filter_by_date, tokenize_casefold
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
 from naturalv2.utils import concurrency_limited
 
-
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
 
 
 class PubMedConditionFilter(SourceStage):
@@ -78,7 +80,7 @@ class PubMedConditionFilter(SourceStage):
 
     @staticmethod
     def _build_search_query(
-        condition: str, experiment: Experiment, context: CurationContext
+        condition: str, experiment: "Experiment", context: CurationContext
     ) -> str:
         """Construct a PubMed search query for the given condition.
 
@@ -235,7 +237,7 @@ class PubMedFetchAndClean(SourceStage):
         self,
         adf: pd.DataFrame,
         *,
-        experiment: Experiment,
+        experiment: "Experiment",
         apply_date_filter: bool = True,
     ) -> pd.DataFrame | None:
         """Clean and normalize the fetched case reports DataFrame.
@@ -455,7 +457,7 @@ class PubMedFetchAndClean(SourceStage):
             self.stage_name,
             num_case_reports_fetched,
             num_case_reports_cleaned,
-            len(existing_nctid_clean_path_map),
+            len(new_nctid_clean_path_map),
         )
 
         nctid_clean_path_map = {
@@ -474,9 +476,9 @@ class PubMedFetchAndClean(SourceStage):
         query: str,
         save_dir: str,
         *,
-        experiment: Experiment,
+        experiment: "Experiment",
         executor: ThreadPoolExecutor,
-    ) -> list[dict[str, str]]:
+    ) -> tuple[list[dict[str, str]], tuple[str, "Experiment"]]:
         """Execute a PubMed query and collect case reports.
 
         Parameters
@@ -562,7 +564,7 @@ class PubMedCurateStage(SourceStage):
 
         for experiment in context.experiments:
             file_path = cleaned_paths_map.get(experiment.nct_id)
-            if not os.path.exists(file_path):
+            if file_path is None or not os.path.exists(file_path):
                 logger.warning(
                     "%s: Cleaned case report file missing for experiment %s at %s",
                     self.stage_name,

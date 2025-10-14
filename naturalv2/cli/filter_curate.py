@@ -69,17 +69,6 @@ def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
     return FilterCurateRunner(stages)
 
 
-def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
-    """Return `FilterCurateRunner` with curation stages defined in `source_cfg`."""
-    stages: list[CurationStage] = []
-    for name, stage_cfg in source_cfg.stages.items():
-        if stage_cfg is not None:
-            stages.append(
-                hydra.utils.instantiate(stage_cfg, name=name, _convert_="partial")
-            )
-    return FilterCurateRunner(stages)
-
-
 # TODO: improve on relative path for config
 @hydra.main(
     config_path="../../conf/", config_name="filter_curate.yaml", version_base="1.2"

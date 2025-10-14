@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.components import extract_curation_info
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 
@@ -166,4 +167,13 @@ class SynonymStage(SourceStage):
             num_keywords,
         )
         context._token_tracker.log_table()
+
+        # Add prompt template to metadata for logging
+        prompt_id = f"{self.extract_type}_{context.source_name}"
+        template = load_prompt(
+            base_dir="naturalv2/prompts/templates",
+            prompt_type=prompt_id,
+            return_format="prompt",
+        )
+        state.metadata.setdefault("prompt_templates", {})[prompt_id] = template
         return state

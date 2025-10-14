@@ -28,6 +28,7 @@ from tqdm.asyncio import tqdm_asyncio
 from tqdm.contrib.concurrent import process_map
 
 from naturalv2.models.lm import APIModel
+from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.components.helpers import build_term_pattern
 from naturalv2.sources.components.llm_extraction import (
@@ -128,6 +129,15 @@ class RedditConditionFilter(SourceStage):
         state.metadata["condition_to_subreddit_map"] = condition_to_subreddit_map
         state.metadata["num_unique_subreddits"] = len(set(relevant_subreddits_list))
 
+        # Add prompt template to metadata for logging
+        prompt_id = f"{ExtractType.CONDITION.value}_{context.source_name}"
+        template = load_prompt(
+            base_dir="naturalv2/prompts/templates",
+            prompt_type=prompt_id,
+            return_format="prompt",
+        )
+        state.metadata.setdefault("prompt_templates", {})[prompt_id] = template
+
         # Skip keywords that have already been processed
         trial_conditions = [
             cond for cond in trial_conditions if cond not in condition_to_subreddit_map
@@ -216,6 +226,7 @@ class RedditConditionFilter(SourceStage):
             num_unique_subreddits,
         )
         context._token_tracker.log_table()
+
         return state
 
     async def _collect_candidate_subs_and_posts(

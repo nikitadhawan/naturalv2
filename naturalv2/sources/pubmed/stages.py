@@ -66,11 +66,14 @@ class PubMedConditionFilter(SourceStage):
             ]
         )
         source_dir = self.source_dir(context)
-        query_log_path = os.path.join(source_dir, "queries.csv")
+        query_log_path = os.path.join(
+            source_dir,
+            f"{context.source_name}_condition_queries_{context.experiment_name}.csv",
+        )
         df.to_csv(query_log_path, index=False)
 
         state.payload = trial_query_map
-        state.update(trial_query_map=trial_query_map)
+        state.update(trial_query_map=trial_query_map, query_log_path=query_log_path)
         logger.info(
             "%s: constructed PubMed queries for %d experiments",
             self.stage_name,

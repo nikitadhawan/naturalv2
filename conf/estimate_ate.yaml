@@ -9,7 +9,6 @@ defaults:
 
 nct_id: null # NCT03828539 to test
 split: train
-train_ratio: 0.6
 use_imputed_nones: True
 use_inclusion_weights: True
 bootstrap_size: 10

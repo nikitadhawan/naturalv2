@@ -7,7 +7,7 @@ seed: 42
 experiment_name: ???
 conditions:
   - Nervous System Diseases
-
+train_ratio: 0.6
 save_path: ${oc.env:SAVE_PATH,./outputs}
 data_path: ${oc.env:DATA_PATH,./data}
 

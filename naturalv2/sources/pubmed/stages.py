@@ -104,13 +104,16 @@ class PubMedConditionFilter(SourceStage):
             involving humans.
         """
 
+        treatment_synonyms = set()
+        for name, aliases in experiment.treatment_common_names.get(
+            context.source_name, {}
+        ).items():
+            treatment_synonyms.add(name.lower())
+            for alias in aliases:
+                treatment_synonyms.add(alias.lower())
+
         treatment_terms = " OR ".join(
-            [
-                f"{treatment}"
-                for treatment in experiment.get_all_treatment_names_for_source(
-                    context.source_name
-                )
-            ]
+            [f"{treatment_name}" for treatment_name in treatment_synonyms]
         )
 
         return (

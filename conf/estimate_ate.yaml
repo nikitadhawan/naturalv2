@@ -20,6 +20,7 @@ probs_model:
   prompt_logprobs: 0
   temperature: 1.0
 
+filter_by_date: True
 default_max_concurrent_workers: 8
 
 pipeline:

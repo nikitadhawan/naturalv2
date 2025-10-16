@@ -266,7 +266,12 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 )
 
                 # Load curated data
-                curated_df = pd.read_csv(experiment.source_paths[source_name])
+                if cfg.filter_by_date:
+                    curated_df = pd.read_csv(experiment.source_paths[source_name])
+                else:
+                    curated_df = pd.read_csv(
+                        experiment.source_paths[f"{source_name}_no_date_filter"]
+                    )
                 # TODO: remove subsampling after testing
                 # curated_df = curated_df.sample(
                 #     frac=0.05, random_state=cfg.seed, ignore_index=True

@@ -640,7 +640,12 @@ class RedditCurateStage(SourceStage):
         curated_data_sizes: dict[str, int] = {}
         num_bad_dates = 0
         for experiment in context.experiments:
-            save_path = os.path.join(study_dir, f"reddit_{experiment.nct_id}.csv")
+            if context.filter_by_date:
+                save_path = os.path.join(study_dir, f"reddit_{experiment.nct_id}.csv")
+            else:
+                save_path = os.path.join(
+                    study_dir, f"reddit_{experiment.nct_id}_no_date_filter.csv"
+                )
             if os.path.exists(save_path):
                 logger.info(
                     "Skipping experiment %s as curated data already exists at %s",
@@ -732,7 +737,12 @@ class RedditCurateStage(SourceStage):
             curated_data_sizes[experiment.nct_id] = len(final_df)
 
             # Persist save path in experiment yaml
-            experiment.source_paths[context.source_name] = save_path
+            if context.filter_by_date:
+                experiment.source_paths[context.source_name] = save_path
+            else:
+                experiment.source_paths[f"{context.source_name}_no_date_filter"] = (
+                    save_path
+                )
             experiment.to_yaml(
                 os.path.join(
                     context.save_dir, "experiments", f"{experiment.nct_id}.yaml"

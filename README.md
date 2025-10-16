@@ -13,9 +13,11 @@ git clone https://github.com/nikitadhawan/naturalv2.git
 cd naturalv2
 uv sync --no-cache --dev
 ```
+
 > **Tip:** Add `--active` to `uv sync` to use your current virtual environment. Otherwise, `.venv` will be created in the project root.
 
 Copy the example environment file and edit as needed:
+
 ```bash
 cp .env.example .env
 ```
@@ -44,9 +46,10 @@ uv run --active --env-file=.env filter_curate \
     sample_model.rpd=100 \
     +sample_model.thinking.type=enabled \
     +sample_model.thinking.budget_tokens=-1 \
-    sources.reddit.max_download_workers=8 \
+    sources.reddit.stages.download_and_clean.max_download_workers=8 \
     experiment_name=test
 ```
+
 > This will filter subreddits, download and clean relevant Reddit data, and curate experiment datasets.
 
 ---
@@ -78,6 +81,7 @@ uv run --active --env-file=.env estimate_ate \
     split=train \
     experiment_name=test
 ```
+
 > Model choices and parameters can be adjusted based on your budget and hardware.
 
 ---

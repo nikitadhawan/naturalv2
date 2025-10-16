@@ -15,9 +15,7 @@ model_kwargs:
   swap_space: 4
   cpu_offload_gb: 0
   enforce_eager: False
-  max_seq_len_to_capture: 8192
   disable_custom_all_reduce: False
-  disable_async_output_proc: False
   compilation_config: null
   download_dir: ${oc.env:VLLM_CACHE_ROOT,null}
 

@@ -590,7 +590,15 @@ class PubMedCurateStage(SourceStage):
                 )
                 continue
 
-            save_path = os.path.join(study_dir, f"pubmed_{experiment.nct_id}.csv")
+            if context.filter_by_date:
+                save_path = os.path.join(
+                    study_dir, f"{context.source_name}_{experiment.nct_id}.csv"
+                )
+            else:
+                save_path = os.path.join(
+                    study_dir,
+                    f"{context.source_name}_{experiment.nct_id}_no_date_filter.csv",
+                )
 
             if os.path.exists(save_path) and not self.overwrite_existing:
                 logger.debug(
@@ -649,6 +657,19 @@ class PubMedCurateStage(SourceStage):
             curated_paths[experiment.nct_id] = save_path
             curated_data_sizes[experiment.nct_id] = len(result)
             total_rows += len(result)
+
+            # Persist save path in experiment yaml
+            if context.filter_by_date:
+                experiment.source_paths[context.source_name] = save_path
+            else:
+                experiment.source_paths[f"{context.source_name}_no_date_filter"] = (
+                    save_path
+                )
+            experiment.to_yaml(
+                os.path.join(
+                    context.save_dir, "experiments", f"{experiment.nct_id}.yaml"
+                )
+            )
 
         state.payload = curated_paths
         state.update(curated_paths=curated_paths)

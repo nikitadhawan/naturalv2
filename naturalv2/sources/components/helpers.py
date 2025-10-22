@@ -45,7 +45,7 @@ CONNECTOR_SPLIT = re.compile(r"[-_/+,;:\s]+")
 # Strip simple parenthetical notes (e.g., “(oral)”) when we need a shorter fallback
 # alias. For example, "sitagliptin (oral tablet)" -> "sitagliptin "
 # The stripped form will be added to the dictionary as a backup when the text with
-# the paranthesis is not present
+# the parenthesis is not present
 PAREN_STRIP = re.compile(r"[\[(][^)\]]+[\])]")
 
 # Units that most often follow a dose
@@ -107,7 +107,7 @@ CHAR_TRANSLATION = {
     ord("\xa0"): " ",  # non-breaking space; `&nbsp` in HTML
     ord("\u2007"): " ",  # figure space, often used in tables
     ord("\u202f"): " ",  # narrow no-break space, common in SI
-    ord("\u200a"): " ",  # shows
+    ord("\u200a"): " ",  # hair space
     ord("\ufeff"): None,
     ord("®"): None,
     ord("™"): None,

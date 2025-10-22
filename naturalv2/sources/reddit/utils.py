@@ -405,7 +405,7 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
     Parameters
     ----------
     reddit_data : pd.DataFrame
-        A DataFrame containing Reddit posts. This function expects the ``'text_field``
+        A DataFrame containing Reddit posts. This function expects the ``'text_field'``
         and ``author`` columns to exist in the dataframe.
     text_field : str
         The name of the text field in the DataFrame to be filtered.
@@ -456,7 +456,7 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
     has_long_token = preview.str.contains(r"[A-Za-z]{3,}", regex=True, na=False)
     valid_text_mask &= has_long_token
 
-    # Drop posts/comments where at least 50% of the characters are not word characters
+    # Drop posts/comments where at least 25% of the characters are not word characters
     total_length = trimmed_text.str.len().fillna(0)
     alpha_chars = trimmed_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
     ratio_ok = (alpha_chars * 4) >= total_length  # >=25% word characters

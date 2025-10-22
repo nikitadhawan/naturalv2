@@ -16,4 +16,4 @@ from .operations import (
     search_subreddits,
 )
 from .stages import RedditConditionFilter, RedditCurateStage, RedditDownloadAndClean
-from .utils import download_subs_list, get_sub_about_info, rule_based_filter
+from .utils import apply_rule_based_filter, download_subs_list, get_sub_about_info

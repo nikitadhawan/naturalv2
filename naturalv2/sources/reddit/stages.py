@@ -14,7 +14,6 @@ This module provides the following stages:
 import ast
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import math
@@ -22,6 +21,7 @@ import os
 from functools import partial
 from typing import Iterator
 
+import ahocorasick
 import asyncpraw
 import pandas as pd
 import psutil
@@ -34,6 +34,7 @@ from tqdm.contrib.concurrent import process_map
 from naturalv2.models.lm import APIModel
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
+from naturalv2.sources.components.helpers import build_treatment_automaton
 from naturalv2.sources.components.llm_extraction import (
     ExtractType,
     extract_curation_info,
@@ -650,12 +651,13 @@ class RedditCurateStage(SourceStage):
             treatment_names = experiment.get_all_treatment_names_for_source(
                 context.source_name
             )
+            treatment_pattern = build_treatment_automaton(treatment_names)
             cutoff_dt, bad_date = self._parse_cutoff_date(context, experiment)
             num_bad_dates += int(bad_date)
 
             rows_written, header_written = self._curate_experiment_files(
                 clean_data_paths=clean_data_paths,
-                treatment_names=treatment_names,
+                treatment_pattern=treatment_pattern,
                 cutoff_dt=cutoff_dt,
                 save_path=save_path,
                 experiment_id=experiment.nct_id,
@@ -755,7 +757,7 @@ class RedditCurateStage(SourceStage):
         self,
         *,
         clean_data_paths: list[str],
-        treatment_names: list[str],
+        treatment_pattern: ahocorasick.Automaton,
         cutoff_dt: pd.Timestamp | None,
         save_path: str,
         experiment_id: str,
@@ -782,7 +784,7 @@ class RedditCurateStage(SourceStage):
                     parquet_file=parquet_file,
                     path=path,
                     save_path=save_path,
-                    treatment_names=treatment_names,
+                    treatment_pattern=treatment_pattern,
                     cutoff_dt=cutoff_dt,
                     seen_report_hashes=seen_report_hashes,
                     header_written=header_written,
@@ -810,7 +812,7 @@ class RedditCurateStage(SourceStage):
         parquet_file: pq.ParquetFile,
         path: str,
         save_path: str,
-        treatment_names: list[str],
+        treatment_pattern: ahocorasick.Automaton,
         cutoff_dt: pd.Timestamp | None,
         seen_report_hashes: set[bytes],
         header_written: bool,
@@ -830,7 +832,7 @@ class RedditCurateStage(SourceStage):
         ) as chunk_pbar:
             for chunk_df in self._iter_parquet_chunks(parquet_file):
                 relevant_posts_df = get_study_relevant_posts(
-                    chunk_df, treatment_names, cutoff_dt
+                    chunk_df, treatment_pattern, cutoff_dt
                 )
                 formatted_chunk = self._format_curated_chunk(
                     relevant_posts_df, seen_report_hashes
@@ -973,11 +975,8 @@ class RedditCurateStage(SourceStage):
         if "report" not in formatted_df.columns:
             return pd.DataFrame()
 
-        formatted_df["__report_hash"] = (
-            formatted_df["report"]
-            .fillna("")
-            .astype(str)
-            .apply(lambda txt: hashlib.sha1(txt.encode("utf-8")).digest())
+        formatted_df["__report_hash"] = pd.util.hash_pandas_object(
+            formatted_df["report"].fillna("").astype(str), index=False
         )
         dedup_mask = ~formatted_df["__report_hash"].isin(seen_hashes)
         if not dedup_mask.any():

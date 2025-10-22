@@ -578,7 +578,7 @@ def get_context_post_df(
 
     # Merge author replies into submissions, filling non replies with empty list
     submissions = submissions.merge(
-        author_replies, left_on="post_id", right_index=True
+        author_replies, left_on="post_id", right_index=True, how="left"
     ).reset_index(drop=True)
     submissions["author_replies"] = submissions["author_replies"].apply(
         lambda x: x if isinstance(x, list) else []

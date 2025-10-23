@@ -2,7 +2,7 @@ import pytest
 
 from naturalv2.sources.components.helpers import (
     build_treatment_automaton,
-    canonicalize_for_matching,
+    canonicalize_reports_for_matching,
     normalize_text_for_matching,
 )
 
@@ -33,7 +33,7 @@ def test_normalize_text_for_matching_inserts_digit_letter_spaces():
 def test_canonicalize_for_matching_collapses_connectors_with_mapping():
     text = "alpha-tocopherol 400mg/day"
 
-    canonical_text, index_map = canonicalize_for_matching(text)
+    canonical_text, index_map = canonicalize_reports_for_matching(text)
 
     assert canonical_text == "alpha tocopherol 400 mg day"
     assert index_map == [
@@ -68,7 +68,7 @@ def test_canonicalize_for_matching_collapses_connectors_with_mapping():
 
 
 def test_canonicalize_for_matching_inserts_spaces_for_letter_digit_boundaries():
-    canonical_text, index_map = canonicalize_for_matching("B12 and vitaminB6")
+    canonical_text, index_map = canonicalize_reports_for_matching("B12 and vitaminB6")
 
     assert canonical_text == "B 12 and vitaminB 6"
     # Space inserted between B and 1 should map back to the digit index.
@@ -79,7 +79,7 @@ def test_canonicalize_for_matching_inserts_spaces_for_letter_digit_boundaries():
 
 
 def test_canonicalize_for_matching_ignores_repeated_connectors():
-    canonical_text, index_map = canonicalize_for_matching("aspirin--mg")
+    canonical_text, index_map = canonicalize_reports_for_matching("aspirin--mg")
 
     assert canonical_text == "aspirin mg"
     # The single space is sourced from the first hyphen index.
@@ -88,7 +88,7 @@ def test_canonicalize_for_matching_ignores_repeated_connectors():
 
 def test_canonicalize_for_matching_handles_dataset_dose_format():
     normalized = normalize_text_for_matching("Blinatumomab 60 µg/m²/d Step")
-    canonical_text, index_map = canonicalize_for_matching(normalized)
+    canonical_text, index_map = canonicalize_reports_for_matching(normalized)
 
     assert normalized == "blinatumomab 60 ug/m 2/d step"
     assert canonical_text == "blinatumomab 60 ug m 2 d step"
@@ -97,21 +97,21 @@ def test_canonicalize_for_matching_handles_dataset_dose_format():
 
 def test_canonicalize_for_matching_retains_non_connector_symbols():
     normalized = normalize_text_for_matching("Arm I (AC-->WP)")
-    canonical_text, _ = canonicalize_for_matching(normalized)
+    canonical_text, _ = canonicalize_reports_for_matching(normalized)
 
     assert normalized == "arm i (ac-->wp)"
     assert canonical_text == "arm i (ac >wp)"
 
 
 def test_canonicalize_for_matching_handles_empty_input():
-    canonical_text, index_map = canonicalize_for_matching("")
+    canonical_text, index_map = canonicalize_reports_for_matching("")
     assert canonical_text == ""
     assert index_map == []
 
 
 def _find_matches(automaton, raw_text):
     normalized = normalize_text_for_matching(raw_text)
-    canonical_text, _ = canonicalize_for_matching(normalized)
+    canonical_text, _ = canonicalize_reports_for_matching(normalized)
     return {match for _, match in automaton.iter(canonical_text)}
 
 
@@ -121,6 +121,7 @@ def test_build_treatment_automaton_matches_normalized_variants():
         "Alpha-tocopherol (oral capsule)",
         "N-acetyl cysteine",
         "Libexin® 100 mg Tablets",
+        "topiramate",
         "",
         "   ",
     ]
@@ -130,6 +131,7 @@ def test_build_treatment_automaton_matches_normalized_variants():
         "Metformin—XR 500 mg tablets were given. "
         "Alpha tocopherol oral capsule and N acetyl-cysteine were provided. "
         "Libexin 100 mg tablets were dispensed."
+        "I take mytopiramate twice a day."
     )
 
     matches = _find_matches(automaton, text)
@@ -138,6 +140,7 @@ def test_build_treatment_automaton_matches_normalized_variants():
         "libexin 100 mg tablets",
         "metformin xr 500 mg",
         "n acetyl cysteine",
+        "topiramate",
     }
 
 

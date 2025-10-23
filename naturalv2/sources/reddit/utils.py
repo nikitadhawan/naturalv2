@@ -466,7 +466,7 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
     )
     valid_text_mask &= has_long_token
 
-    # Drop posts/comments where at least 25% of the characters are not word characters
+    # Keep posts/comments where at least 25% of the characters are word characters
     total_length = cleaned_text.str.len().fillna(0)
     letter_counts = cleaned_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
     ratio_ok = (letter_counts * 4) >= total_length  # >=25% word characters

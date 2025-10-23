@@ -28,7 +28,7 @@ from naturalv2.sources.components import filter_by_date
 from naturalv2.sources.components.helpers import (
     DOSE_PATTERN,
     QUALIFIER_PATTERN,
-    canonicalize_for_matching,
+    canonicalize_reports_for_matching,
     normalize_text_for_matching,
 )
 from naturalv2.sources.reddit.utils import (
@@ -302,7 +302,7 @@ def get_study_relevant_posts(
     def extract_mentions(text: str) -> list[str]:
         # Collapse punctuation connectors to spaces so aliases match regardless
         # of hyphens/underscores
-        canonical_text, canonical_to_original = canonicalize_for_matching(text)
+        canonical_text, canonical_to_original = canonicalize_reports_for_matching(text)
         if not canonical_text:
             return []
 

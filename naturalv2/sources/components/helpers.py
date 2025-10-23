@@ -120,7 +120,7 @@ CONNECTOR_CHAR_SET.add(" ")
 
 @lru_cache(maxsize=50_000)
 def normalize_text_for_matching(text: str) -> str:
-    """Normalize a treatment alias for tolerant matching.
+    """Normalize text for matching.
 
     Parameters
     ----------
@@ -214,7 +214,7 @@ def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
     return automaton
 
 
-def canonicalize_for_matching(text: str) -> tuple[str, list[int]]:
+def canonicalize_reports_for_matching(text: str) -> tuple[str, list[int]]:
     """Collapse connector characters to single spaces and track original indices.
 
     Parameters

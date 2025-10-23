@@ -461,7 +461,7 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
     alpha_chars = trimmed_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
     ratio_ok = (alpha_chars * 4) >= total_length  # >=25% word characters
 
-    return valid_text_mask & (has_text & ratio_ok)
+    return valid_text_mask & ratio_ok
 
 
 def get_context_post_df(

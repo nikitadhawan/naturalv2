@@ -5,12 +5,18 @@ import logging
 import os
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pandas as pd
 from tqdm.asyncio import tqdm_asyncio
 
-from naturalv2.sources.components.helpers import filter_by_date, tokenize_casefold
+from naturalv2.sources.components.helpers import (
+    build_treatment_automaton,
+    extract_mentions,
+    filter_by_date,
+    normalize_text_for_matching,
+)
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
 from naturalv2.utils import concurrency_limited
@@ -65,7 +71,7 @@ class PubMedConditionFilter(SourceStage):
                 for query in queries
             ]
         )
-        source_dir = self.source_dir(context)
+        source_dir = self.results_dir(context)
         query_log_path = os.path.join(
             source_dir,
             f"{context.source_name}_condition_queries_{context.experiment_name}.csv",
@@ -73,7 +79,9 @@ class PubMedConditionFilter(SourceStage):
         df.to_csv(query_log_path, index=False)
 
         state.payload = trial_query_map
-        state.update(trial_query_map=trial_query_map, query_log_path=query_log_path)
+        state.update(
+            trial_query_map=dict(trial_query_map), query_log_path=query_log_path
+        )
         logger.info(
             "%s: constructed PubMed queries for %d experiments",
             self.stage_name,
@@ -241,11 +249,7 @@ class PubMedFetchAndClean(SourceStage):
         return state
 
     def clean(
-        self,
-        adf: pd.DataFrame,
-        *,
-        experiment: "Experiment",
-        apply_date_filter: bool = True,
+        self, adf: pd.DataFrame, *, experiment: "Experiment"
     ) -> pd.DataFrame | None:
         """Clean and normalize the fetched case reports DataFrame.
 
@@ -255,8 +259,6 @@ class PubMedFetchAndClean(SourceStage):
             Raw DataFrame of fetched case reports.
         experiment : Experiment
             The experiment metadata.
-        apply_date_filter : bool, default=True
-            Whether to filter by experiment date.
 
         Returns
         -------
@@ -341,17 +343,6 @@ class PubMedFetchAndClean(SourceStage):
 
         # Rename 'full_text' column to 'report'
         df.rename(columns={"full_text": "report"}, inplace=True)
-
-        if apply_date_filter and experiment.date:
-            cutoff = pd.to_datetime(experiment.date, errors="raise")
-            df = filter_by_date(df, cutoff, "publication_date")
-            if df.empty:
-                logger.warning(
-                    "All rows dropped after date filtering for experiment %s",
-                    experiment.nct_id,
-                )
-                return None
-
         return df
 
     async def _fetch_and_clean_case_reports(
@@ -430,9 +421,7 @@ class PubMedFetchAndClean(SourceStage):
 
             # Clean dataframe
             cleaned_case_reports = self.clean(
-                fetched_case_reports,
-                experiment=experiment,
-                apply_date_filter=context.filter_by_date,
+                fetched_case_reports, experiment=experiment
             )
             if cleaned_case_reports is None:
                 continue
@@ -578,6 +567,7 @@ class PubMedCurateStage(SourceStage):
                     experiment.nct_id,
                     file_path,
                 )
+                curated_data_sizes[experiment.nct_id] = 0
                 continue
 
             df = pd.read_csv(file_path).drop(columns=["Unnamed: 0"], errors="ignore")
@@ -610,48 +600,43 @@ class PubMedCurateStage(SourceStage):
                 curated_paths[experiment.nct_id] = save_path
                 continue
 
+            if context.filter_by_date and experiment.date:
+                cutoff = pd.to_datetime(experiment.date, errors="raise")
+                df = filter_by_date(df, cutoff, "publication_date")
+                if df.empty:
+                    logger.warning(
+                        "All rows dropped after date filtering for experiment %s",
+                        experiment.nct_id,
+                    )
+                    curated_data_sizes[experiment.nct_id] = 0
+                    continue
+
             treatment_names = experiment.get_all_treatment_names_for_source(
                 context.source_name
             )
-            alias_token_map: dict[str, set[str]] = {}
-            for alias in sorted(treatment_names):
-                if not alias:
-                    continue
-                tokens = tokenize_casefold(alias)
-                if tokens:
-                    alias_token_map[alias] = tokens
+            treatment_automaton = build_treatment_automaton(treatment_names)
 
-            if not alias_token_map:
+            reports = (
+                df["report"]
+                .fillna("")
+                .astype("string")
+                .map(normalize_text_for_matching)
+            )
+
+            mentions = reports.map(
+                partial(extract_mentions, automaton=treatment_automaton)
+            )
+            mask = mentions.str.len().gt(0)
+            result = df.loc[mask].assign(treatments_mentioned=mentions.loc[mask])
+
+            if result.empty:
                 logger.warning(
-                    "%s: no treatment aliases available for experiment %s",
-                    self.stage_name,
-                    experiment.nct_id,
-                )
-                continue
-
-            reports = df["report"].fillna("").astype(str)
-            report_tokens = reports.apply(tokenize_casefold)
-
-            def match_treatments(tokens, alias_token_map=alias_token_map):
-                return [
-                    alias
-                    for alias, alias_tokens in alias_token_map.items()
-                    if alias_tokens <= tokens
-                ]
-
-            matched_treatments = report_tokens.apply(match_treatments)
-
-            has_treatment = matched_treatments.apply(bool)
-            if not has_treatment.any():
-                logger.info(
                     "%s: No treatments matched in any report for experiment %s",
                     self.stage_name,
                     experiment.nct_id,
                 )
+                curated_data_sizes[experiment.nct_id] = 0
                 continue
-
-            result = df.loc[has_treatment].copy()
-            result["treatments_mentioned"] = matched_treatments[has_treatment]
 
             result.to_csv(save_path, index=False)
             curated_paths[experiment.nct_id] = save_path

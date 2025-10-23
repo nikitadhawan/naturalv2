@@ -78,7 +78,7 @@ CONNECTOR_SPLIT = re.compile(r"[-_/+,;:\s]+")
 PAREN_STRIP = re.compile(r"[\[(][^)\]]+[\])]")
 
 # Units that most often follow a dose
-DOSE_UNITS = (
+_DOSE_UNITS = (
     "mg",
     "g",
     "ug",
@@ -95,24 +95,28 @@ DOSE_UNITS = (
     "mg/day",
     "mg/ml",
 )
-DOSE_UNIT_PATTERN = "|".join(re.escape(unit) for unit in DOSE_UNITS)
+_DOSE_UNIT_PATTERN = "|".join(re.escape(unit) for unit in _DOSE_UNITS)
 
 # Let one dose snippet trail the name (examples: "25 mg", "125mg/5ml", "amlodipine, 10mg")
 # so the match keeps the dosage text when it’s present.
-DOSE_FRAGMENT = (
+_DOSE_FRAGMENT = (
     r"(?:[,;/\-\s]*+\d+(?:\.\d+)?"
-    r"(?:\s*(?:" + DOSE_UNIT_PATTERN + r"))?"
+    r"(?:\s*(?:" + _DOSE_UNIT_PATTERN + r"))?"
     r"(?:\s*/\s*\d+(?:\.\d+)?(?:\s*(?:day|week|wk|kg|m2|m\^2))?)?"
     r")"
 )
 
 # Let that dose fragment repeat a few times because compound entries often list
 # several strengths back to back
-DOSE_PATTERN = rf"(?:{DOSE_FRAGMENT}){{0,3}}+"
+_DOSE_PATTERN = rf"(?:{_DOSE_FRAGMENT}){{0,3}}+"
 
 # Allow one short parenthetical hint after the name, since arm labels and routes
 # show up in parentheses
-QUALIFIER_PATTERN = r"(?:\s*[\[(][^)\]]{1,40}[\])])?"
+_QUALIFIER_PATTERN = r"(?:\s*[\[(][^)\]]{1,40}[\])])?"
+
+_DOSE_TAIL_REGEX = re.compile(
+    rf"(?:{_QUALIFIER_PATTERN}{_DOSE_PATTERN})", flags=re.IGNORECASE | re.UNICODE
+)
 
 CONNECTOR_CHAR_SET = set("-_/+,;:")
 CONNECTOR_CHAR_SET.add(" ")
@@ -270,6 +274,57 @@ def canonicalize_reports_for_matching(text: str) -> tuple[str, list[int]]:
 
     canonical_text = "".join(canonical_characters)
     return canonical_text, canonical_to_original_indices
+
+
+def extract_mentions(text: str, automaton: ahocorasick.Automaton) -> list[str]:
+    """Extract mentions from a text string using an ahocorasick automaton.
+
+    Parameters
+    ----------
+    text : str
+        The text to extract mentions from.
+    automaton : ahocorasick.Automaton
+        The automaton to use for extracting mentions.
+
+    Returns
+    -------
+    list[str]
+        A list of mentions found in the text.
+    """
+    # Collapse punctuation connectors to spaces so aliases match regardless
+    # of hyphens/underscores
+    canonical_text, canonical_to_original = canonicalize_reports_for_matching(text)
+    if not canonical_text:
+        return []
+
+    found_mentions: list[str] = []
+    emitted_mentions: set[str] = set()  # For quick deduplication
+
+    for end_index, matched_alias in automaton.iter(canonical_text):
+        start_index = end_index - len(matched_alias) + 1
+        if start_index < 0:
+            # Safety guard in case the automaton reports an unexpected position
+            continue
+
+        # Translate the canonical span back to the original text indices
+        original_start = canonical_to_original[start_index]
+        original_end = canonical_to_original[end_index] + 1
+
+        # Grab the exact substring from the original text
+        mention_text = text[original_start:original_end]
+
+        # Look right after the alias for an optional qualifier/dose string
+        # and include it
+        dose_tail = _DOSE_TAIL_REGEX.match(text[original_end:])
+        if dose_tail:
+            mention_text += dose_tail.group(0)
+
+        cleaned_mention = mention_text.strip()
+        if cleaned_mention and cleaned_mention not in emitted_mentions:
+            emitted_mentions.add(cleaned_mention)
+            found_mentions.append(cleaned_mention)
+
+    return sorted(found_mentions)
 
 
 def filter_by_date(

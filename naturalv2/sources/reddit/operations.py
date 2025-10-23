@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import partial
 from typing import Union
 
 import asyncpraw
 import pandas as pd
-import regex as re
 from ahocorasick import Automaton
 from aiolimiter import AsyncLimiter
 from tenacity import (
@@ -26,9 +26,7 @@ from tenacity import (
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.components import filter_by_date
 from naturalv2.sources.components.helpers import (
-    DOSE_PATTERN,
-    QUALIFIER_PATTERN,
-    canonicalize_reports_for_matching,
+    extract_mentions,
     normalize_text_for_matching,
 )
 from naturalv2.sources.reddit.utils import (
@@ -40,10 +38,6 @@ from naturalv2.sources.reddit.utils import (
 
 
 logger = logging.getLogger(__name__)
-
-_DOSE_TAIL_REGEX = re.compile(
-    rf"(?:{QUALIFIER_PATTERN}{DOSE_PATTERN})", flags=re.IGNORECASE | re.UNICODE
-)
 
 
 @retry(
@@ -299,42 +293,6 @@ def get_study_relevant_posts(
         .map(normalize_text_for_matching)
     )
 
-    def extract_mentions(text: str) -> list[str]:
-        # Collapse punctuation connectors to spaces so aliases match regardless
-        # of hyphens/underscores
-        canonical_text, canonical_to_original = canonicalize_reports_for_matching(text)
-        if not canonical_text:
-            return []
-
-        found_mentions: list[str] = []
-        emitted_mentions: set[str] = set()  # For quick deduplication
-
-        for end_index, matched_alias in treatment_automaton.iter(canonical_text):
-            start_index = end_index - len(matched_alias) + 1
-            if start_index < 0:
-                # Safety guard in case the automaton reports an unexpected position
-                continue
-
-            # Translate the canonical span back to the original text indices
-            original_start = canonical_to_original[start_index]
-            original_end = canonical_to_original[end_index] + 1
-
-            # Grab the exact substring from the original text
-            mention_text = text[original_start:original_end]
-
-            # Look right after the alias for an optional qualifier/dose string
-            # and include it
-            dose_tail = _DOSE_TAIL_REGEX.match(text[original_end:])
-            if dose_tail:
-                mention_text += dose_tail.group(0)
-
-            cleaned_mention = mention_text.strip()
-            if cleaned_mention and cleaned_mention not in emitted_mentions:
-                emitted_mentions.add(cleaned_mention)
-                found_mentions.append(cleaned_mention)
-
-        return sorted(found_mentions)
-
-    mentions = reports.map(extract_mentions)
+    mentions = reports.map(partial(extract_mentions, automaton=treatment_automaton))
     mask = mentions.str.len().gt(0)
     return df.loc[mask].assign(treatments_mentioned=mentions.loc[mask])

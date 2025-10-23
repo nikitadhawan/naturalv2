@@ -17,26 +17,55 @@ import regex as re
 
 logger = logging.getLogger(__name__)
 
+_HYPHEN_RUNES = "\u2010\u2011\u2012\u2013\u2014\u2212-"
+_ZERO_WIDTH = "\u200b\u200c\u200d\u2060"
+_TRANSLATION_TABLE = {
+    **{ord(c): "-" for c in _HYPHEN_RUNES},
+    **{ord(c): None for c in _ZERO_WIDTH},
+    # Map superscript digits down to normal digits so “m²” and “m2” line up.
+    ord("¹"): "1",
+    ord("²"): "2",
+    ord("³"): "3",
+    ord("⁴"): "4",
+    ord("⁵"): "5",
+    ord("⁶"): "6",
+    ord("⁷"): "7",
+    ord("⁸"): "8",
+    ord("⁹"): "9",
+    ord("⁰"): "0",
+    # Replace common oddities (non-breaking spaces, ®, ™, hair spaces) before we
+    # normalize further
+    ord("\xa0"): " ",  # non-breaking space; `&nbsp` in HTML
+    ord("\u2007"): " ",  # figure space, often used in tables
+    ord("\u202f"): " ",  # narrow no-break space, common in SI
+    ord("\u200a"): " ",  # hair space
+    ord("\ufeff"): None,
+    ord("®"): None,
+    ord("™"): None,
+    ord("^"): None,
+    ord("•"): " ",
+    ord("→"): " ",
+    ord("×"): "x",
+    ord("±"): "+/-",
+    # Different “micro” symbols both become a simple “u”
+    ord("µ"): "u",
+    ord("μ"): "u",
+}
 
-# Treat all dash-like characters as the same so “drug--name” and “drug-name” both
-# match
-HYPHEN_CLASS = r"[\u2010\u2011\u2012\u2013\u2014\u2212-]"
+# Swap Greek letters for simple words so Unicode and ASCII versions match up
+GREEK_CHAR_MAP = {
+    "α": "alpha",
+    "β": "beta",
+    "γ": "gamma",
+    "δ": "delta",
+    "Δ": "delta",
+    "ε": "epsilon",
+    "κ": "kappa",
+}
 
-# Let words reconnect with a mix of spaces, dashes, slashes, commas, or colons
-# because trial text often swaps them e.g. sandoz topiramate, sandoz-topiramate,
-# sandoz/topiramate, sandoz_topiramate
-CONNECTOR_PATTERN = r"[-_/+,;:\s]*+"
-
-# Define the characters that count as part of a word when we set boundaries;
-# hyphenated names should stay intact
-WORD_CLASS = r"[\w-]"
-
-# Let apostrophes appear or disappear inside tokens so “children's” and “childrens”
-# both hit
-OPTIONAL_APOSTROPHE = r"['’]?"
-
-# Spell check for apostrophes when building token patterns.
-APOSTROPHE_CHARS = {"'", "’"}
+_RE_SPACES = re.compile(r"\s+")  # regex to match one or more spaces
+_RE_NUM_TO_LETTER = re.compile(r"(?<=\d)(?=[a-z])")
+_RE_LETTER_TO_NUM = re.compile(r"(?<=[a-z])(?=\d)")
 
 # Break aliases on the connectors above so we can rebuild them with the flexible
 # pattern e.g. "calcium-magnesium+citrate" -> ["calcium", "magnesium", "citrate"]
@@ -85,54 +114,6 @@ DOSE_PATTERN = rf"(?:{DOSE_FRAGMENT}){{0,3}}+"
 # show up in parentheses
 QUALIFIER_PATTERN = r"(?:\s*[\[(][^)\]]{1,40}[\])])?"
 
-# Map superscript digits down to normal digits so “m²” and “m2” line up.
-SUPERSCRIPT_TRANSLATION = str.maketrans(
-    {
-        "¹": "1",
-        "²": "2",
-        "³": "3",
-        "⁴": "4",
-        "⁵": "5",
-        "⁶": "6",
-        "⁷": "7",
-        "⁸": "8",
-        "⁹": "9",
-        "⁰": "0",
-    }
-)
-
-# Replace common oddities (non-breaking spaces, ®, ™, hair spaces) before we
-# normalize further
-CHAR_TRANSLATION = {
-    ord("\xa0"): " ",  # non-breaking space; `&nbsp` in HTML
-    ord("\u2007"): " ",  # figure space, often used in tables
-    ord("\u202f"): " ",  # narrow no-break space, common in SI
-    ord("\u200a"): " ",  # hair space
-    ord("\ufeff"): None,
-    ord("®"): None,
-    ord("™"): None,
-    ord("•"): " ",
-    ord("→"): " ",
-    ord("^"): None,
-    ord("×"): "x",
-    ord("±"): "+/-",
-}
-
-# Swap Greek letters for simple words so Unicode and ASCII versions match up
-GREEK_CHAR_MAP = {
-    "α": "alpha",
-    "β": "beta",
-    "γ": "gamma",
-    "δ": "delta",
-    "Δ": "delta",
-    "ε": "epsilon",
-    "κ": "kappa",
-}
-
-# Different “micro” symbols both become a simple “u”
-MICRO_FORMS = ("µ", "μ")
-
-
 CONNECTOR_CHAR_SET = set("-_/+,;:")
 CONNECTOR_CHAR_SET.add(" ")
 
@@ -154,33 +135,34 @@ def normalize_text_for_matching(text: str) -> str:
     if not text:
         return ""
 
-    # Make sure the text uses a standard Unicode form and lowercase
-    normalized = unicodedata.normalize("NFKC", text).casefold()
+    # Use the translation table to swap common symbol lookalikes for plain text
+    pre_normalized = text.translate(_TRANSLATION_TABLE)
 
-    # Swap common symbol lookalikes for plain text before removing accents
-    normalized = normalized.translate(SUPERSCRIPT_TRANSLATION)
-    normalized = normalized.translate(CHAR_TRANSLATION)
+    if pre_normalized.isascii():
+        # ASCII only, skip NFKC/NFKD
+        normalized = pre_normalized.casefold()
+    else:
+        # Make sure the text uses a standard Unicode form and lowercase
+        normalized = unicodedata.normalize("NFKC", pre_normalized).casefold()
 
-    # Turn every dash-like character into '-' and drop hidden spaces
-    normalized = re.sub(HYPHEN_CLASS, "-", normalized)
-    normalized = re.sub(r"[\u200b\u200c\u200d\u2060]", "", normalized)
+        # Clean up any new codepoints that were added after NFKC normalization
+        normalized = normalized.translate(_TRANSLATION_TABLE)
 
-    # Remove accent marks so “crème” and “creme” normalize the same way
-    normalized = unicodedata.normalize("NFKD", normalized)
-    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    # Remove accent marks (so “crème” and “creme” normalize the same way) only
+    # if non-ASCII remains
+    if not normalized.isascii():
+        normalized = unicodedata.normalize("NFKD", normalized)
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
 
     # Replace Greek letters and micro symbols with simple ASCII text
-    normalized = "".join(GREEK_CHAR_MAP.get(ch, ch) for ch in normalized)
-    for micro in MICRO_FORMS:
-        normalized = normalized.replace(micro, "u")
+    normalized = "".join(GREEK_CHAR_MAP.get(char, char) for char in normalized)
 
     # Shrink repeated spaces and trim loose punctuation on the ends
-    normalized = re.sub(r"\s+", " ", normalized)
-    normalized = normalized.strip(" -_/+,;:")
+    normalized = _RE_SPACES.sub(" ", normalized).strip(" -_/+,;:")
 
     # Ensure numbers glued to units (“10mg”) match spaced forms (“10 mg”)
-    normalized = re.sub(r"(?<=\d)(?=[a-zA-Zµμ])", " ", normalized)
-    return re.sub(r"(?<=[a-zA-Zµμ])(?=\d)", " ", normalized)
+    normalized = _RE_NUM_TO_LETTER.sub(" ", normalized)
+    return _RE_LETTER_TO_NUM.sub(" ", normalized)
 
 
 def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:

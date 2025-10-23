@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+# Insecure SSL context for downloading Reddit data when TLS verification fails
 _INSECURE_SSL_CONTEXT = ssl.create_default_context()
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
@@ -416,15 +417,20 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
         A boolean Series indicating which rows in the DataFrame are valid.
 
     """
-    # Normalize the text field
-    text_field_values = reddit_data[text_field].fillna("")
+    # Stringify the 'text_field' column
+    text_field_values = reddit_data[text_field].astype("string").fillna("")
+
+    # Replace HTML entities with their corresponding characters
     normalized_text = (
         text_field_values.str.replace("&gt;", ">", regex=False)
         .str.replace("&lt;", "<", regex=False)
         .str.replace("&amp;", "&", regex=False)
-        .str.replace("\n", " ", regex=False)
-        .str.replace("\t", " ", regex=False)
     )
+
+    # Replace runs of whitespace with a single space
+    normalized_text = normalized_text.str.replace(r"[ \t\r\n]+", " ", regex=True)
+
+    # Strip leading and trailing whitespace
     trimmed_text = normalized_text.str.strip()
 
     # Require non-empty text that is not one of the sentinel strings
@@ -442,24 +448,28 @@ def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Se
     valid_text_mask &= ~is_bot_author
 
     # Drop URLs (markdown links, bare http(s), bare www) from the full text
-    url_re = r"""
-        (\[[^\]]+\]\(\s*(?:https?://|www\.)\S+\s*\))  # markdown [label](url)
-        | (https?://\S+)                              # bare http/https
-        | (\bwww\.\S+)                                # bare www.*
-    """
-    cleaned_text = trimmed_text.astype("string").str.replace(
-        url_re, "", regex=True, flags=re.VERBOSE | re.IGNORECASE
+    cleaned_text = trimmed_text.str.replace(
+        pat=r"""
+        \[([^\]]+)\]\(\s*(?:https?://|www\.)\S+\s*\)   # [label](url) -> keep label
+        | https?://\S+                                  # bare http/https -> drop
+        | \bwww\.\S+                                    # bare www.*      -> drop
+        """,
+        repl=r"\1",  # Keep the first match (the markdown label), drop the rest
+        regex=True,
+        flags=re.IGNORECASE | re.VERBOSE,
     )
 
     # Look at the first 2048 characters of the cleaned text for a >=3-letter token
     preview = cleaned_text.str.slice(0, 2048)
-    has_long_token = preview.str.contains(r"[A-Za-z]{3,}", regex=True, na=False)
+    has_long_token = preview.str.contains(
+        r"[^\W\d_]{3,}", regex=True, na=False, flags=re.UNICODE
+    )
     valid_text_mask &= has_long_token
 
     # Drop posts/comments where at least 25% of the characters are not word characters
-    total_length = trimmed_text.str.len().fillna(0)
-    alpha_chars = trimmed_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
-    ratio_ok = (alpha_chars * 4) >= total_length  # >=25% word characters
+    total_length = cleaned_text.str.len().fillna(0)
+    letter_counts = cleaned_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
+    ratio_ok = (letter_counts * 4) >= total_length  # >=25% word characters
 
     return valid_text_mask & ratio_ok
 

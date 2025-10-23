@@ -13,15 +13,19 @@ This module provides the following stages:
 
 import ast
 import asyncio
-import concurrent.futures
+import contextlib
 import json
 import logging
+import math
 import os
 from functools import partial
+from typing import Iterator
 
+import ahocorasick
 import asyncpraw
 import pandas as pd
 import psutil
+import pyarrow.parquet as pq
 from aiolimiter import AsyncLimiter
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
@@ -30,7 +34,7 @@ from tqdm.contrib.concurrent import process_map
 from naturalv2.models.lm import APIModel
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.anonymizer import Anonymizer
-from naturalv2.sources.components.helpers import build_term_pattern
+from naturalv2.sources.components.helpers import build_treatment_automaton
 from naturalv2.sources.components.llm_extraction import (
     ExtractType,
     extract_curation_info,
@@ -126,8 +130,10 @@ class RedditConditionFilter(SourceStage):
 
         # Update state with existing mapping
         state.payload = condition_to_subreddit_map
-        state.metadata["condition_to_subreddit_map"] = condition_to_subreddit_map
-        state.metadata["num_unique_subreddits"] = len(set(relevant_subreddits_list))
+        state.update(
+            condition_to_subreddit_map=condition_to_subreddit_map,
+            num_unique_subreddits=len(set(relevant_subreddits_list)),
+        )
 
         # Add prompt template to metadata for logging
         prompt_id = f"{ExtractType.CONDITION.value}_{context.source_name}"
@@ -212,8 +218,10 @@ class RedditConditionFilter(SourceStage):
 
         # Update state with new mapping
         state.payload = condition_to_subreddit_map
-        state.metadata["condition_metadata"] = condition_to_subreddit_map
-        state.metadata["num_unique_subreddits"] = num_unique_subreddits
+        state.update(
+            condition_to_subreddit_map=condition_to_subreddit_map,
+            num_unique_subreddits=num_unique_subreddits,
+        )
 
         # Update and persist metadata in StudyDataset
         context.study_dataset.sources[context.source_name] = condition_to_subreddit_map
@@ -506,10 +514,14 @@ class RedditDownloadAndClean(SourceStage):
         state.update(cleaned_paths=subreddit_cleaned_path_map, source_dir=source_dir)
 
         # Update and persist metadata in StudyDataset
-        context.study_dataset.sources[f"{context.source_name}_cleaned"] = (
-            subreddit_cleaned_path_map
+        self.persist_dataset(
+            context,
+            namespace_paths={
+                f"{context.source_name}_cleaned": list(
+                    subreddit_cleaned_path_map.values()
+                )
+            },
         )
-        context.study_dataset.to_yaml(context.extras["study_dataset_path"])
 
         logger.info(
             "%s: downloaded and cleaned %d subreddits for %d experiments",
@@ -588,37 +600,17 @@ class RedditCurateStage(SourceStage):
 
     Parameters
     ----------
-    max_workers : int | None, optional
-        Degree of parallelism for CPU-bound filtering.
     name : str | None, optional
         Optional explicit stage name; defaults to the class name.
     """
 
-    def __init__(
-        self,
-        *,
-        max_workers: int | None = None,
-        name: str | None = None,
-    ) -> None:
+    def __init__(self, *, name: str | None = None) -> None:
         """Initialize the stage."""
         super().__init__(name=name)
-        self.max_workers = max_workers or max(1, (psutil.cpu_count(logical=False) or 1))
+        self._max_chunk_bytes = 256 << 20
 
     async def run(self, context: CurationContext, state: StageState) -> StageState:
-        """Produce curated CSVs of Reddit posts per experiment.
-
-        Parameters
-        ----------
-        context : CurationContext
-            Pipeline context including experiments and save directories.
-        state : StageState
-            Mutable pipeline state containing ``cleaned_paths``.
-
-        Returns
-        -------
-        StageState
-            Updated state with ``curated_paths`` and progress logs.
-        """
+        """Produce curated CSVs of Reddit posts per experiment."""
         subreddit_cleaned_path_map: dict[str, str] = state.require_metadata(
             "cleaned_paths", stage=self.stage_name
         )
@@ -631,7 +623,6 @@ class RedditCurateStage(SourceStage):
             )
 
         study_dir = self.condition_dir(context)
-
         condition_to_subreddit_map = context.study_dataset.sources.get(
             context.source_name, {}
         )
@@ -639,120 +630,57 @@ class RedditCurateStage(SourceStage):
         curated_paths: dict[str, str] = {}
         curated_data_sizes: dict[str, int] = {}
         num_bad_dates = 0
+
         for experiment in context.experiments:
-            if context.filter_by_date:
-                save_path = os.path.join(study_dir, f"reddit_{experiment.nct_id}.csv")
-            else:
-                save_path = os.path.join(
-                    study_dir, f"reddit_{experiment.nct_id}_no_date_filter.csv"
-                )
-            if os.path.exists(save_path):
-                logger.info(
-                    "Skipping experiment %s as curated data already exists at %s",
-                    experiment.nct_id,
-                    save_path,
-                )
+            save_path, path_key = self._experiment_save_path(
+                context, experiment, study_dir
+            )
+            if self._already_curated(save_path, experiment.nct_id):
                 continue
 
-            # Get subreddits relevant to this experiment
-            trial_relevant_subs = {
-                sub
-                for keyword in experiment.conditions or []
-                for sub in condition_to_subreddit_map.get(keyword, [])
-                if sub in subreddit_cleaned_path_map
-            }
-
-            # Get cleaned data paths for relevant subreddits
-            clean_data_paths = [
-                subreddit_cleaned_path_map[sub] for sub in trial_relevant_subs
-            ]
+            clean_data_paths = self._collect_clean_paths_for_experiment(
+                experiment, condition_to_subreddit_map, subreddit_cleaned_path_map
+            )
             if not clean_data_paths:
                 logger.warning(
                     "No clean data paths found for experiment with NCT ID: %s",
                     experiment.nct_id,
                 )
+                curated_data_sizes[experiment.nct_id] = 0
                 continue
 
             treatment_names = experiment.get_all_treatment_names_for_source(
                 context.source_name
             )
-            treatment_pattern = build_term_pattern(treatment_names)
+            treatment_pattern = build_treatment_automaton(treatment_names)
+            cutoff_dt, bad_date = self._parse_cutoff_date(context, experiment)
+            num_bad_dates += int(bad_date)
 
-            cutoff_dt = None
-            if context.filter_by_date and experiment.date:
-                try:
-                    cutoff_dt = pd.to_datetime(experiment.date)
-                except (ValueError, TypeError) as e:
-                    logger.warning(
-                        f"Failed to parse date '{experiment.date}' for experiment "
-                        f"{experiment.nct_id}: {e}. No date filter will be applied."
-                    )
-                    num_bad_dates += 1
-
-            curated_experiment_data = []
-            with (
-                concurrent.futures.ProcessPoolExecutor(
-                    max_workers=self.max_workers
-                ) as executor,
-                tqdm(
-                    total=len(clean_data_paths),
-                    desc="Curating Reddit data for experiment",
-                    unit="file",
-                    leave=False,
-                    dynamic_ncols=True,
-                    position=1,
-                    disable=len(clean_data_paths) == 0,  # disable if no futures
-                ) as pbar,
-            ):
-                futures = []
-                for path in clean_data_paths:
-                    future = executor.submit(
-                        get_study_relevant_posts,
-                        path,
-                        treatment_pattern,
-                        cutoff_dt,
-                    )
-
-                    # Add callback to update progress bar when future completes
-                    future.add_done_callback(lambda f: pbar.update(1))
-                    futures.append(future)
-
-                for future in concurrent.futures.as_completed(futures):
-                    relevant_posts_df: pd.DataFrame = future.result()
-                    if not relevant_posts_df.empty:
-                        curated_experiment_data.append(relevant_posts_df)
-
-            if not curated_experiment_data:
-                logger.warning(
-                    f"No valid matches found for experiment {experiment.nct_id}"
-                )
+            rows_written, header_written = self._curate_experiment_files(
+                clean_data_paths=clean_data_paths,
+                treatment_pattern=treatment_pattern,
+                cutoff_dt=cutoff_dt,
+                save_path=save_path,
+                experiment_id=experiment.nct_id,
+            )
+            if rows_written == 0:
+                self._handle_empty_result(save_path, experiment.nct_id, header_written)
+                curated_data_sizes[experiment.nct_id] = 0
                 continue
 
-            # Concatenate all DataFrames, format reports, and save to CSV
-            final_df = self._format_and_save_curated_data(
-                curated_experiment_data, save_path
-            )
-
             curated_paths[experiment.nct_id] = save_path
-            curated_data_sizes[experiment.nct_id] = len(final_df)
-
-            # Persist save path in experiment yaml
-            if context.filter_by_date:
-                experiment.source_paths[context.source_name] = save_path
-            else:
-                experiment.source_paths[f"{context.source_name}_no_date_filter"] = (
-                    save_path
-                )
-            experiment.to_yaml(
-                os.path.join(
-                    context.save_dir, "experiments", f"{experiment.nct_id}.yaml"
-                )
+            curated_data_sizes[experiment.nct_id] = rows_written
+            self._persist_experiment_metadata(
+                context=context,
+                experiment=experiment,
+                save_path=save_path,
+                path_key=path_key,
             )
 
             logger.info(
                 "%s: curated %d relevant Reddit posts for experiment %s",
                 self.stage_name,
-                len(final_df),
+                rows_written,
                 experiment.nct_id,
             )
 
@@ -771,44 +699,309 @@ class RedditCurateStage(SourceStage):
         )
         return state
 
-    def _format_and_save_curated_data(
+    def _experiment_save_path(
+        self, context: CurationContext, experiment, study_dir: str
+    ) -> tuple[str, str]:
+        """Return the output path and experiment source key for an experiment."""
+        if context.filter_by_date:
+            file_name = f"{context.source_name}_{experiment.nct_id}.csv"
+            path_key = context.source_name
+        else:
+            file_name = f"{context.source_name}_{experiment.nct_id}_no_date_filter.csv"
+            path_key = f"{context.source_name}_no_date_filter"
+        return os.path.join(study_dir, file_name), path_key
+
+    def _already_curated(self, save_path: str, experiment_id: str) -> bool:
+        """Return True when the curated file already exists on disk."""
+        if not os.path.exists(save_path):
+            return False
+        logger.info(
+            "Skipping experiment %s as curated data already exists at %s",
+            experiment_id,
+            save_path,
+        )
+        return True
+
+    def _collect_clean_paths_for_experiment(
         self,
-        curated_experiment_data: list[pd.DataFrame],
+        experiment,
+        condition_to_subreddit_map: dict[str, list[str]],
+        cleaned_path_map: dict[str, str],
+    ) -> list[str]:
+        """Return cleaned parquet paths relevant to the given experiment."""
+        trial_relevant_subs = {
+            sub
+            for keyword in experiment.conditions or []
+            for sub in condition_to_subreddit_map.get(keyword, [])
+            if sub in cleaned_path_map
+        }
+        return [cleaned_path_map[sub] for sub in trial_relevant_subs]
+
+    def _parse_cutoff_date(
+        self, context: CurationContext, experiment
+    ) -> tuple[pd.Timestamp | None, bool]:
+        """Parse the experiment cutoff date and report parsing issues."""
+        if not (context.filter_by_date and experiment.date):
+            return None, False
+        try:
+            return pd.to_datetime(experiment.date), False
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "Failed to parse date '%s' for experiment %s: %s. No date filter will "
+                "be applied.",
+                experiment.date,
+                experiment.nct_id,
+                exc,
+            )
+            return None, True
+
+    def _curate_experiment_files(
+        self,
+        *,
+        clean_data_paths: list[str],
+        treatment_pattern: ahocorasick.Automaton,
+        cutoff_dt: pd.Timestamp | None,
         save_path: str,
+        experiment_id: str,
+    ) -> tuple[int, bool]:
+        """Process parquet files for a single experiment and return rows written."""
+        header_written = False
+        rows_written = 0
+        seen_report_hashes: set[bytes] = set()
+        with tqdm(
+            total=len(clean_data_paths),
+            desc=f"Curating Reddit data for {experiment_id}",
+            unit="file",
+            leave=False,
+            dynamic_ncols=True,
+            position=1,
+            disable=len(clean_data_paths) == 0,
+        ) as file_pbar:
+            for path in clean_data_paths:
+                parquet_file = self._safe_open_parquet(path)
+                if parquet_file is None:
+                    file_pbar.update(1)
+                    continue
+                header_written, added_rows = self._process_parquet_file(
+                    parquet_file=parquet_file,
+                    path=path,
+                    save_path=save_path,
+                    treatment_pattern=treatment_pattern,
+                    cutoff_dt=cutoff_dt,
+                    seen_report_hashes=seen_report_hashes,
+                    header_written=header_written,
+                )
+                rows_written += added_rows
+                file_pbar.update(1)
+        return rows_written, header_written
+
+    def _safe_open_parquet(self, path: str) -> pq.ParquetFile | None:
+        """Open a parquet file while handling IO errors."""
+        try:
+            return pq.ParquetFile(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "%s: failed to open parquet %s: %s",
+                self.stage_name,
+                path,
+                exc,
+            )
+            return None
+
+    def _process_parquet_file(
+        self,
+        *,
+        parquet_file: pq.ParquetFile,
+        path: str,
+        save_path: str,
+        treatment_pattern: ahocorasick.Automaton,
+        cutoff_dt: pd.Timestamp | None,
+        seen_report_hashes: set[bytes],
+        header_written: bool,
+    ) -> tuple[bool, int]:
+        """Process a single parquet file and append curated rows to disk."""
+        added_rows = 0
+        estimated_chunks = self._estimate_chunk_total(parquet_file)
+        chunk_desc = f"Processing {os.path.basename(path)}"
+        with tqdm(
+            total=estimated_chunks or None,
+            desc=chunk_desc,
+            unit="chunk",
+            leave=False,
+            dynamic_ncols=True,
+            position=2,
+            disable=False,
+        ) as chunk_pbar:
+            for chunk_df in self._iter_parquet_chunks(parquet_file):
+                relevant_posts_df = get_study_relevant_posts(
+                    chunk_df, treatment_pattern, cutoff_dt
+                )
+                formatted_chunk = self._format_curated_chunk(
+                    relevant_posts_df, seen_report_hashes
+                )
+                if not formatted_chunk.empty:
+                    header_written = self._append_curated_chunk(
+                        formatted_chunk,
+                        save_path,
+                        header_written=header_written,
+                    )
+                    added_rows += len(formatted_chunk)
+                del formatted_chunk
+                del relevant_posts_df
+                del chunk_df
+                chunk_pbar.update(1)
+                if chunk_pbar.total is not None and chunk_pbar.n > chunk_pbar.total:
+                    chunk_pbar.total = chunk_pbar.n
+                    chunk_pbar.refresh()
+        return header_written, added_rows
+
+    def _handle_empty_result(
+        self, save_path: str, experiment_id: str, header_written: bool
+    ) -> None:
+        """Cleanup partially written files when no curated rows were produced."""
+        logger.warning("No valid matches found for experiment %s", experiment_id)
+        if header_written and os.path.exists(save_path):
+            with contextlib.suppress(OSError):
+                os.remove(save_path)
+
+    def _persist_experiment_metadata(
+        self, *, context: CurationContext, experiment, save_path: str, path_key: str
+    ) -> None:
+        """Persist experiment output path to the experiment YAML."""
+        experiment.source_paths[path_key] = save_path
+        experiment.to_yaml(
+            os.path.join(
+                context.save_dir,
+                "experiments",
+                f"{experiment.nct_id}.yaml",
+            )
+        )
+
+    def _estimate_chunk_total(self, parquet_file: pq.ParquetFile) -> int:
+        """Estimate chunk count for progress reporting."""
+        metadata = parquet_file.metadata
+        total_bytes = 0
+        if metadata is not None:
+            try:
+                total_bytes = sum(
+                    max(int(metadata.row_group(i).total_byte_size), 0)
+                    for i in range(metadata.num_row_groups)
+                )
+            except Exception:
+                total_bytes = 0
+        if total_bytes > 0:
+            return max(1, math.ceil(total_bytes / self._max_chunk_bytes))
+        if metadata is not None:
+            return max(1, metadata.num_row_groups)
+        return 0
+
+    def _iter_parquet_chunks(
+        self, parquet_file: pq.ParquetFile
+    ) -> Iterator[pd.DataFrame]:
+        """Yield DataFrame chunks from a parquet file bounded by ``max_chunk_bytes``."""
+        metadata = parquet_file.metadata
+        total_rows = 0
+        total_bytes = 0
+        if metadata is not None:
+            try:
+                for idx in range(metadata.num_row_groups):
+                    row_group = metadata.row_group(idx)
+                    total_rows += row_group.num_rows
+                    total_bytes += max(int(row_group.total_byte_size), 0)
+            except Exception:
+                total_rows = 0
+                total_bytes = 0
+
+        if total_rows <= 0 and metadata is not None:
+            try:
+                total_rows = metadata.num_rows
+            except Exception:
+                total_rows = 0
+
+        avg_row_bytes = (total_bytes / total_rows) if total_rows > 0 else None
+        if not avg_row_bytes or avg_row_bytes <= 0:
+            # Fallback to 1 KiB per row when metadata is missing
+            avg_row_bytes = 1024
+
+        rows_per_chunk = max(1, int(self._max_chunk_bytes / avg_row_bytes))
+
+        for batch in parquet_file.iter_batches(
+            batch_size=rows_per_chunk, use_threads=True
+        ):
+            yield batch.to_pandas()
+
+    def _format_curated_chunk(
+        self, curated_df: pd.DataFrame, seen_hashes: set[bytes]
     ) -> pd.DataFrame:
-        """Helper to format and save curated data to CSV."""
-        final_df = pd.concat(curated_experiment_data, ignore_index=True)
-        post_mask = final_df["report_type"] == "submission"
-        final_df.loc[post_mask, "report"] = (
-            "**Subreddit**\nThis post was found on the subreddit r/"
-            + final_df.loc[post_mask, "subreddit"].astype(str)
-            + ".\n\n"
-            + "**Title**\nThis post was titled: "
-            + final_df.loc[post_mask, "title"].astype(str)
-            + "\n\n"
-            + "**Date created**\nThis post was created on "
-            + final_df.loc[post_mask, "date_created"].astype(str)
-            + ".\n\n"
-            + "**Post**\n"
-            + final_df.loc[post_mask, "report_text"].astype(str)
+        """Format curated data chunk and drop duplicates using hashed reports."""
+        if curated_df.empty:
+            return pd.DataFrame()
+
+        formatted_df = curated_df.copy()
+        if "report_type" in formatted_df.columns:
+            post_mask = formatted_df["report_type"] == "submission"
+            if post_mask.any():
+                formatted_df.loc[post_mask, "report"] = (
+                    "**Subreddit**\nThis post was found on the subreddit r/"
+                    + formatted_df.loc[post_mask, "subreddit"].astype(str)
+                    + ".\n\n"
+                    + "**Title**\nThis post was titled: "
+                    + formatted_df.loc[post_mask, "title"].astype(str)
+                    + "\n\n"
+                    + "**Date created**\nThis post was created on "
+                    + formatted_df.loc[post_mask, "date_created"].astype(str)
+                    + ".\n\n"
+                    + "**Post**\n"
+                    + formatted_df.loc[post_mask, "report_text"].astype(str)
+                )
+
+            comment_mask = formatted_df["report_type"] == "comment"
+            if comment_mask.any():
+                formatted_df.loc[comment_mask, "report"] = (
+                    "**Subreddit**\nThis comment was found on the subreddit r/"
+                    + formatted_df.loc[comment_mask, "subreddit"].astype(str)
+                    + ".\n\n"
+                    + "**Initial Post**\nThis comment was in response to the following post: "
+                    + "\nTitle: "
+                    + formatted_df.loc[comment_mask, "title"].astype(str)
+                    + "\nPost content: "
+                    + formatted_df.loc[comment_mask, "initial_post"].astype(str)
+                    + "\n\n"
+                    + "**Date created**\nThis comment was created on "
+                    + formatted_df.loc[comment_mask, "date_created"].astype(str)
+                    + ".\n\n"
+                    + "**Comment**\n"
+                    + formatted_df.loc[comment_mask, "report_text"].astype(str)
+                )
+
+        if "report" not in formatted_df.columns:
+            return pd.DataFrame()
+
+        formatted_df["__report_hash"] = pd.util.hash_pandas_object(
+            formatted_df["report"].fillna("").astype(str), index=False
         )
-        comment_mask = final_df["report_type"] == "comment"
-        final_df.loc[comment_mask, "report"] = (
-            "**Subreddit**\nThis comment was found on the subreddit r/"
-            + final_df.loc[comment_mask, "subreddit"].astype(str)
-            + ".\n\n"
-            + "**Initial Post**\nThis comment was in response to the following post: "
-            + "\nTitle: "
-            + final_df.loc[comment_mask, "title"].astype(str)
-            + "\nPost content: "
-            + final_df.loc[comment_mask, "initial_post"].astype(str)
-            + "\n\n"
-            + "**Date created**\nThis comment was created on "
-            + final_df.loc[comment_mask, "date_created"].astype(str)
-            + ".\n\n"
-            + "**Comment**\n"
-            + final_df.loc[comment_mask, "report_text"].astype(str)
+        dedup_mask = ~formatted_df["__report_hash"].isin(seen_hashes)
+        if not dedup_mask.any():
+            return pd.DataFrame()
+
+        deduped_df = formatted_df.loc[dedup_mask].copy()
+        seen_hashes.update(deduped_df["__report_hash"])
+        return deduped_df.drop(columns="__report_hash")
+
+    def _append_curated_chunk(
+        self, formatted_chunk: pd.DataFrame, save_path: str, *, header_written: bool
+    ) -> bool:
+        """Append a formatted chunk to the experiment CSV."""
+        if formatted_chunk.empty:
+            return header_written
+        if not header_written:
+            parent_dir = os.path.dirname(save_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+        formatted_chunk.to_csv(
+            save_path,
+            mode="a",
+            header=not header_written,
+            index=False,
         )
-        final_df = final_df.drop_duplicates("report")
-        final_df.to_csv(save_path, index=False)
-        return final_df
+        return True

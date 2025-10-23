@@ -83,6 +83,9 @@ class ModelResponse:
     request_id: str | None = None
     """The unique identifier for the request, if available."""
 
+    cost: float | None = None
+    """Monetary cost incurred for the request, if reported."""
+
     output_parsed: Any | None = None  # Parsed output if applicable
 
     def __str__(self) -> str:

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
-import re
+from typing import Union
 
 import asyncpraw
-import numpy as np
 import pandas as pd
+import regex as re
+from ahocorasick import Automaton
 from aiolimiter import AsyncLimiter
 from tenacity import (
     before_sleep_log,
@@ -24,15 +25,25 @@ from tenacity import (
 
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.components import filter_by_date
+from naturalv2.sources.components.helpers import (
+    DOSE_PATTERN,
+    QUALIFIER_PATTERN,
+    canonicalize_reports_for_matching,
+    normalize_text_for_matching,
+)
 from naturalv2.sources.reddit.utils import (
+    apply_rule_based_filter,
     download_sub_data,
     get_context_post_df,
     is_retryable_error,
-    rule_based_filter,
 )
 
 
 logger = logging.getLogger(__name__)
+
+_DOSE_TAIL_REGEX = re.compile(
+    rf"(?:{QUALIFIER_PATTERN}{DOSE_PATTERN})", flags=re.IGNORECASE | re.UNICODE
+)
 
 
 @retry(
@@ -140,10 +151,22 @@ def clean_subreddit_data(data_path: str, subreddit: str) -> pd.DataFrame:
     submissions = pd.read_parquet(
         os.path.join(data_path, f"{subreddit}_submissions.parquet")
     )
-    submissions = rule_based_filter(submissions, "selftext")
+    submissions_mask = apply_rule_based_filter(submissions, "selftext")
+    submissions = submissions[submissions_mask]
+    logger.info(
+        "%s: %d submissions left after rule-based filtering",
+        subreddit,
+        len(submissions),
+    )
 
     comments = pd.read_parquet(os.path.join(data_path, f"{subreddit}_comments.parquet"))
-    comments = rule_based_filter(comments, "body")
+    comments_mask = apply_rule_based_filter(comments, "body")
+    comments = comments[comments_mask]
+    logger.info(
+        "%s: %d comments left after rule-based filtering",
+        subreddit,
+        len(comments),
+    )
 
     return get_context_post_df(submissions, comments)
 
@@ -208,28 +231,27 @@ def download_submissions_and_comments(
         os.remove(submissions_path)
         os.remove(comments_path)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Error processing subreddit %s: %s", subreddit, exc)
+        logger.error("Error processing subreddit %s: %s", subreddit, exc, exc_info=True)
         return None, subreddit
 
     return clean_sub_path, subreddit
 
 
 def get_study_relevant_posts(
-    clean_data_path: str,
-    treatment_pattern: re.Pattern,
+    clean_data: Union[str, pd.DataFrame],
+    treatment_automaton: Automaton,
     cutoff_dt: pd.Timestamp | None,
-    *,
     date_column: str = "date_created",
 ) -> pd.DataFrame:
     """Select posts mentioning treatments before an optional cutoff date.
 
     Parameters
     ----------
-    clean_data_path : str
-        Path to a cleaned subreddit parquet file created by
-        :func:`download_submissions_and_comments`.
-    treatment_pattern : re.Pattern
-        Compiled regex matching any treatment term of interest.
+    clean_data : str | pandas.DataFrame
+        Either the path to a cleaned subreddit parquet file created by
+        :func:`download_submissions_and_comments` or a pre-loaded DataFrame.
+    treatment_automaton : ahocorasick.Automaton
+        Compiled ahocorasick automaton for matching treatment aliases.
     cutoff_dt : pandas.Timestamp | None
         If provided, only posts with dates before this timestamp are
         considered.
@@ -242,8 +264,13 @@ def get_study_relevant_posts(
         DataFrame of posts mentioning any treatment term, with an additional
         ``treatments_mentioned`` column listing the matched terms.
     """
+    if isinstance(clean_data, str):
+        df = pd.read_parquet(clean_data)
+        data_label = clean_data
+    else:
+        df = clean_data
+        data_label = "provided DataFrame chunk"
 
-    df = pd.read_parquet(clean_data_path)
     if df.empty:
         return pd.DataFrame()
 
@@ -252,24 +279,62 @@ def get_study_relevant_posts(
         if df.empty:
             return pd.DataFrame()
 
-    text_cols = ["subreddit", "title", "report_text", "initial_post"]
-    for col in text_cols:
-        df[col] = df[col].fillna("").astype(str)
-
-    treatment_finds = [
-        df[col].str.lower().str.findall(treatment_pattern) for col in text_cols
+    text_cols = [
+        col
+        for col in ("report_text", "title", "initial_post", "subreddit")
+        if col in df.columns
     ]
-    has_treatment_mask = np.any(
-        [series.str.len() > 0 for series in treatment_finds], axis=0
+    if not text_cols:
+        logger.warning(
+            "No textual columns found in %s to evaluate treatment matches.",
+            data_label,
+        )
+        return pd.DataFrame()
+
+    reports = (
+        df[text_cols]
+        .fillna("")
+        .astype(str)
+        .agg(" ".join, axis=1)
+        .map(normalize_text_for_matching)
     )
 
-    result = df[has_treatment_mask].copy()
-    if result.empty:
-        return result
+    def extract_mentions(text: str) -> list[str]:
+        # Collapse punctuation connectors to spaces so aliases match regardless
+        # of hyphens/underscores
+        canonical_text, canonical_to_original = canonicalize_reports_for_matching(text)
+        if not canonical_text:
+            return []
 
-    valid_finds = [series[has_treatment_mask] for series in treatment_finds]
-    result["treatments_mentioned"] = [
-        list({item for sublist in row for item in sublist}) for row in zip(*valid_finds)
-    ]
+        found_mentions: list[str] = []
+        emitted_mentions: set[str] = set()  # For quick deduplication
 
-    return result.reset_index(drop=True)
+        for end_index, matched_alias in treatment_automaton.iter(canonical_text):
+            start_index = end_index - len(matched_alias) + 1
+            if start_index < 0:
+                # Safety guard in case the automaton reports an unexpected position
+                continue
+
+            # Translate the canonical span back to the original text indices
+            original_start = canonical_to_original[start_index]
+            original_end = canonical_to_original[end_index] + 1
+
+            # Grab the exact substring from the original text
+            mention_text = text[original_start:original_end]
+
+            # Look right after the alias for an optional qualifier/dose string
+            # and include it
+            dose_tail = _DOSE_TAIL_REGEX.match(text[original_end:])
+            if dose_tail:
+                mention_text += dose_tail.group(0)
+
+            cleaned_mention = mention_text.strip()
+            if cleaned_mention and cleaned_mention not in emitted_mentions:
+                emitted_mentions.add(cleaned_mention)
+                found_mentions.append(cleaned_mention)
+
+        return sorted(found_mentions)
+
+    mentions = reports.map(extract_mentions)
+    mask = mentions.str.len().gt(0)
+    return df.loc[mask].assign(treatments_mentioned=mentions.loc[mask])

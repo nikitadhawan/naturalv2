@@ -672,8 +672,6 @@ class LiteLLMModel(APIModel):
                 response_format=response_format,
                 **request_kwargs,
             )
-        self._update_cost(response)
-
         return self._parse_model_response(
             response,
             endpoint,
@@ -755,7 +753,6 @@ class LiteLLMModel(APIModel):
                         response_format=response_format,
                         **request_kwargs,
                     )
-                self._update_cost(resp)
                 return resp
 
         if is_batch:
@@ -880,22 +877,32 @@ class LiteLLMModel(APIModel):
                 TextCompletionResponse,
                 "ResponsesAPIResponse",
             ],
+            cost: float = 0.0,
         ) -> ModelResponse:
             if endpoint == "responses":
-                return self._parse_responses_api(resp, response_format, parse_output)
-            return self._parse_completions(resp, response_format, parse_output)
+                return self._parse_responses_api(
+                    resp, response_format, parse_output, cost=cost
+                )
+            return self._parse_completions(
+                resp, response_format, parse_output, cost=cost
+            )
 
         if isinstance(response, list):
-            responses = [parse_single_response(resp) for resp in response]
+            responses: list[ModelResponse] = []
+            for resp in response:
+                cost = self._update_cost(resp)
+                responses.append(parse_single_response(resp, cost=cost))
             return BatchResponse(responses=responses)
 
-        return parse_single_response(response)
+        cost = self._update_cost(response)
+        return parse_single_response(response, cost=cost)
 
     def _parse_responses_api(
         self,
         response: "ResponsesAPIResponse",
         response_format: type[BaseModel] | dict | None = None,
         parse_output: bool = False,
+        cost: float = 0.0,
     ) -> ModelResponse:
         """Parse a 'responses' endpoint API response.
 
@@ -907,6 +914,8 @@ class LiteLLMModel(APIModel):
             The response format for parsing.
         parse_output : bool, optional
             Whether to parse the output.
+        cost : float, optional
+            Monetary cost associated with this response.
 
         Returns
         -------
@@ -954,6 +963,7 @@ class LiteLLMModel(APIModel):
             tool_calls=tool_calls if tool_calls else None,
             token_usage=token_usage,
             raw_response=response,
+            cost=cost,
         )
 
     def _parse_completions(
@@ -961,6 +971,7 @@ class LiteLLMModel(APIModel):
         response: ChatCompletionResponse | TextCompletionResponse,
         response_format: type[BaseModel] | dict | None = None,
         parse_output: bool = False,
+        cost: float = 0.0,
     ) -> ModelResponse:
         """Parse a completions endpoint response.
 
@@ -972,6 +983,8 @@ class LiteLLMModel(APIModel):
             The response format for parsing.
         parse_output : bool, optional
             Whether to parse the output.
+        cost : float, optional
+            Monetary cost associated with this response.
 
         Returns
         -------
@@ -995,6 +1008,7 @@ class LiteLLMModel(APIModel):
             prompt_logprobs=self._get_prompt_logprobs(response),
             token_usage=token_usage,
             raw_response=response,
+            cost=cost,
         )
 
     @staticmethod
@@ -1070,15 +1084,19 @@ class LiteLLMModel(APIModel):
 
         return LogProbs(logprobs=logprobs, tokens=decoded_tokens)
 
-    def _update_cost(self, response: Any) -> None:
+    def _update_cost(self, response: Any) -> float:
         """Update the running cost of the LLM requests."""
+        cost = 0.0
         if self.model_id in model_cost:
             try:
-                self._cost += completion_cost(completion_response=response)
+                computed = completion_cost(completion_response=response)
+                cost = float(computed or 0.0)
+                self._cost += cost
             except Exception as e:
                 logger.error(f"Failed to calculate cost: {e}")
-
-            logger.debug(f"Running cost: ${float(self._cost):.10f}")
+            else:
+                logger.debug(f"Running cost: ${float(self._cost):.10f}")
+        return cost
 
 
 class LiteLLMRouterModel(LiteLLMModel):

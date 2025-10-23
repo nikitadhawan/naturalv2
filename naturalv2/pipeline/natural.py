@@ -1,6 +1,5 @@
 """NATURAL Pipeline."""
 
-import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -11,10 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 import pandas as pd
 from hydra.utils import instantiate as hydra_instantiate
 from omegaconf import DictConfig
-from rich.console import Console
-from rich.pretty import Pretty
-from rich.table import Table
 
+from naturalv2.logging_utils import build_kv_table, emit_table
 from naturalv2.models.utils import TokenTracker
 
 
@@ -161,19 +158,16 @@ class PipelineStage(ABC):
         return self._stats
 
     def render_stats_table(self) -> None:
-        """Print the statistics collected during processing in a table format."""
-        stats_table = Table(title=f"Statistics for {self.stage_name}")
-        stats_table.add_column("Key", style="cyan")
-        stats_table.add_column("Value", style="magenta")
-
-        for key, value in self.get_stats().items():
-            stats_table.add_row(str(key), Pretty(value, expand_all=True))
-
-        for key, value in self.prompt_template().items():
-            stats_table.add_row(str(key), str(value))
-
-        console = Console()
-        console.print(stats_table)
+        """Log the statistics collected during processing as a Rich table."""
+        stats = list(self.get_stats().items())
+        prompt_template = self.prompt_template()
+        if prompt_template:
+            stats.append(("--", "Prompt Template"))
+            stats.extend(
+                (f"prompt.{key}", value) for key, value in prompt_template.items()
+            )
+        stats_table = build_kv_table(f"{self.stage_name} Summary", stats)
+        emit_table(stats_table, logger=logger)
 
     def add_stat(self, key: str, value: Any) -> None:
         """Add a statistic to the stage's stats dictionary.
@@ -238,7 +232,6 @@ class NATURALPipeline:
         finally:
             end_time = time.monotonic()
             duration = end_time - start_time
-            logger.info(f"Stage {stage.stage_name} took {duration:.2f} seconds.")
             stage.add_stat("processing_time", f"{duration:.2f} seconds")
 
     async def run(
@@ -271,46 +264,44 @@ class NATURALPipeline:
         current_data = input_df.copy()
 
         for stage in self.stages:
-            logger.info(f"Running stage: {stage.stage_name}")
+            logger.info("Running stage: %s", stage.stage_name)
 
             try:
                 stage.validate_input(current_data)
 
-                async with self._log_time(stage) as _:
+                async with self._log_time(stage):
                     current_data = await stage.process(current_data, context)
 
                     stage.add_stat("data_count", len(current_data))
                     stage.add_stat("model_name", stage._model_name)
                     stage.add_stat("lm_kwargs", stage.llm.kwargs)
-                    token_counts = context._token_tracker.get_stage_stats(
-                        stage.stage_name
+
+                stage_stats = stage.get_stats()
+                self._data_flow[stage.stage_name] = stage_stats
+
+                logger.info("Stage %s completed successfully.", stage.stage_name)
+                stage.render_stats_table()
+
+                if current_data.empty:
+                    logger.warning(
+                        "Stage %s returned an empty dataframe. "
+                        "Skipping subsequent stages.",
+                        stage.stage_name,
                     )
-                    stage._stats.update(token_counts)
-
-                    stage_stats = stage.get_stats()
-                    logger.info(f"Stage {stage.stage_name} completed successfully.")
-                    logger.info(f"Stats:\n{json.dumps(stage.get_stats(), indent=2)}")
-                    for key, value in stage.prompt_template().items():
-                        logger.info(f"{key}\n{str(value)}")
-                    stage.render_stats_table()
-
-                    self._data_flow[stage.stage_name] = stage_stats
-
-                    if current_data.empty:
-                        logger.warning(
-                            f"Stage {stage.stage_name} returned an empty dataframe. "
-                            "Skipping subsequent stages."
-                        )
-                        break
+                    break
             except Exception as e:
                 logger.error(
-                    f"Error processing stage {stage.stage_name}: {e}", exc_info=True
+                    "Error processing stage %s: %s", stage.stage_name, e, exc_info=True
                 )
                 raise ProcessingError from e
 
-        logger.info(
-            "Pipeline execution completed with the following data flow:\n"
-            f"{json.dumps(self._data_flow, indent=2)}"
-        )
+        if self._data_flow:
+            data_flow_table = build_kv_table(
+                "Pipeline Data Flow",
+                ((stage, stats) for stage, stats in self._data_flow.items()),
+            )
+            emit_table(data_flow_table, logger=logger, render_console=False)
+
+        context._token_tracker.log_table()
 
         return current_data

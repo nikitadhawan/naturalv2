@@ -39,7 +39,7 @@ pipeline:
     imputations:
       _target_: naturalv2.pipeline.sample_extraction.ImputationsStage
       model_cfg: ${imputations_model}
-      max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
+      max_concurrent_workers: ${coalesce:imputations_model.max_parallel_requests, imputations_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
     sample_ty:  # Use this for NATURAL-MC in place of inclusion_prob and conditional_extraction
       _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
       model_cfg: ${sample_model}

@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from litellm import token_counter
 from pydantic import BaseModel, create_model
-from rich.console import Console
 from rich.table import Table
 
+from naturalv2.logging_utils import emit_table
 from naturalv2.models.types import (
     BatchResponse,
     EndpointType,
@@ -62,7 +62,7 @@ def parse_model_output_with_format(
             model_cls.model_json_schema = lambda: schema
             return model_cls.model_validate_json(output_text)
     except Exception as e:
-        logger.error(f"Failed to parse output with format: {e}")
+        logger.error("Failed to parse output with format: %s", e)
     return None
 
 
@@ -265,12 +265,13 @@ class TokenTracker:
 
     def __init__(self) -> None:
         """Initialize the TokenTracker."""
-        self._stage_tokens: dict[str, dict[str, int]] = {}
-        self._total_tokens: dict[str, int] = {
+        self._stage_tokens: dict[str, dict[str, float]] = {}
+        self._total_tokens: dict[str, float] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
             "reasoning_tokens": 0,
+            "cost": 0.0,
         }
 
     def add(self, stage: str, response: ModelResponse | BatchResponse) -> None:
@@ -300,6 +301,7 @@ class TokenTracker:
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "reasoning_tokens": 0,
+                "cost": 0.0,
             },
         )
 
@@ -315,8 +317,11 @@ class TokenTracker:
                 self._total_tokens["completion_tokens"] += usage.completion_tokens or 0
                 self._total_tokens["total_tokens"] += usage.total_tokens or 0
                 self._total_tokens["reasoning_tokens"] += usage.reasoning_tokens or 0
+            cost = float(getattr(resp, "cost", 0.0) or 0.0)
+            stage_stats["cost"] += cost
+            self._total_tokens["cost"] += cost
 
-    def get_stage_stats(self, stage: str) -> dict[str, int]:
+    def get_stage_stats(self, stage: str) -> dict[str, float]:
         """Get token usage stats for a specific stage.
 
         Parameters
@@ -326,7 +331,7 @@ class TokenTracker:
 
         Returns
         -------
-        dict[str, int]
+        dict[str, float]
             Token usage stats for the stage.
         """
         return self._stage_tokens.get(
@@ -336,15 +341,16 @@ class TokenTracker:
                 "completion_tokens": 0,
                 "total_tokens": 0,
                 "reasoning_tokens": 0,
+                "cost": 0.0,
             },
         )
 
-    def get_total_stats(self) -> dict[str, int]:
+    def get_total_stats(self) -> dict[str, float]:
         """Get total token usage stats across all stages.
 
         Returns
         -------
-        dict[str, int]
+        dict[str, float]
             Total token usage stats.
         """
         return dict(self._total_tokens)
@@ -357,14 +363,15 @@ class TokenTracker:
             "completion_tokens": 0,
             "total_tokens": 0,
             "reasoning_tokens": 0,
+            "cost": 0.0,
         }
 
-    def get_all_stage_stats(self) -> dict[str, dict[str, int]]:
+    def get_all_stage_stats(self) -> dict[str, dict[str, float]]:
         """Return token usage stats for all stages.
 
         Returns
         -------
-        dict[str, dict[str, int]]
+        dict[str, dict[str, float]]
             Mapping of stage name to its token usage stats.
         """
         return {stage: dict(stats) for stage, stats in self._stage_tokens.items()}
@@ -385,26 +392,34 @@ class TokenTracker:
             table.add_column("Completion", justify="right")
             table.add_column("Reasoning", justify="right")
             table.add_column("Total", justify="right")
+            table.add_column("||", justify="center", no_wrap=True)
+            table.add_column("Cost ($)", justify="right")
 
             for stage, stats in stage_stats.items():
+                cost = stats.get("cost", 0.0) or 0.0
                 table.add_row(
                     stage,
                     str(stats.get("prompt_tokens", 0)),
                     str(stats.get("completion_tokens", 0)),
                     str(stats.get("reasoning_tokens", 0)),
                     str(stats.get("total_tokens", 0)),
+                    "||",
+                    f"{cost:.6f}",
                 )
 
             # Add a totals row
+            total_cost = total.get("cost", 0.0) or 0.0
             table.add_row(
                 "[bold]TOTAL[/bold]",
                 f"[bold]{total.get('prompt_tokens', 0)}[/bold]",
                 f"[bold]{total.get('completion_tokens', 0)}[/bold]",
                 f"[bold]{total.get('reasoning_tokens', 0)}[/bold]",
                 f"[bold]{total.get('total_tokens', 0)}[/bold]",
+                "[bold]||[/bold]",
+                f"[bold]{total_cost:.6f}[/bold]",
             )
 
-            Console().print(table)
+            emit_table(table, logger=logger)
             return
         except Exception:  # noqa: BLE001
             # Fall back to plain text logging
@@ -416,19 +431,22 @@ class TokenTracker:
             logger.info("  (no stages recorded)")
         else:
             for stage, stats in stage_stats.items():
+                cost = stats.get("cost", 0.0) or 0.0
                 logger.info(
-                    "  %s | prompt=%d completion=%d reasoning=%d total=%d",
+                    "  %s | prompt=%d completion=%d reasoning=%d total=%d || cost=%.6f",
                     stage,
                     stats.get("prompt_tokens", 0),
                     stats.get("completion_tokens", 0),
                     stats.get("reasoning_tokens", 0),
                     stats.get("total_tokens", 0),
+                    cost,
                 )
 
         logger.info(
-            "  TOTAL | prompt=%d completion=%d reasoning=%d total=%d",
+            "  TOTAL | prompt=%d completion=%d reasoning=%d total=%d || cost=%.6f",
             total.get("prompt_tokens", 0),
             total.get("completion_tokens", 0),
             total.get("reasoning_tokens", 0),
             total.get("total_tokens", 0),
+            total.get("cost", 0.0) or 0.0,
         )

@@ -20,10 +20,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable
 
-from rich.console import Console
 from rich.pretty import Pretty
-from rich.table import Table
 
+from naturalv2.logging_utils import build_kv_table, emit_table
 from naturalv2.models.utils import TokenTracker
 from naturalv2.utils import sanitize_filename
 
@@ -196,23 +195,17 @@ class CurationStage(ABC):
         state : StageState
             The state object containing the metadata to render.
         """
-        rich_table = Table(title=f"Curation pipeline state at stage: {self.stage_name}")
-
-        rich_table.add_column("Key", style="cyan")
-        rich_table.add_column("Value", style="magenta")
-
+        rows: list[tuple[str, Any]] = []
         for key, value in state.metadata.items():
-            rich_table.add_row(str(key), Pretty(value, max_length=10))
+            formatted = (
+                value if isinstance(value, str) else Pretty(value, max_length=10)
+            )
+            rows.append((key, formatted))
 
-        console = Console(force_terminal=True)
-
-        # Capture the table in a string instead of writing to the console
-        with console.capture() as capture:
-            console.print(rich_table)
-
-        # Log the captured string.
-        # This should now show up in both the terminal and the log file.
-        logger.info(capture.get())
+        table = build_kv_table(
+            f"Curation pipeline state at stage: {self.stage_name}", rows
+        )
+        emit_table(table, logger=logger)
 
 
 class SourceStage(CurationStage):
@@ -338,12 +331,18 @@ class SourceStage(CurationStage):
         """
 
         if per_experiment_paths:
-            context.study_dataset.data_paths.update(per_experiment_paths)
+            context.study_dataset.data_paths.setdefault(
+                f"{context.source_name}_curated", {}
+            ).update(per_experiment_paths)
+
         if namespace_paths:
             for key, value in namespace_paths.items():
                 context.study_dataset.data_paths[key] = value
+
         if per_experiment_sizes:
-            context.study_dataset.data_sizes.update(per_experiment_sizes)
+            context.study_dataset.data_sizes.setdefault(
+                f"{context.source_name}", {}
+            ).update(per_experiment_sizes)
 
         dataset_path = self._study_dataset_path(context)
         if dataset_path:

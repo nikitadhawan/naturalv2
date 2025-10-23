@@ -12,10 +12,12 @@ from dotenv import load_dotenv
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from scipy.stats import norm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.estimators import NaturalIPW, NaturalMC, NaturalOI
 from naturalv2.experiment import Experiment
+from naturalv2.logging_utils import build_kv_table, emit_table
 from naturalv2.pipeline import NATURALPipeline, PipelineContext, PipelineStage
 from naturalv2.study import Study, get_study_filepaths
 from naturalv2.utils import get_experiment_filepath
@@ -171,7 +173,10 @@ def _calculate_treatment_effects(
                         "CI_upper": pred_ate + conf_delta,
                     }
                     logger.info(
-                        f"Predicted ATE: {pred_ate}, ({pred_ate - conf_delta}, {pred_ate + conf_delta})"
+                        "Predicted ATE: %f, (%f, %f)",
+                        pred_ate,
+                        pred_ate - conf_delta,
+                        pred_ate + conf_delta,
                     )
                     if experiment.status == "completed":
                         effect_idx = experiment.outcome_treatment.index(
@@ -180,13 +185,16 @@ def _calculate_treatment_effects(
                         true_ate = experiment.effect_sizes[effect_idx]
                         error = abs(pred_ate - true_ate)
                         results.update({"true_ate": true_ate, "abs_error": error})
-                        logger.info(f"True ATE: {true_ate}")
-                        logger.info(f"Absolute Error: {error}")
+                        logger.info("True ATE: %f", true_ate)
+                        logger.info("Absolute Error: %f", error)
                     result_dicts.append(results)
 
                 except:
                     logger.info(
-                        f"ATE prediction errored for {treat1}, {treat2}, {outcome}."
+                        "ATE prediction errored for %s, %s, %s.",
+                        treat1,
+                        treat2,
+                        outcome,
                     )
                     continue
 
@@ -228,8 +236,9 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
         experiment = Experiment.from_yaml(exp_file)
     except (FileNotFoundError, ValueError) as e:
         logger.error(
-            f"Experiment file for {nct_id} not found or invalid. Skipping trial. "
-            f"Error: {e}",
+            "Experiment file for %s not found or invalid. Skipping trial. Error: %s",
+            nct_id,
+            e,
             exc_info=True,
         )
         return
@@ -239,13 +248,20 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
         ),
         exist_ok=True,
     )
+    for source_name in cfg.sources:
+        for outcome in experiment.outcome_names:
+            logger.info(
+                "Running pipeline for %s with source '%s' and outcome '%s'",
+                nct_id,
+                source_name,
+                outcome,
+            )
 
-    for outcome in experiment.outcome_names:
-        for source_name in cfg.sources:
+            estimator_type = cfg.estimator._target_.split(".")[-1]
             pipeline_context = PipelineContext(
                 experiment=experiment,
                 source_name=source_name,
-                estimator_type=cfg.estimator._target_.split(".")[-1],
+                estimator_type=estimator_type,
                 outcome=outcome,
                 save_path=cfg.save_path,
                 exp_name=cfg.experiment_name,
@@ -260,32 +276,48 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
             pipeline = NATURALPipeline(pipeline_stages)
 
             try:
-                logger.info(
-                    f"Running pipeline for {nct_id} with source '{source_name}' "
-                    f"and outcome '{outcome}'"
-                )
-
                 # Load curated data
                 if cfg.filter_by_date:
-                    curated_df = pd.read_csv(experiment.source_paths[source_name])
+                    curated_filepath = experiment.source_paths.get(source_name)
                 else:
-                    curated_df = pd.read_csv(
-                        experiment.source_paths[f"{source_name}_no_date_filter"]
+                    curated_filepath = experiment.source_paths.get(
+                        f"{source_name}_no_date_filter"
                     )
+
+                if not curated_filepath:
+                    logger.warning(
+                        "The source '%s' does not have a curated dataset for the "
+                        "experiment %s. Skipping...",
+                        source_name,
+                        nct_id,
+                    )
+                    continue
+
+                curated_df = pd.read_csv(curated_filepath)
                 # TODO: remove subsampling after testing
                 # curated_df = curated_df.sample(
                 #     frac=0.05, random_state=cfg.seed, ignore_index=True
                 # )
-                logger.info(
-                    f"Initial number of curated reports: {len(curated_df)} reports."
+                context_table = build_kv_table(
+                    "Pipeline Context",
+                    [
+                        ("NCT ID", nct_id),
+                        ("Source", source_name),
+                        ("Outcome", outcome),
+                        ("Estimator type", estimator_type),
+                        ("Number of curated reports", len(curated_df)),
+                    ],
                 )
+                emit_table(context_table, logger=logger)
 
                 # Run the pipeline
                 extractions = await pipeline.run(curated_df, pipeline_context)
                 if extractions.empty:
                     logger.warning(
-                        f"No extractions found for {source_name} and outcome '{outcome}'. "
-                        "Cannot calculate treatment effects."
+                        "No extractions found for %s and outcome '%s'. "
+                        "Cannot calculate treatment effects.",
+                        source_name,
+                        outcome,
                     )
                     result = {}
                     result.update(pipeline._data_flow)
@@ -320,7 +352,11 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                 )
             except Exception as e:
                 logger.error(
-                    f"Error processing {nct_id} with source '{source_name}' and outcome '{outcome}': {e}",
+                    "Error processing %s with source '%s' and outcome '%s': %s",
+                    nct_id,
+                    source_name,
+                    outcome,
+                    e,
                     exc_info=True,
                 )
                 continue
@@ -331,7 +367,7 @@ async def _process_all_trials(cfg: DictConfig) -> None:
 
     if cfg.nct_id:
         nct_ids = [cfg.nct_id]
-        logger.info(f"Processing trial {cfg.nct_id}.")
+        logger.info("Processing trial %s", cfg.nct_id)
 
     else:
         # Load study object from YAML file
@@ -345,7 +381,7 @@ async def _process_all_trials(cfg: DictConfig) -> None:
 
         # Get NCT IDs based on the split
         nct_ids = _get_nct_ids(cfg.split, study)
-        logger.info(f"Processing {len(nct_ids)} trials for split '{cfg.split}'.")
+        logger.info("Processing %s trials for '%s' split", len(nct_ids), cfg.split)
 
     for nct_id in nct_ids:
         await _process_trial(cfg, nct_id)
@@ -362,7 +398,8 @@ def main(cfg: DictConfig) -> None:
 
         weave.init("naturalv2")
 
-    asyncio.run(_process_all_trials(cfg))
+    with logging_redirect_tqdm():
+        asyncio.run(_process_all_trials(cfg))
 
 
 if __name__ == "__main__":

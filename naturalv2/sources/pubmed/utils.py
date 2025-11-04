@@ -2,20 +2,17 @@ import asyncio
 import json
 import logging
 import os
-import random
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
 from lxml import etree as ET  # noqa: N812
 from tenacity import (
-    RetryCallState,
     before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_delay,
+    wait_random_exponential,
 )
 from tqdm.asyncio import tqdm
 
@@ -30,57 +27,6 @@ _MAX_GET_TERM_LENGTH = 1800  # PubMed GET requests start failing beyond ~2KB URL
 
 
 _MAX_RATE_LIMIT_WAIT_SECONDS = 300  # Cap server-directed sleeps to 5 minutes.
-_RATE_LIMIT_RNG = random.Random(42)
-
-
-def _base_wait_strategy(retry_state: RetryCallState) -> float:
-    """Deterministic exponential backoff with jitter, mirroring tenacity defaults."""
-    attempt_number = max(retry_state.attempt_number, 1)
-    exponential_factor = 2 ** (attempt_number - 1)
-    # Draw jitter in the same range as wait_random_exponential(multiplier=1)
-    wait_time = _RATE_LIMIT_RNG.random() * exponential_factor
-    wait_time = max(wait_time, 0.7)  # Respect previous minimum wait
-    return min(wait_time, 60)
-
-
-def _parse_retry_after(header_value: str | None) -> float | None:
-    """Parse the Retry-After header value and return the delay in seconds."""
-    delay = None
-    if header_value:
-        value = header_value.strip()
-        if value:
-            try:
-                delay = float(value)
-            except ValueError:
-                try:
-                    retry_dt = parsedate_to_datetime(value)
-                    if retry_dt is not None:
-                        if retry_dt.tzinfo is None:
-                            retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-                        now = datetime.now(tz=timezone.utc)
-                        delay = (retry_dt - now).total_seconds()
-                except (TypeError, ValueError):
-                    delay = None
-    if delay is None:
-        return None
-    if delay < 0:
-        return 0.0
-    return delay
-
-
-def _rate_limit_aware_wait(retry_state: RetryCallState) -> float:
-    """Custom wait strategy that respects Retry-After headers for 429 responses."""
-    exception = retry_state.outcome.exception() if retry_state.outcome else None
-    if isinstance(exception, aiohttp.ClientResponseError) and exception.status == 429:
-        headers = getattr(exception, "headers", None)
-        retry_after = _parse_retry_after(
-            headers.get("Retry-After") if headers else None
-        )
-        if retry_after is not None:
-            capped = min(retry_after, _MAX_RATE_LIMIT_WAIT_SECONDS)
-            jitter = _RATE_LIMIT_RNG.uniform(0.25, 0.75)
-            return max(0.0, capped + jitter)
-    return _base_wait_strategy(retry_state)
 
 
 def _should_retry(exception: BaseException) -> bool:
@@ -424,7 +370,7 @@ async def _fetch_pmc_fulltext(
 
 
 @retry(
-    wait=_rate_limit_aware_wait,
+    wait=wait_random_exponential(multiplier=1, max=60),
     stop=stop_after_delay(600),
     retry=retry_if_exception(_should_retry),
     before_sleep=before_sleep_log(logger, logging.DEBUG),
@@ -452,34 +398,19 @@ async def _get_xml_root(
         async with requester(url, **request_kwargs) as response:
             response.raise_for_status()
             content = await response.read()
+
+        # Parse XML content in a thread pool to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, _parse_xml_content, content)
     except aiohttp.ClientResponseError as e:
         log_params = {k: v for k, v in params.items() if k != "api_key"}
-        if e.status == 429:
-            retry_after = _parse_retry_after(
-                e.headers.get("Retry-After") if getattr(e, "headers", None) else None
-            )
-            if retry_after is not None:
-                capped = min(retry_after, _MAX_RATE_LIMIT_WAIT_SECONDS)
-                logger.debug(
-                    "PubMed rate limit hit; retrying in %.1fs. URL: %s, Params: %s",
-                    capped,
-                    url,
-                    log_params,
-                )
-            else:
-                logger.debug(
-                    "PubMed rate limit hit; retrying with exponential backoff. URL: %s, Params: %s",
-                    url,
-                    log_params,
-                )
-            raise
         if e.status == 400:
             logger.debug(
                 "Bad request for URL %s with params %s: %s", url, log_params, e.message
             )
             return None
-        if 500 <= e.status < 600:
-            logger.warning(
+        if e.status != 429 and not (500 <= e.status < 600):
+            logger.error(
                 "%s: %s - %s, URL: %s, Params: %s",
                 client_error_msg,
                 e.status,
@@ -487,30 +418,7 @@ async def _get_xml_root(
                 url,
                 log_params,
             )
-            raise
-        logger.error(
-            "%s: %s - %s, URL: %s, Params: %s",
-            client_error_msg,
-            e.status,
-            e.message,
-            url,
-            log_params,
-        )
-        return None
-    except aiohttp.ClientError:
         raise
-    except asyncio.TimeoutError:
-        raise
-    except Exception as e:
-        log_params = {k: v for k, v in params.items() if k != "api_key"}
-        logger.error(
-            "Unexpected error for URL %s with params %s: %s", url, log_params, e
-        )
-        return None
-
-    # Parse XML content in a thread pool to avoid blocking the event loop
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, _parse_xml_content, content)
 
 
 def _is_case_report(article: ET.Element) -> bool:

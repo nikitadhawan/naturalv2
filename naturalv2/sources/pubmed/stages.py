@@ -559,6 +559,18 @@ class PubMedCurateStage(SourceStage):
         total_rows = 0
 
         for experiment in context.experiments:
+            if context.filter_by_date:
+                save_path = os.path.join(
+                    study_dir, f"{context.source_name}_{experiment.nct_id}.csv"
+                )
+                curated_exp_key = f"{experiment.nct_id}_no_date_filter"
+            else:
+                save_path = os.path.join(
+                    study_dir,
+                    f"{context.source_name}_{experiment.nct_id}_no_date_filter.csv",
+                )
+                curated_exp_key = experiment.nct_id
+
             file_path = cleaned_paths_map.get(experiment.nct_id)
             if file_path is None or not os.path.exists(file_path):
                 logger.warning(
@@ -567,7 +579,7 @@ class PubMedCurateStage(SourceStage):
                     experiment.nct_id,
                     file_path,
                 )
-                curated_data_sizes[experiment.nct_id] = 0
+                curated_data_sizes[curated_exp_key] = 0
                 continue
 
             df = pd.read_csv(file_path).drop(columns=["Unnamed: 0"], errors="ignore")
@@ -580,16 +592,6 @@ class PubMedCurateStage(SourceStage):
                 )
                 continue
 
-            if context.filter_by_date:
-                save_path = os.path.join(
-                    study_dir, f"{context.source_name}_{experiment.nct_id}.csv"
-                )
-            else:
-                save_path = os.path.join(
-                    study_dir,
-                    f"{context.source_name}_{experiment.nct_id}_no_date_filter.csv",
-                )
-
             if os.path.exists(save_path) and not self.overwrite_existing:
                 logger.debug(
                     "%s: reusing existing curated file for experiment %s at %s",
@@ -597,7 +599,7 @@ class PubMedCurateStage(SourceStage):
                     experiment.nct_id,
                     save_path,
                 )
-                curated_paths[experiment.nct_id] = save_path
+                curated_paths[curated_exp_key] = save_path
                 continue
 
             if context.filter_by_date and experiment.date:
@@ -608,7 +610,7 @@ class PubMedCurateStage(SourceStage):
                         "All rows dropped after date filtering for experiment %s",
                         experiment.nct_id,
                     )
-                    curated_data_sizes[experiment.nct_id] = 0
+                    curated_data_sizes[curated_exp_key] = 0
                     continue
 
             treatment_names = experiment.get_all_treatment_names_for_source(
@@ -635,12 +637,12 @@ class PubMedCurateStage(SourceStage):
                     self.stage_name,
                     experiment.nct_id,
                 )
-                curated_data_sizes[experiment.nct_id] = 0
+                curated_data_sizes[curated_exp_key] = 0
                 continue
 
             result.to_csv(save_path, index=False)
-            curated_paths[experiment.nct_id] = save_path
-            curated_data_sizes[experiment.nct_id] = len(result)
+            curated_paths[curated_exp_key] = save_path
+            curated_data_sizes[curated_exp_key] = len(result)
             total_rows += len(result)
 
             # Persist save path in experiment yaml

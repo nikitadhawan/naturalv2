@@ -16,7 +16,6 @@ from tenacity import (
     retry,
     retry_if_exception,
     stop_after_delay,
-    wait_random_exponential,
 )
 from tqdm.asyncio import tqdm
 
@@ -31,9 +30,17 @@ _MAX_GET_TERM_LENGTH = 1800  # PubMed GET requests start failing beyond ~2KB URL
 
 
 _MAX_RATE_LIMIT_WAIT_SECONDS = 300  # Cap server-directed sleeps to 5 minutes.
-_BASE_WAIT_STRATEGY = wait_random_exponential(multiplier=1, min=0.7, max=60)
+_RATE_LIMIT_RNG = random.Random(42)
 
-random.seed(42)  # For reproducible jitter in wait times
+
+def _base_wait_strategy(retry_state: RetryCallState) -> float:
+    """Deterministic exponential backoff with jitter, mirroring tenacity defaults."""
+    attempt_number = max(retry_state.attempt_number, 1)
+    exponential_factor = 2 ** (attempt_number - 1)
+    # Draw jitter in the same range as wait_random_exponential(multiplier=1)
+    wait_time = _RATE_LIMIT_RNG.random() * exponential_factor
+    wait_time = max(wait_time, 0.7)  # Respect previous minimum wait
+    return min(wait_time, 60)
 
 
 def _parse_retry_after(header_value: str | None) -> float | None:
@@ -71,9 +78,9 @@ def _rate_limit_aware_wait(retry_state: RetryCallState) -> float:
         )
         if retry_after is not None:
             capped = min(retry_after, _MAX_RATE_LIMIT_WAIT_SECONDS)
-            jitter = random.uniform(0.25, 0.75)
+            jitter = _RATE_LIMIT_RNG.uniform(0.25, 0.75)
             return max(0.0, capped + jitter)
-    return _BASE_WAIT_STRATEGY(retry_state)
+    return _base_wait_strategy(retry_state)
 
 
 def _should_retry(exception: BaseException) -> bool:

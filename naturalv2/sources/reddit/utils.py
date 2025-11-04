@@ -1,7 +1,6 @@
 """Utilities for downloading and processing Reddit data from The Eye archive."""
 
 import asyncio
-import datetime
 import glob
 import json
 import logging
@@ -13,7 +12,9 @@ from urllib import error, request
 
 import asyncpraw
 import asyncprawcore
+import numpy as np
 import pandas as pd
+import regex as re
 import tenacity
 import wget
 import zstandard
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+# Insecure SSL context for downloading Reddit data when TLS verification fails
 _INSECURE_SSL_CONTEXT = ssl.create_default_context()
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
@@ -371,7 +373,10 @@ def download_sub_data(
 
     df.loc[:, "score"] = pd.to_numeric(df["score"], errors="coerce")
 
-    cols_to_keep = ["created_utc", "author", "permalink", "subreddit", "score"]
+    cols_to_keep = ["id", "created_utc", "author", "permalink", "subreddit", "score"]
+    if data_type == "comments":
+        cols_to_keep.append("link_id")
+
     # anonymize dataframe
     if anonymizer_instance is not None:
         df = anonymizer_instance.anonymize_dataframe(
@@ -395,69 +400,78 @@ def download_sub_data(
     )
 
 
-def rule_based_filter(post_df: pd.DataFrame, text_field: str) -> pd.DataFrame:
+def apply_rule_based_filter(reddit_data: pd.DataFrame, text_field: str) -> pd.Series:
     """Apply rule-based filtering to a DataFrame of Reddit posts.
-
-    This function filters out posts based on several criteria:
-    - Ensures the text field is of type str.
-    - Ensures the permalink is of type str.
-    - Removes posts that are deleted or removed.
-    - Removes posts with "bot" in the author's name.
-    - Cleans the text field by unescaping HTML tags and removing leading/trailing whitespace.
-    - Ensures the text field has a space within the first 2048 characters.
-    - Ensures the text field has at least 50% alphabetic characters (including spaces).
 
     Parameters
     ----------
-    post_df : pd.DataFrame
-        The DataFrame containing Reddit posts.
+    reddit_data : pd.DataFrame
+        A DataFrame containing Reddit posts. This function expects the ``'text_field'``
+        and ``author`` columns to exist in the dataframe.
     text_field : str
         The name of the text field in the DataFrame to be filtered.
 
     Returns
     -------
-    pd.DataFrame
-        The filtered DataFrame containing only valid posts.
+    valid_text_mask : pd.Series
+        A boolean Series indicating which rows in the DataFrame are valid.
 
     """
-    # remove rows where the text field is not of type str
-    idx = post_df[text_field].apply(lambda x: isinstance(x, str))
-    post_df = post_df.loc[idx]
+    # Stringify the 'text_field' column
+    text_field_values = reddit_data[text_field].astype("string").fillna("")
 
-    # remove rows where the permalink is not of type str
-    idx = post_df["permalink"].apply(lambda x: isinstance(x, str))
-    post_df = post_df.loc[idx]
+    # Replace HTML entities with their corresponding characters
+    normalized_text = (
+        text_field_values.str.replace("&gt;", ">", regex=False)
+        .str.replace("&lt;", "<", regex=False)
+        .str.replace("&amp;", "&", regex=False)
+    )
 
-    # remove rows where the submission is deleted or removed
-    post_df = post_df.loc[~post_df[text_field].isin(["[deleted]", "[removed]"])]
+    # Replace runs of whitespace with a single space
+    normalized_text = normalized_text.str.replace(r"[ \t\r\n]+", " ", regex=True)
 
-    # remove posts with "bot" in the author's name
-    idx = post_df["author"].apply(lambda x: "bot" not in x.lower())
-    post_df = post_df.loc[idx]
+    # Strip leading and trailing whitespace
+    trimmed_text = normalized_text.str.strip()
 
-    for i, row in post_df.iterrows():
-        body: str = row[text_field]
+    # Require non-empty text that is not one of the sentinel strings
+    has_text = trimmed_text.str.len() > 0
+    is_deleted = trimmed_text.isin(["[deleted]", "[removed]"])
+    valid_text_mask = has_text & ~is_deleted
 
-        # unescape some common html tags
-        body = body.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
-        body = body.replace("\n", " ").replace("\t", " ")
-        body = body.strip()
+    # Filter out bot-like author names
+    author_lower = reddit_data["author"].astype(str).str.lower()
+    is_automod = author_lower.eq("automoderator")
+    looks_like_bot = author_lower.str.contains(
+        r"(?:^|[_-])bot\d*$", regex=True, na=False
+    )
+    is_bot_author = is_automod | looks_like_bot
+    valid_text_mask &= ~is_bot_author
 
-        # drop if there is no space in first 2048 characters
-        try:
-            _ = body[: body.rindex(" ", 0, 2048)]
-        except ValueError:
-            post_df = post_df.drop([i])
-            continue
+    # Drop URLs (markdown links, bare http(s), bare www) from the full text
+    cleaned_text = trimmed_text.str.replace(
+        pat=r"""
+        \[([^\]]+)\]\(\s*(?:https?://|www\.)\S+\s*\)   # [label](url) -> keep label
+        | https?://\S+                                  # bare http/https -> drop
+        | \bwww\.\S+                                    # bare www.*      -> drop
+        """,
+        repl=r"\1",  # Keep the first match (the markdown label), drop the rest
+        regex=True,
+        flags=re.IGNORECASE | re.VERBOSE,
+    )
 
-        # drop everything with less than 50% alphabetic characters; space counts
-        length_characters = float(len(body))
-        filtered = [c for c in body if c.isalpha()]
-        if float(len(filtered)) / length_characters < 0.5:
-            post_df = post_df.drop([i])
-            continue
+    # Look at the first 2048 characters of the cleaned text for a >=3-letter token
+    preview = cleaned_text.str.slice(0, 2048)
+    has_long_token = preview.str.contains(
+        r"[^\W\d_]{3,}", regex=True, na=False, flags=re.UNICODE
+    )
+    valid_text_mask &= has_long_token
 
-    return post_df
+    # Keep posts/comments where at least 25% of the characters are word characters
+    total_length = cleaned_text.str.len().fillna(0)
+    letter_counts = cleaned_text.str.count(r"[^\W\d_]", flags=re.UNICODE).fillna(0)
+    ratio_ok = (letter_counts * 4) >= total_length  # >=25% word characters
+
+    return valid_text_mask & ratio_ok
 
 
 def get_context_post_df(
@@ -469,6 +483,7 @@ def get_context_post_df(
     ----------
     submissions : pd.DataFrame
         DataFrame containing submission data with columns including:
+        - id
         - subreddit
         - title
         - selftext
@@ -478,6 +493,8 @@ def get_context_post_df(
         - permalink
     comments : pd.DataFrame
         DataFrame containing comment data with columns including:
+        - id
+        - link_id
         - body
         - author
         - score
@@ -498,99 +515,147 @@ def get_context_post_df(
         - author_replies (list of replies from the author)
     """
     submissions = submissions.copy()
-    submissions["date_created"] = submissions["created_utc"].astype(int).map(_get_date)
-    submissions["submission_permalink"] = submissions["permalink"].map(
-        _get_submission_permalink
+
+    submissions["post_id"] = (
+        submissions.get("id", pd.Series(index=submissions.index, dtype="object"))
+        .astype("string")
+        .str.lower()
     )
+    submissions = submissions[submissions["post_id"].notna()].copy()
+
+    submissions["date_created"] = pd.to_datetime(
+        submissions["created_utc"], unit="s", errors="coerce"
+    ).dt.strftime("%B %d, %Y")
+
+    # Normalize the submission permalink
+    if "permalink" not in submissions.columns:
+        submissions["permalink"] = pd.NA
+    missing_submission_permalink = submissions["permalink"].isna() | (
+        submissions["permalink"].astype("string").str.len() == 0
+    )
+    submissions.loc[missing_submission_permalink, "permalink"] = (
+        _build_submission_permalink_series(
+            submissions.loc[missing_submission_permalink].get("subreddit", ""),
+            submissions.loc[missing_submission_permalink, "post_id"],
+        )
+    )
+    submissions = submissions.rename(columns={"permalink": "submission_permalink"})
 
     comments = comments.copy()
-    comments["date_created"] = comments["created_utc"].astype(int).map(_get_date)
-    comments["comments_permalink"] = comments["permalink"].map(_get_comment_permalink)
-    comments_grouped = comments.groupby("comments_permalink")
 
-    all_results = []
-    for _, submission in submissions.iterrows():
-        submission_permalink = submission["submission_permalink"]
+    if "link_id" in comments.columns:
+        comments["post_id"] = (
+            comments["link_id"]
+            .astype("string")
+            .str.lower()
+            .str.replace(r"^t3_", "", regex=True)
+        )
+    else:
+        comments["post_id"] = pd.Series(pd.NA, index=comments.index, dtype="object")
+    comments = comments[comments["post_id"].notna()].copy()
 
-        if submission_permalink in comments_grouped.groups:
-            submission_comments = comments_grouped.get_group(submission_permalink)
+    comments["date_created"] = pd.to_datetime(
+        comments["created_utc"], unit="s", errors="coerce"
+    ).dt.strftime("%B %d, %Y")
 
-            # Separate author replies from other comments
-            author_mask = submission_comments["author"] == submission["author"]
-            author_comments = submission_comments[author_mask]
-            other_comments = submission_comments[~author_mask]
+    # Normalize the comment permalink
+    if "permalink" not in comments.columns:
+        comments["permalink"] = pd.NA
 
-            # Build submission text with author replies
-            submission_text = str(submission["selftext"])
-            author_replies_list = author_comments["body"].tolist()
-
-            if author_replies_list:
-                submission_text += "\n\nThe original poster also replied with the following comments in the thread:"
-                for reply in author_replies_list:
-                    submission_text += "\n> " + str(reply)
-        else:
-            other_comments = pd.DataFrame()
-            author_replies_list = []
-            submission_text = str(submission["selftext"])
-
-        submission_row = {
-            "subreddit": submission["subreddit"],
-            "title": submission["title"],
-            "initial_post": "",
-            "report_text": submission_text,
-            "report_type": "submission",
-            "score": int(submission["score"]),
-            "date_created": submission["date_created"],
-            "permalink": submission_permalink,
-            "author_replies": author_replies_list,
-        }
-        all_results.append(submission_row)
-
-        if not other_comments.empty:
-            comment_rows = {
-                "subreddit": [submission["subreddit"]] * len(other_comments),
-                "title": [submission["title"]] * len(other_comments),
-                "initial_post": [submission_text] * len(other_comments),
-                "report_text": other_comments["body"].astype(str).tolist(),
-                "report_type": "comment",
-                "score": other_comments["score"].astype(int).tolist(),
-                "date_created": other_comments["date_created"].tolist(),
-                "permalink": other_comments["permalink"].tolist(),
-                "author_replies": [[]] * len(other_comments),
-            }
-
-            # Convert to list of dicts for consistency
-            for i in range(len(other_comments)):
-                all_results.append(
-                    {
-                        "subreddit": comment_rows["subreddit"][i],
-                        "title": comment_rows["title"][i],
-                        "initial_post": comment_rows["initial_post"][i],
-                        "report_text": comment_rows["report_text"][i],
-                        "report_type": "comment",
-                        "score": comment_rows["score"][i],
-                        "date_created": comment_rows["date_created"][i],
-                        "permalink": comment_rows["permalink"][i],
-                        "author_replies": comment_rows["author_replies"][i],
-                    }
-                )
-
-    if all_results:
-        return pd.DataFrame(all_results)
-
-    return pd.DataFrame(
-        columns=[
-            "subreddit",
-            "title",
-            "initial_post",
-            "report_text",
-            "report_type",
-            "score",
-            "date_created",
-            "permalink",
-            "author_replies",
-        ]
+    need_comment_permalink = comments["permalink"].isna() | (
+        comments["permalink"].astype("string").str.len() == 0
     )
+    if "id" in comments.columns:
+        has_ids = need_comment_permalink & comments["id"].notna()
+        comments.loc[has_ids, "permalink"] = _build_comment_permalink_series(
+            comments.loc[has_ids, "post_id"], comments.loc[has_ids, "id"]
+        )
+
+    # Map post_id to submission author
+    author_map = submissions.set_index("post_id")["author"]
+    comments["is_author_reply"] = comments["post_id"].map(author_map).fillna("").astype(
+        "string"
+    ) == comments.get("author", "").astype("string").fillna("")
+
+    # Gather author's replies per post (as list of strings)
+    author_replies = (
+        comments.loc[comments["is_author_reply"], ["post_id", "body"]]
+        .assign(body=lambda df: df["body"].astype("string"))
+        .groupby("post_id", sort=False)["body"]
+        .agg(list)
+        .rename("author_replies")
+    )
+
+    # Merge author replies into submissions, filling non replies with empty list
+    submissions = submissions.merge(
+        author_replies, left_on="post_id", right_index=True, how="left"
+    ).reset_index(drop=True)
+    submissions["author_replies"] = submissions["author_replies"].apply(
+        lambda x: x if isinstance(x, list) else []
+    )
+
+    # Build 'report_text' column, appending author replies when present
+    submissions["report_text"] = (
+        submissions.get("selftext", "").astype("string").fillna("")
+    )
+    has_replies = submissions["author_replies"].str.len().gt(0)
+
+    if has_replies.any():
+        quoted_suffix = (
+            submissions.loc[has_replies, "author_replies"]
+            .apply(
+                lambda replies: "\n\nThe original poster also replied with the following comments in the thread:"
+                + "".join("\n> " + str(reply) for reply in replies)
+            )
+            .astype("string")
+        )
+        submissions.loc[has_replies, "report_text"] = submissions.loc[
+            has_replies, "report_text"
+        ].str.cat(quoted_suffix, na_rep="")
+
+    # Build output rows for each submission
+    output_submissions = pd.DataFrame(
+        {
+            "subreddit": submissions.get(
+                "subreddit", pd.Series(index=submissions.index, dtype="object")
+            ),
+            "title": submissions.get(
+                "title", pd.Series(index=submissions.index, dtype="object")
+            ),
+            "initial_post": "",
+            "report_text": submissions["report_text"],
+            "report_type": "submission",
+            "score": pd.to_numeric(submissions.get("score", 0), errors="coerce")
+            .fillna(0)
+            .astype(int),
+            "date_created": submissions["date_created"],
+            "permalink": submissions["submission_permalink"],
+            "author_replies": submissions["author_replies"],
+        }
+    )
+
+    # Build output rows per non-author comment, joined to submission context
+    non_author = comments.loc[~comments["is_author_reply"]].copy()
+    ctx = submissions[["post_id", "subreddit", "title", "report_text"]]
+    non_author = non_author.merge(ctx, on="post_id", how="left", suffixes=("", "_sub"))
+
+    output_comments = pd.DataFrame(
+        {
+            "subreddit": non_author["subreddit"],
+            "title": non_author["title"],
+            "initial_post": non_author["report_text"],
+            "report_text": non_author.get("body", "").astype("string"),
+            "report_type": "comment",
+            "score": pd.to_numeric(non_author.get("score", 0), errors="coerce")
+            .fillna(0)
+            .astype(int),
+            "date_created": non_author["date_created"],
+            "permalink": non_author["permalink"],
+            "author_replies": [[] for _ in range(len(non_author))],
+        }
+    )
+
+    return pd.concat([output_submissions, output_comments], ignore_index=True)
 
 
 @retry(
@@ -759,50 +824,32 @@ def _read_and_decode(
         return _read_and_decode(reader, chunk_size, max_window_size, chunk, bytes_read)
 
 
-def _get_submission_permalink(permalink: str) -> str:
-    """Extract the submission permalink from a full Reddit permalink.
+def _build_submission_permalink_series(
+    subreddit: pd.Series, post_id: pd.Series
+) -> pd.Series:
+    """Vectorized builder for submission permalinks.
 
-    Parameters
-    ----------
-    permalink : str
-        Full permalink string from Reddit data.
-
-    Returns
-    -------
-    str
-        A normalized submission permalink of the form ``/comments/<id>/``.
+    Subreddit may be empty.
     """
-    return "/" + permalink.split("/")[-2] + "/"
+    sub = subreddit.astype("string").fillna("")
+    pid = post_id.astype("string")
+    with_sub = "/r/" + sub + "/comments/" + pid + "/"
+    without_sub = "/comments/" + pid + "/"
+    return pd.Series(
+        np.where(sub.ne(""), with_sub, without_sub), index=post_id.index, dtype="string"
+    )
 
 
-def _get_comment_permalink(permalink: str) -> str:
-    """Extract the comment permalink from a full Reddit permalink.
+def _build_comment_permalink_series(
+    post_id: pd.Series, comment_id: pd.Series
+) -> pd.Series:
+    """Vectorized builder for absolute comment URLs.
 
-    Parameters
-    ----------
-    permalink : str
-        Full permalink string from Reddit data.
-
-    Returns
-    -------
-    str
-        A normalized comment permalink of the form ``/comments/<id>/``.
+    No title slug needed.
     """
-    return "/" + permalink.split("/")[-3] + "/"
-
-
-def _get_date(utc_timestamp: float) -> str:
-    """Convert a UTC timestamp to a formatted date string.
-
-    Parameters
-    ----------
-    utc_timestamp : float
-        Seconds since the Unix epoch (UTC).
-
-    Returns
-    -------
-    str
-        A human-friendly date string (e.g., ``"January 01, 2024"``).
-    """
-    dt = datetime.datetime.fromtimestamp(utc_timestamp, tz=datetime.timezone.utc)
-    return dt.strftime("%B %d, %Y")
+    return (
+        "https://www.reddit.com/comments/"
+        + post_id.astype("string")
+        + "/_/"
+        + comment_id.astype("string")
+    ).astype("string")

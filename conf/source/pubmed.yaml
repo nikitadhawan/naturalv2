@@ -1,0 +1,17 @@
+# @package _global_
+
+stages:
+  treatment_synonyms:
+    _target_: naturalv2.sources.stages.SynonymStage
+    attribute: treatment
+    llm: ${search_model}
+    max_concurrent_workers: ${coalesce:search_model.max_parallel_requests, search_model.client_kwargs.default_max_parallel_requests, 10}
+  condition_filter:
+    _target_: naturalv2.sources.pubmed.stages.PubMedConditionFilter
+  fetch_and_clean:
+    _target_: naturalv2.sources.pubmed.stages.PubMedFetchAndClean
+    api_key: ${oc.env:PUBMED_API_KEY,null}
+    max_concurrent_requests: 10
+  curate:
+    _target_: naturalv2.sources.pubmed.stages.PubMedCurateStage
+    overwrite_existing: False

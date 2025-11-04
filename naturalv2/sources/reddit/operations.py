@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Iterable, Union
+from functools import partial
+from typing import Union
 
 import asyncpraw
 import pandas as pd
+from ahocorasick import Automaton
 from aiolimiter import AsyncLimiter
 from tenacity import (
     before_sleep_log,
@@ -23,12 +25,15 @@ from tenacity import (
 
 from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.components import filter_by_date
-from naturalv2.sources.components.helpers import tokenize_casefold
+from naturalv2.sources.components.helpers import (
+    extract_mentions,
+    normalize_text_for_matching,
+)
 from naturalv2.sources.reddit.utils import (
+    apply_rule_based_filter,
     download_sub_data,
     get_context_post_df,
     is_retryable_error,
-    rule_based_filter,
 )
 
 
@@ -140,10 +145,22 @@ def clean_subreddit_data(data_path: str, subreddit: str) -> pd.DataFrame:
     submissions = pd.read_parquet(
         os.path.join(data_path, f"{subreddit}_submissions.parquet")
     )
-    submissions = rule_based_filter(submissions, "selftext")
+    submissions_mask = apply_rule_based_filter(submissions, "selftext")
+    submissions = submissions[submissions_mask]
+    logger.info(
+        "%s: %d submissions left after rule-based filtering",
+        subreddit,
+        len(submissions),
+    )
 
     comments = pd.read_parquet(os.path.join(data_path, f"{subreddit}_comments.parquet"))
-    comments = rule_based_filter(comments, "body")
+    comments_mask = apply_rule_based_filter(comments, "body")
+    comments = comments[comments_mask]
+    logger.info(
+        "%s: %d comments left after rule-based filtering",
+        subreddit,
+        len(comments),
+    )
 
     return get_context_post_df(submissions, comments)
 
@@ -208,7 +225,7 @@ def download_submissions_and_comments(
         os.remove(submissions_path)
         os.remove(comments_path)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Error processing subreddit %s: %s", subreddit, exc)
+        logger.error("Error processing subreddit %s: %s", subreddit, exc, exc_info=True)
         return None, subreddit
 
     return clean_sub_path, subreddit
@@ -216,9 +233,8 @@ def download_submissions_and_comments(
 
 def get_study_relevant_posts(
     clean_data: Union[str, pd.DataFrame],
-    treatment_names: Iterable[str],
+    treatment_automaton: Automaton,
     cutoff_dt: pd.Timestamp | None,
-    *,
     date_column: str = "date_created",
 ) -> pd.DataFrame:
     """Select posts mentioning treatments before an optional cutoff date.
@@ -228,8 +244,8 @@ def get_study_relevant_posts(
     clean_data : str | pandas.DataFrame
         Either the path to a cleaned subreddit parquet file created by
         :func:`download_submissions_and_comments` or a pre-loaded DataFrame.
-    treatment_names : Iterable[str]
-        Collection of treatment aliases to match (case-insensitive).
+    treatment_automaton : ahocorasick.Automaton
+        Compiled ahocorasick automaton for matching treatment aliases.
     cutoff_dt : pandas.Timestamp | None
         If provided, only posts with dates before this timestamp are
         considered.
@@ -242,7 +258,6 @@ def get_study_relevant_posts(
         DataFrame of posts mentioning any treatment term, with an additional
         ``treatments_mentioned`` column listing the matched terms.
     """
-
     if isinstance(clean_data, str):
         df = pd.read_parquet(clean_data)
         data_label = clean_data
@@ -258,51 +273,26 @@ def get_study_relevant_posts(
         if df.empty:
             return pd.DataFrame()
 
-    alias_token_map: dict[str, set[str]] = {}
-    for alias in sorted({alias for alias in treatment_names if alias}):
-        tokens = tokenize_casefold(alias)
-        if tokens:
-            alias_token_map[alias] = tokens
-
-    if not alias_token_map:
+    text_cols = [
+        col
+        for col in ("report_text", "title", "initial_post", "subreddit")
+        if col in df.columns
+    ]
+    if not text_cols:
         logger.warning(
-            "No treatment aliases available when processing %s; skipping.",
+            "No textual columns found in %s to evaluate treatment matches.",
             data_label,
         )
         return pd.DataFrame()
 
-    if "report" in df.columns:
-        reports = df["report"].fillna("").astype(str)
-    else:
-        text_cols = [
-            col
-            for col in ("report_text", "title", "initial_post", "subreddit")
-            if col in df.columns
-        ]
-        if not text_cols:
-            logger.warning(
-                "No textual columns found in %s to evaluate treatment matches.",
-                data_label,
-            )
-            return pd.DataFrame()
-        reports = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1)
+    reports = (
+        df[text_cols]
+        .fillna("")
+        .astype(str)
+        .agg(" ".join, axis=1)
+        .map(normalize_text_for_matching)
+    )
 
-    report_tokens = reports.apply(tokenize_casefold)
-
-    def match_treatments(tokens: set[str]) -> list[str]:
-        return [
-            alias
-            for alias, alias_tokens in alias_token_map.items()
-            if alias_tokens <= tokens
-        ]
-
-    matched_treatments = report_tokens.apply(match_treatments)
-    has_treatment_mask = matched_treatments.apply(bool)
-
-    if not has_treatment_mask.any():
-        return pd.DataFrame()
-
-    result = df.loc[has_treatment_mask].copy()
-    result["treatments_mentioned"] = matched_treatments[has_treatment_mask]
-
-    return result.reset_index(drop=True)
+    mentions = reports.map(partial(extract_mentions, automaton=treatment_automaton))
+    mask = mentions.str.len().gt(0)
+    return df.loc[mask].assign(treatments_mentioned=mentions.loc[mask])

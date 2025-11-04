@@ -36,6 +36,7 @@ from naturalv2.utils import (
     check_arm,
     check_binary_endpoint,
     check_nonplacebo,
+    get_experiment_filepath,
     get_nested_value,
     normalize_treatment,
 )
@@ -180,12 +181,15 @@ class Experiment:
                 "protocolSection.statusModule.resultsFirstPostDateStruct.date",
             )
         )
-        self._enrollment: int = get_nested_value(
+        _enrollment_info = get_nested_value(
             trial, "protocolSection.designModule.enrollmentInfo"
-        ).count
-        self._enrollment_type = str(
-            get_nested_value(trial, "protocolSection.designModule.enrollmentInfo").type
         )
+        self._enrollment: int = _enrollment_info.count if _enrollment_info else -1
+
+        self._enrollment_type: str = (
+            str(_enrollment_info.type) if _enrollment_info else ""
+        )
+
         self._trial_keywords: list[str] | None = get_nested_value(
             trial, "protocolSection.conditionsModule.keywords"
         )
@@ -1089,6 +1093,8 @@ class Experiment:
         # Persist the transforms for later use
         # NOTE: This helps in the case where the experiment is run multiple times
         # so that transforms are available after the first run.
-        exp_dir = Path(self.trial_path).parents[1] / "experiments"
+        exp_dir: Path = Path(
+            get_experiment_filepath(self.data_path, self.nct_id)
+        ).parent
         exp_dir.mkdir(mode=755, parents=True, exist_ok=True)
-        self.to_yaml(str(exp_dir / f"{self.nct_id}.yaml"))
+        self.to_yaml(filename=str(exp_dir / f"{self.nct_id}.yaml"))

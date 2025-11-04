@@ -19,7 +19,7 @@ from naturalv2.sources.components.helpers import (
 )
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
 from naturalv2.sources.pubmed.utils import fetch_articles, search_pubmed
-from naturalv2.utils import concurrency_limited
+from naturalv2.utils import concurrency_limited, get_experiment_filepath
 
 
 logger = logging.getLogger(__name__)
@@ -651,9 +651,7 @@ class PubMedCurateStage(SourceStage):
                     save_path
                 )
             experiment.to_yaml(
-                os.path.join(
-                    context.save_dir, "experiments", f"{experiment.nct_id}.yaml"
-                )
+                filename=get_experiment_filepath(context.save_dir, experiment.nct_id)
             )
 
         state.payload = curated_paths

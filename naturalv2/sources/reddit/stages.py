@@ -18,8 +18,9 @@ import json
 import logging
 import math
 import os
+from collections.abc import Iterator
 from functools import partial
-from typing import Iterator
+from typing import TYPE_CHECKING
 
 import ahocorasick
 import asyncpraw
@@ -47,6 +48,11 @@ from naturalv2.sources.reddit.operations import (
     search_subreddits,
 )
 from naturalv2.sources.reddit.utils import get_sub_about_info
+from naturalv2.utils import get_experiment_filepath
+
+
+if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
 
 
 logger = logging.getLogger(__name__)
@@ -865,16 +871,17 @@ class RedditCurateStage(SourceStage):
                 os.remove(save_path)
 
     def _persist_experiment_metadata(
-        self, *, context: CurationContext, experiment, save_path: str, path_key: str
+        self,
+        *,
+        context: CurationContext,
+        experiment: "Experiment",
+        save_path: str,
+        path_key: str,
     ) -> None:
         """Persist experiment output path to the experiment YAML."""
         experiment.source_paths[path_key] = save_path
         experiment.to_yaml(
-            os.path.join(
-                context.save_dir,
-                "experiments",
-                f"{experiment.nct_id}.yaml",
-            )
+            filename=get_experiment_filepath(context.save_dir, experiment.nct_id)
         )
 
     def _estimate_chunk_total(self, parquet_file: pq.ParquetFile) -> int:

@@ -36,6 +36,7 @@ from naturalv2.utils import (
     check_arm,
     check_binary_endpoint,
     check_nonplacebo,
+    get_experiment_filepath,
     get_nested_value,
     normalize_treatment,
 )
@@ -1092,6 +1093,8 @@ class Experiment:
         # Persist the transforms for later use
         # NOTE: This helps in the case where the experiment is run multiple times
         # so that transforms are available after the first run.
-        exp_dir = Path(self.trial_path).parents[1] / "experiments"
+        exp_dir: Path = Path(
+            get_experiment_filepath(self.data_path, self.nct_id)
+        ).parent
         exp_dir.mkdir(mode=755, parents=True, exist_ok=True)
-        self.to_yaml(str(exp_dir / f"{self.nct_id}.yaml"))
+        self.to_yaml(filename=str(exp_dir / f"{self.nct_id}.yaml"))

@@ -13,7 +13,6 @@ This module defines the core building blocks used by source-specific curation pi
 
 """
 
-import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -361,7 +360,7 @@ class FilterCurateRunner:
     def __init__(self, stages: Iterable[CurationStage]) -> None:
         self.stages = list(stages)
 
-    async def _run_async(self, context: CurationContext) -> StageState:
+    async def run(self, context: CurationContext) -> StageState:
         """Run stages asynchronously.
 
         Parameters
@@ -380,18 +379,3 @@ class FilterCurateRunner:
             state = await stage.run(context, state)
             stage.render_metadata(state)
         return state
-
-    def run(self, context: CurationContext) -> StageState:
-        """Run stages synchronously using ``asyncio.run``.
-
-        Parameters
-        ----------
-        context
-            The curation context to supply to each stage.
-
-        Returns
-        -------
-        StageState
-            The final state produced by the last stage.
-        """
-        return asyncio.run(self._run_async(context))

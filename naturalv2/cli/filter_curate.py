@@ -1,5 +1,6 @@
 """Pipeline for filtering data sources and curating trial-specific data."""
 
+import asyncio
 import logging
 import os
 from typing import Literal
@@ -44,7 +45,7 @@ logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
 
-def _get_nct_ids(study: Study) -> list[str]:
+def _get_nct_ids(study: Study) -> tuple[list[str], list[str]]:
     """Get NCT IDs based on the split."""
     train_ncts = [list(trial.keys())[0] for trial in study.train_trials]
     val_ncts = [list(trial.keys())[0] for trial in study.val_trials]
@@ -74,37 +75,47 @@ def _build_pipeline(source_cfg: DictConfig) -> FilterCurateRunner:
     config_path="../../conf/", config_name="filter_curate.yaml", version_base="1.2"
 )
 def main(cfg: DictConfig) -> None:  # noqa: PLR0915
+    """Main function to run the filter and curate pipeline."""
+    asyncio.run(main=_async_main(cfg))
+
+
+async def _async_main(cfg: DictConfig) -> None:
+    """Asynchronous main function to run the filter and curate pipeline."""
     if is_weave_available:
         import weave  # type: ignore # noqa: PLC0415
 
-        weave.init("naturalv2")
+        weave.init(project_name="naturalv2")
 
-    study_filepaths = get_study_filepaths(cfg.save_path, cfg.conditions[0])
+    study_filepaths: dict[str, str] = get_study_filepaths(
+        base_dir=cfg.save_path, condition=cfg.conditions[0]
+    )
 
     # Load study from yaml
-    study = Study.from_yaml(study_filepaths["study"])
+    study: Study = Study.from_yaml(filename=study_filepaths["study"])
 
     # Create study dataset
-    study_dataset_file = study_filepaths["study_dataset"]
-    if os.path.exists(study_dataset_file):
-        study_dataset = StudyDataset.from_yaml(study_dataset_file)
+    study_dataset_file: str = study_filepaths["study_dataset"]
+    if os.path.exists(path=study_dataset_file):
+        study_dataset: StudyDataset = StudyDataset.from_yaml(
+            filename=study_dataset_file
+        )
     else:
         study_dataset = StudyDataset(study.conditions, cfg.sources)
 
     if cfg.nct_id:
-        all_ncts = [cfg.nct_id]
-        splits = [cfg.split]
-        logger.info(f"Curating data for trial {cfg.nct_id}.")
+        all_ncts: list[str] = [cfg.nct_id]
+        splits: list[str] = [cfg.split]
+        logger.info(msg=f"Curating data for trial {cfg.nct_id}.")
     else:
         all_ncts, splits = _get_nct_ids(study)
 
     # Collect experiments for curation
-    experiment_list = []
+    experiment_list: list[Experiment] = []
     for nct_id, split in zip(all_ncts, splits):
         experiment_filepath = get_experiment_filepath(cfg.save_path, nct_id)
         try:
             # Load existing experiment if available
-            experiment = Experiment.from_yaml(experiment_filepath)
+            experiment: Experiment = Experiment.from_yaml(filename=experiment_filepath)
         except (FileNotFoundError, ValueError):
             # Otherwise create a new experiment instance
             status: Literal["completed", "active"] = (
@@ -128,9 +139,9 @@ def main(cfg: DictConfig) -> None:  # noqa: PLR0915
         )
 
         pipeline: FilterCurateRunner = _build_pipeline(source_cfg)
-        _ = pipeline.run(context)
+        _ = await pipeline.run(context)
 
-        context.study_dataset.to_yaml(study_filepaths["study_dataset"])
+        context.study_dataset.to_yaml(filename=study_filepaths["study_dataset"])
 
 
 if __name__ == "__main__":

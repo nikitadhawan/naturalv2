@@ -19,8 +19,6 @@ from tenacity import (
 )
 from tqdm.asyncio import tqdm
 
-from naturalv2.sources.reddit.pushshift_archive import download_subs_list
-
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +246,10 @@ async def get_sub_about_info(data_path: str, api_rate_limit: int = 10) -> pd.Dat
     about_csv_path = os.path.join(data_path, "subs_about.csv")
     if os.path.exists(about_csv_path):
         return pd.read_csv(about_csv_path, index_col=0)
+
+    from naturalv2.sources.reddit.pushshift_archive import (  # noqa: PLC0415
+        download_subs_list,  # Import here to avoid circular imports
+    )
 
     subs_list_path = download_subs_list(data_path)
     with open(subs_list_path, "r") as f:

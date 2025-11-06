@@ -19,22 +19,23 @@ import logging
 import math
 import os
 from collections.abc import Iterator
-from functools import partial
-from typing import TYPE_CHECKING
+from concurrent.futures._base import Future
+from concurrent.futures.thread import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Literal
 
 import ahocorasick
 import asyncpraw
 import pandas as pd
 import psutil
+import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from aiolimiter import AsyncLimiter
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
-from tqdm.contrib.concurrent import process_map
 
 from naturalv2.models.lm import APIModel
 from naturalv2.prompts.utils import load_prompt
-from naturalv2.sources.anonymizer import Anonymizer
 from naturalv2.sources.components.helpers import build_treatment_automaton
 from naturalv2.sources.components.llm_extraction import (
     ExtractType,
@@ -46,8 +47,11 @@ from naturalv2.sources.reddit.api import (
     search_posts_in_subreddit,
     search_subreddits,
 )
-from naturalv2.sources.reddit.operations import download_submissions_and_comments
 from naturalv2.sources.reddit.processing import get_study_relevant_posts
+from naturalv2.sources.reddit.pushshift_archive import (
+    download_sub_data,
+    write_archive_to_parquet_partitions,
+)
 from naturalv2.utils import get_experiment_filepath
 
 
@@ -465,75 +469,28 @@ class RedditDownloadAndClean(SourceStage):
             len(relevant_subreddits),
         )
 
-        # Filter out subreddits that are already cleaned/downloaded
-        subreddit_cleaned_path_map, subs_to_filter = self._partition_cleaned(
-            available_subs, subs_data_dir
+        pre_compaction_dir = os.path.join(subs_data_dir, "pre_compaction")
+        processed = self.download_and_clean_subreddit_archives(
+            list(available_subs), pre_compaction_dir
         )
-
-        n_downloaded = len(available_subs) - len(subs_to_filter)
-        logger.info(
-            "%s: %d subreddits already downloaded and cleaned, "
-            "%d subreddits to download and clean",
-            self.stage_name,
-            n_downloaded,
-            len(subs_to_filter),
-        )
-
-        anonymizer: Anonymizer | None = None
-        if self.anonymize:
-            anonymizer = Anonymizer(score_threshold=self.anonymizer_score_threshold)
-
-        if self.max_download_workers > 1:
-            worker = partial(
-                download_submissions_and_comments,
-                data_path=subs_data_dir,
-                anonymizer=anonymizer,
-                batch_size=self.anonymizer_batch_size,
+        if processed:
+            logger.info(
+                "%s: downloaded and cleaned %d subreddit archives for %d experiments",
+                self.stage_name,
+                len(processed),
+                len(context.experiments),
             )
-            results = process_map(
-                worker,
-                subs_to_filter,
-                max_workers=self.max_download_workers,
-                desc=f"Downloading Reddit data [{self.max_download_workers} workers]",
-                chunksize=1,
-                position=0,
-                leave=True,
-                dynamic_ncols=True,
-                disable=len(subs_to_filter) == 0,
-            )
-            for clean_sub_path, sub in results:
-                if clean_sub_path is not None:
-                    subreddit_cleaned_path_map[sub] = clean_sub_path
-        else:
-            for sub in subs_to_filter:
-                clean_sub_path, _ = download_submissions_and_comments(
-                    sub,
-                    subs_data_dir,
-                    anonymizer=anonymizer,
-                    batch_size=self.anonymizer_batch_size,
-                )
-                if clean_sub_path is not None:
-                    subreddit_cleaned_path_map[sub] = clean_sub_path
+
+        # TODO: compact partition
 
         # Update state
-        state.payload = subreddit_cleaned_path_map
-        state.update(cleaned_paths=subreddit_cleaned_path_map, source_dir=source_dir)
+        state.payload = subs_data_dir
+        state.update(data_root=subs_data_dir, source_dir=source_dir)
 
         # Update and persist metadata in StudyDataset
         self.persist_dataset(
             context,
-            namespace_paths={
-                f"{context.source_name}_cleaned": list(
-                    subreddit_cleaned_path_map.values()
-                )
-            },
-        )
-
-        logger.info(
-            "%s: downloaded and cleaned %d subreddits for %d experiments",
-            self.stage_name,
-            len(subreddit_cleaned_path_map),
-            len(context.experiments),
+            namespace_paths={f"{context.source_name}_cleaned": processed},
         )
         return state
 
@@ -568,33 +525,76 @@ class RedditDownloadAndClean(SourceStage):
         os.makedirs(subs_data_dir, exist_ok=True)
         return source_dir, subs_data_dir
 
-    def _partition_cleaned(
-        self, available_subs: set[str], subs_data_dir: str
-    ) -> tuple[dict[str, str], list[str]]:
-        """Split available subreddits by presence of a cleaned parquet file.
+    def download_and_clean_subreddit_archives(
+        self, subreddits: list[str], output_dir: str
+    ) -> list[str]:
+        def download_and_write(
+            subreddit: str,
+            content_type: Literal["submissions", "comments"],
+            shard_dir: str,
+        ) -> tuple[str, bool] | None:
+            archive_path = download_sub_data(subreddit, content_type, output_dir)
+            if archive_path is None:
+                return None
 
-        Parameters
-        ----------
-        available_subs : set[str]
-            Subreddits available for processing.
-        subs_data_dir : str
-            Directory that should contain ``*_cleaned.parquet`` files.
+            wrote_any = write_archive_to_parquet_partitions(
+                zst_archive_path=archive_path, output_dir=shard_dir
+            )
+            return archive_path, wrote_any
 
-        Returns
-        -------
-        tuple[dict[str, str], list[str]]
-            Mapping of already-cleaned subreddits to file paths, and a list of
-            subreddits that still need to be downloaded/cleaned.
-        """
-        subreddit_cleaned_path_map: dict[str, str] = {}
-        subs_to_filter: list[str] = []
-        for sub in available_subs:
-            clean_sub_path = os.path.join(subs_data_dir, f"{sub}_cleaned.parquet")
-            if os.path.exists(clean_sub_path):
-                subreddit_cleaned_path_map[sub] = clean_sub_path
-            else:
-                subs_to_filter.append(sub)
-        return subreddit_cleaned_path_map, subs_to_filter
+        done: list[str] = []
+        with ThreadPoolExecutor(max_workers=self.max_download_workers) as executor:
+            futures: dict[Future, str] = {}
+            for subreddit in subreddits:
+                for content_type in ["submissions", "comments"]:
+                    archive_id = f"{subreddit}-{content_type}"
+
+                    shard_dir = os.path.join(output_dir, archive_id)
+
+                    if os.path.exists(shard_dir):
+                        logger.info(
+                            "%s: skipping download/clean for existing %s",
+                            self.stage_name,
+                            shard_dir,
+                        )
+                        done.append(archive_id)
+                        continue
+
+                    os.makedirs(shard_dir, exist_ok=True)
+
+                    futures[
+                        executor.submit(
+                            download_and_write, subreddit, content_type, shard_dir
+                        )
+                    ] = archive_id
+
+            for fut, archive_id in tqdm(
+                futures.items(),
+                total=len(futures),
+                desc="Downloading and cleaning subreddits",
+                unit="subreddit-content",
+                leave=False,
+                dynamic_ncols=True,
+            ):
+                result = fut.result()
+                if result is None:
+                    continue
+
+                archive_path, wrote_any = result
+                if wrote_any:
+                    # TODO: mark archive as done and write manifest
+                    done.append(archive_id)
+                else:
+                    logger.warning(
+                        "%s: Failed to write any data for archive %s",
+                        self.stage_name,
+                        archive_path,
+                    )
+
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(archive_path)
+
+        return done
 
 
 class RedditCurateStage(SourceStage):
@@ -1012,3 +1012,30 @@ class RedditCurateStage(SourceStage):
             index=False,
         )
         return True
+
+    def scan_subreddit(
+        base_dir: str,
+        subreddit: str,
+        content_type: str | None = None,
+        columns: list[str] | None = None,
+        batch_size: int = 256_000,
+    ):
+        # Partition pruning via hive keys
+        bucket = subreddit[:1].lower() if subreddit else "_"
+
+        dataset = ds.dataset(base_dir, format="parquet", partitioning="hive")
+
+        filt = (ds.field("bucket") == pa.scalar(bucket)) & (
+            ds.field("subreddit") == pa.scalar(subreddit)
+        )
+        if content_type:
+            filt = filt & (ds.field("content_type") == pa.scalar(content_type))
+
+        scanner = dataset.scanner(
+            filter=filt,
+            columns=columns,  # project only what downstream needs
+            use_threads=True,
+            batch_size=batch_size,  # streaming; tune as you like
+        )
+        for rb in scanner.to_batches():
+            yield rb  # downstream can rb.to_table() or rb.to_pandas()

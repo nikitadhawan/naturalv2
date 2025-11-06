@@ -41,13 +41,13 @@ from naturalv2.sources.components.llm_extraction import (
     extract_curation_info,
 )
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
-from naturalv2.sources.reddit.operations import (
-    download_submissions_and_comments,
-    get_study_relevant_posts,
+from naturalv2.sources.reddit.api import (
+    get_sub_about_info,
     search_posts_in_subreddit,
     search_subreddits,
 )
-from naturalv2.sources.reddit.utils import get_sub_about_info
+from naturalv2.sources.reddit.operations import download_submissions_and_comments
+from naturalv2.sources.reddit.processing import get_study_relevant_posts
 from naturalv2.utils import get_experiment_filepath
 
 
@@ -454,7 +454,7 @@ class RedditDownloadAndClean(SourceStage):
 
         source_dir, subs_data_dir = self._get_subs_data_dir(context)
 
-        # Filter out subreddits that are not available in Pushshift
+        # Filter out subreddits that are not available in the Pushshift archives
         subs_about = await get_sub_about_info(source_dir, self.reddit_rpm)
         pushshift_subreddits = set(subs_about["subreddit"].to_list())
         available_subs = set(relevant_subreddits).intersection(pushshift_subreddits)

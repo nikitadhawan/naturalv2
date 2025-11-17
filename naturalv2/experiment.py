@@ -475,16 +475,16 @@ class Experiment:
         list[str]
             A list of treatment names associated with the specified data source.
         """
-        drugbank_names = [
+        treatment_names = set(self.treatment_names)
+        drugbank_names = {
             item for sublist in self.drugbank_names.values() for item in sublist
-        ]
-        common_names = set()
-        for name, aliases in self.treatment_common_names.get(source, {}).items():
-            common_names.add(name.lower())
+        }
+        common_names: set[str] = set()
+        for aliases in self.treatment_common_names.get(source, {}).values():
             for alias in aliases:
                 common_names.add(alias.lower())
 
-        return list(common_names.union(set(drugbank_names)))
+        return list(treatment_names | drugbank_names | common_names)
 
     def hard_filter_ty(self, extractions: pd.DataFrame) -> pd.DataFrame:
         """Filter out rows that don't mention the treatment(s) and outcome(s) of interest.

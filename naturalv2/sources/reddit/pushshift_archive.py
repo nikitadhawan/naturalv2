@@ -3,14 +3,22 @@
 import logging
 import os
 import ssl
+import urllib
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Callable, Literal, Optional, TypeVar
+from pathlib import Path
+from typing import (
+    Callable,
+    Literal,
+    Optional,
+    TypeVar,
+)
 from urllib import error, request
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.json as paj
 import re2
+import tenacity
 import wget
 import zstandard as zstd
 from tenacity import (
@@ -18,16 +26,13 @@ from tenacity import (
     retry,
     retry_if_exception,
     stop_after_attempt,
-    wait_random_exponential,
+    wait_exponential_jitter,
 )
 from tqdm import tqdm
 
 from naturalv2.sources.reddit.api import is_retryable_error
 from naturalv2.sources.reddit.processing import apply_rule_based_filter
 
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,7 @@ BUCKET_FIELD = pa.field("bucket", pa.string())
 PROCESSED_RECORD_SCHEMA = RAW_RECORD_SCHEMA.append(CONTENT_TYPE_FIELD).append(
     BUCKET_FIELD
 )
+
 
 # The following regex finds JSON-like key-value pairs where:
 #   - The key is either "created_utc" or "score".
@@ -143,14 +149,14 @@ def download_subs_list(data_path: str) -> str:
 
 
 @retry(
-    wait=wait_random_exponential(min=1, max=30),
-    stop=stop_after_attempt(5),
+    wait=wait_exponential_jitter(initial=1, max=60),
+    stop=stop_after_attempt(7),
     retry=retry_if_exception(is_retryable_error),
     before_sleep=before_sleep_log(logger, logging.INFO),
 )
 def download_sub_data(
     subreddit: str, content_type: Literal["submissions", "comments"], data_path: str
-) -> None:
+) -> str | None:
     """Download subreddit data from The Eye archive.
 
     Parameters
@@ -161,6 +167,11 @@ def download_sub_data(
         The type of data to download, either "submissions" or "comments".
     data_path : str
         The path where the data will be saved.
+
+    Returns
+    -------
+    str
+        The path to the downloaded data file, or None if the download failed.
 
     Raises
     -------
@@ -175,97 +186,108 @@ def download_sub_data(
 
     os.makedirs(data_path, exist_ok=True)
 
-    save_path = os.path.join(data_path, f"{subreddit}_{content_type}.parquet")
-    if os.path.exists(save_path):
-        logger.warning(
-            f"File {save_path} already exists. "
-            f"Skipping download for {subreddit} {content_type}."
-        )
-        return
-
     file_path = os.path.join(data_path, f"{subreddit}_{content_type}.zst")
-    if not os.path.exists(file_path):
-        # Go to TMPDIR if set, otherwise stay current working directory, since
-        # wget doesn't respect TMPDIR
-        tmpdir = os.environ.get("TMPDIR", os.getcwd())
-        original_cwd = os.getcwd()
-        try:
-            os.chdir(tmpdir)
-            url = f"https://the-eye.eu/redarcs/files/{subreddit}_{content_type}.zst"
+    if os.path.exists(file_path):
+        return file_path  # File already exists
 
-            def _download(target_url: str, context: Optional[ssl.SSLContext]) -> str:
-                if context is None:
-                    return wget.download(target_url, out=data_path, bar=None)
+    # Go to TMPDIR if set, otherwise stay current working directory, since
+    # wget doesn't respect TMPDIR
+    tmpdir = os.environ.get("TMPDIR", os.getcwd())
+    original_cwd = os.getcwd()
+    filename: str | None = None
+    try:
+        os.chdir(tmpdir)
+        url = f"https://the-eye.eu/redarcs/files/{subreddit}_{content_type}.zst"
 
-                opener = request.build_opener(request.HTTPSHandler(context=context))
-                previous_opener = request._opener  # type: ignore[attr-defined]
-                try:
-                    request.install_opener(opener)
-                    return wget.download(target_url, out=data_path, bar=None)
-                finally:
-                    if previous_opener is None:
-                        request._opener = None  # type: ignore[attr-defined]
-                    else:
-                        request.install_opener(previous_opener)
+        def _download(target_url: str, context: Optional[ssl.SSLContext]) -> str:
+            if context is None:
+                return wget.download(target_url, out=data_path)
 
-            _with_tls_fallback(
-                url,
-                _download,
-                description=f"downloading {subreddit} {content_type} archive",
-            )
-        finally:
-            os.chdir(original_cwd)
+            opener = request.build_opener(request.HTTPSHandler(context=context))
+            previous_opener = request._opener  # type: ignore[attr-defined]
+            try:
+                request.install_opener(opener)
+                return wget.download(target_url, out=data_path)
+            finally:
+                if previous_opener is None:
+                    request._opener = None  # type: ignore[attr-defined]
+                else:
+                    request.install_opener(previous_opener)
 
-        # TODO: If download is successful, return the path, otherwise return None
+        filename = _with_tls_fallback(
+            url,
+            _download,
+            description=f"downloading {subreddit} {content_type} archive",
+        )
+    except urllib.error.URLError:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise  # Retry
+    except tenacity.RetryError as exc:
+        logging.error(
+            "Failed to download %s %s archive: %s",
+            subreddit,
+            content_type,
+            exc,
+        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    finally:
+        os.chdir(original_cwd)
 
-    # file_lines = 0
-    # bad_lines = 0
-    # data = []
+    return file_path if filename else None
 
-    # for line, _ in _read_lines_zst(file_path):
-    #     try:
-    #         obj = json.loads(line)
-    #         data += [obj]
-    #     except (KeyError, json.JSONDecodeError):
-    #         bad_lines += 1
-    #     file_lines += 1
 
-    # df = pd.DataFrame(data, dtype="string")
+def iter_bucketed_batches(
+    zst_archive_path: str, chunk_size: int = 256 << 20, *, progress_enabled: bool = True
+) -> Iterator[pa.RecordBatch]:
+    # Verify that the file exists and is a .zst file
+    _validate_zst_file_path(zst_archive_path)
 
-    # # remove deleted posts or comments
-    # df = (
-    #     df[~df["selftext"].isin(["[deleted]", "[removed]"])]
-    #     if data_type == "submissions"
-    #     else df[~df["body"].isin(["[deleted]", "[removed]"])]
-    # )
+    reader_pbar: tqdm | None = None
+    if progress_enabled:
+        file_size = os.path.getsize(zst_archive_path)
+        reader_pbar = tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            desc=f"Processing {Path(zst_archive_path).name}",
+            leave=False,
+            dynamic_ncols=True,
+        )
 
-    # df.loc[:, "score"] = pd.to_numeric(df["score"], errors="coerce")
+    try:
+        for chunk in iter_zst_ndjson_blocks(
+            zst_archive_path, chunk_size=chunk_size, tqdm_pbar=reader_pbar
+        ):
+            try:
+                table = _parse_ndjson_bytes_to_table(chunk, zst_archive_path)
+            except pa.ArrowInvalid as exc:
+                logger.error(
+                    "Error parsing %s: %s",
+                    Path(zst_archive_path).name,
+                    str(exc),
+                    exc_info=True,
+                )
+                continue
 
-    # cols_to_keep = ["id", "created_utc", "author", "permalink", "subreddit", "score"]
-    # if data_type == "comments":
-    #     cols_to_keep.append("link_id")
+            if table is None:
+                continue
 
-    # # anonymize dataframe
-    # if anonymizer_instance is not None:
-    #     df = anonymizer_instance.anonymize_dataframe(
-    #         df,
-    #         cols_to_keep=cols_to_keep,
-    #         cols_to_anonymize=["selftext", "title"]
-    #         if data_type == "submissions"
-    #         else ["body"],
-    #         data_source_name=f"{subreddit}_{data_type}",
-    #         batch_size=batch_size,
-    #         num_workers=num_workers,
-    #     )
-
-    # df.convert_dtypes(dtype_backend="pyarrow").to_parquet(
-    #     save_path, index=False, compression="snappy"
-    # )
-    # os.remove(file_path)
-    # logger.info(
-    #     f"Completed download of {subreddit} {data_type} data with: {file_lines:,} lines "
-    #     f"({bad_lines:,} bad lines) and {len(df):,} valid records."
-    # )
+            # Sort by bucket so that batches are contiguous by partitions
+            indices = pc.sort_indices(table, sort_keys=[("bucket", "ascending")])
+            table = pc.take(table, indices)
+            yield from table.to_batches()
+    except Exception as exc:
+        logger.error(
+            "Error processing %s: %s",
+            Path(zst_archive_path).name,
+            str(exc),
+            exc_info=True,
+        )
+    finally:
+        if reader_pbar is not None:
+            reader_pbar.close()
 
 
 def iter_zst_ndjson_blocks(
@@ -321,12 +343,9 @@ def iter_zst_ndjson_blocks(
     """
 
     # Verify that the file exists and is a .zst file
-    if not zst_path.endswith(".zst"):
-        raise ValueError(f"File {zst_path} is not a .zst file")
-    if not os.path.exists(zst_path):
-        raise FileNotFoundError(f"File {zst_path} does not exist")
+    _validate_zst_file_path(zst_path)
 
-    logger.info("Processing %s", zst_path)
+    logger.debug("Processing %s", Path(zst_path).name)
 
     with open(zst_path, "rb") as file_handle:  # 'rb': read binary
         # Create a decompression context
@@ -434,7 +453,7 @@ def _parse_ndjson_bytes_to_table(
             parse_options=parse_options,
         )
 
-    logger.info("%s: Before filtering - %d rows", zst_path, table.num_rows)
+    logger.debug("%s: Before filtering - %d rows", Path(zst_path).name, table.num_rows)
     if table.num_rows == 0:
         logger.warning("Skipping chunk: parsed table has zero rows")
         return None
@@ -449,7 +468,7 @@ def _parse_ndjson_bytes_to_table(
     # Apply the mask
     table = table.filter(keep_mask)
     content_type = pc.filter(content_type, keep_mask)
-    logger.warning("%s: After filtering - %d rows", zst_path, table.num_rows)
+    logger.debug("%s: After filtering - %d rows", Path(zst_path).name, table.num_rows)
 
     # Add the derived content_type column to the table
     table = table.append_column("content_type", content_type)
@@ -552,3 +571,10 @@ def _derive_content_type(table: pa.Table) -> tuple[pa.ChunkedArray, pa.ChunkedAr
     )
 
     return content_type, keep_mask
+
+
+def _validate_zst_file_path(zst_archive_path: str) -> None:
+    if not zst_archive_path.endswith(".zst"):
+        raise ValueError(f"File {zst_archive_path} is not a .zst file")
+    if not os.path.exists(zst_archive_path):
+        raise FileNotFoundError(f"File {zst_archive_path} does not exist")

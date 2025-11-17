@@ -3,6 +3,8 @@ import glob
 import json
 import logging
 import os
+import ssl
+from http.client import RemoteDisconnected
 from urllib import error
 
 import asyncpraw
@@ -22,6 +24,8 @@ from tqdm.asyncio import tqdm
 
 logger = logging.getLogger(__name__)
 
+_RETRYALBLE_HTTP_ERRORS = {429, 500, 502, 503, 504}
+
 
 def is_retryable_error(exception: BaseException) -> bool:
     """Return whether an exception is retryable for Reddit requests.
@@ -38,11 +42,15 @@ def is_retryable_error(exception: BaseException) -> bool:
         should be retried, ``False`` otherwise.
     """
     return (
-        isinstance(exception, asyncprawcore.exceptions.ResponseException)
-        and exception.response.status in [429, 500, 502, 503, 504]
-    ) or (
-        isinstance(exception, error.HTTPError)
-        and exception.code in [429, 500, 502, 503, 504]
+        (
+            isinstance(exception, asyncprawcore.exceptions.ResponseException)
+            and exception.response.status in _RETRYALBLE_HTTP_ERRORS
+        )
+        or (
+            isinstance(exception, error.HTTPError)
+            and exception.code in _RETRYALBLE_HTTP_ERRORS
+        )
+        or isinstance(exception, (error.URLError, ssl.SSLError, RemoteDisconnected))
     )
 
 

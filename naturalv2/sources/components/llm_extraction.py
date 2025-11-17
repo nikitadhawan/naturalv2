@@ -82,7 +82,7 @@ async def extract_curation_info(  # noqa: PLR0912
     if os.path.exists(file_path):
         existing_data = pd.read_csv(file_path, index_col=0)
         extraction_inputs = extraction_inputs.loc[
-            ~extraction_inputs.index.isin(existing_data.index)
+            ~extraction_inputs.keyword.isin(existing_data.keyword)
         ]
         logger.info(
             "Found %d existing records, %d left to process.",

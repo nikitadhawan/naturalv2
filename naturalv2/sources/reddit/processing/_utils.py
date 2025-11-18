@@ -37,7 +37,9 @@ def _mask_has_true(mask: pa.Array | pa.ChunkedArray) -> bool:
     return bool(total.as_py())
 
 
-def _ensure_string_array(arr: pa.Array | pa.ChunkedArray, default: str = "") -> pa.Array:
+def _ensure_string_array(
+    arr: pa.Array | pa.ChunkedArray, default: str = ""
+) -> pa.Array:
     array = arr.combine_chunks() if isinstance(arr, pa.ChunkedArray) else arr
     if not pa.types.is_string(array.type):
         array = pc.cast(array, pa.string(), safe=False)
@@ -59,7 +61,9 @@ def _format_timestamp_array(arr: pa.Array | pa.ChunkedArray) -> pa.Array:
 
 def _filter_array(values: pa.Array | pa.ChunkedArray, mask: pa.Array) -> pa.Array:
     filtered = pc.filter(values, mask)
-    return filtered.combine_chunks() if isinstance(filtered, pa.ChunkedArray) else filtered
+    return (
+        filtered.combine_chunks() if isinstance(filtered, pa.ChunkedArray) else filtered
+    )
 
 
 def _submission_permalink_array(
@@ -74,7 +78,9 @@ def _submission_permalink_array(
         fallback = []
         for subreddit, post_id in zip(subreddits.to_pylist(), post_ids.to_pylist()):
             if subreddit:
-                fallback.append(f"https://www.reddit.com/r/{subreddit}/comments/{post_id}/")
+                fallback.append(
+                    f"https://www.reddit.com/r/{subreddit}/comments/{post_id}/"
+                )
             else:
                 fallback.append(f"https://www.reddit.com/comments/{post_id}/")
         merged = permalink.to_pylist()
@@ -97,7 +103,9 @@ def _comment_permalink_array(
     if _mask_has_true(pc.invert(length_mask)):
         fallback = [
             f"https://www.reddit.com/comments/{post_id}/_/{comment_id}"
-            for post_id, comment_id in zip(post_ids.to_pylist(), comment_ids.to_pylist())
+            for post_id, comment_id in zip(
+                post_ids.to_pylist(), comment_ids.to_pylist()
+            )
         ]
         merged = permalink.to_pylist()
         bool_mask = pc.invert(length_mask).to_pylist()
@@ -151,7 +159,9 @@ def _format_reply_suffix(replies: Sequence[str]) -> str:
     )
 
 
-def _author_replies_column(post_ids: pa.Array, reply_lookup: Mapping[str, list[str]]) -> pa.Array:
+def _author_replies_column(
+    post_ids: pa.Array, reply_lookup: Mapping[str, list[str]]
+) -> pa.Array:
     data: list[list[str]] = []
     for post_id in post_ids.to_pylist():
         replies = reply_lookup.get(post_id, []) if reply_lookup else []
@@ -167,7 +177,9 @@ def _constant_string_array(value: str, length: int) -> pa.Array:
     return pa.array([value] * length, type=pa.string())
 
 
-def _build_submission_permalink_series(subreddit: pd.Series, post_id: pd.Series) -> pd.Series:
+def _build_submission_permalink_series(
+    subreddit: pd.Series, post_id: pd.Series
+) -> pd.Series:
     sub = subreddit.astype("string").fillna("")
     pid = post_id.astype("string")
     with_sub = "/r/" + sub + "/comments/" + pid + "/"
@@ -177,7 +189,9 @@ def _build_submission_permalink_series(subreddit: pd.Series, post_id: pd.Series)
     )
 
 
-def _build_comment_permalink_series(post_id: pd.Series, comment_id: pd.Series) -> pd.Series:
+def _build_comment_permalink_series(
+    post_id: pd.Series, comment_id: pd.Series
+) -> pd.Series:
     return (
         "https://www.reddit.com/comments/"
         + post_id.astype("string")

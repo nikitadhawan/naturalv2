@@ -1,11 +1,11 @@
-"""Reddit source package.
+"""Reddit source integration for the Natural pipeline.
 
-This package contains stages and utilities for curating Reddit data:
-
-- Stages: high-level pipeline components that discover relevant subreddits,
-  download/clean data, and curate per-experiment CSVs.
-- Operations: focused helpers for Reddit search, download and cleaning.
-- Utils: archive access, rule-based filtering and subreddit metadata fetching.
+This package exposes:
+- Pipeline stages that discover candidate subreddits, download/clean data, and
+  curate study-specific datasets.
+- Async Reddit API helpers for searching subreddits and posts with retries.
+- Pushshift archive ingestion utilities plus Arrow-based processing/filtering
+  used to contextualize records and export curated parquet/CSV outputs.
 """
 
 from .stages import RedditConditionFilter, RedditCurateStage, RedditDownloadAndClean

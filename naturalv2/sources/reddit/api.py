@@ -1,3 +1,12 @@
+"""Async Reddit API helpers with retry-aware search utilities.
+
+This module offers thin wrappers around PRAW that add sensible defaults:
+- Retry configuration tuned for rate/availability errors.
+- Async rate limiting via ``AsyncLimiter``.
+- Convenience functions to search for subreddits, fetch posts, and download
+  posts/comments into dataframes for downstream processing.
+"""
+
 import asyncio
 import glob
 import json

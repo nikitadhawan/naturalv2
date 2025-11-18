@@ -113,6 +113,27 @@ def scan_subreddit(
     columns: list[str] | None = None,
     batch_size: int = 128_000,
 ) -> Generator[pd.DataFrame, Any, None]:
+    """
+    Stream parquet partitions for the given subreddit(s) as pandas DataFrames.
+
+    Parameters
+    ----------
+    base_dir : str
+        Root directory of the hive-partitioned dataset.
+    subreddits : str or sequence of str
+        Subreddit name(s) to include.
+    content_type : str or None, optional
+        Partition value for ``content_type`` (e.g., ``"submissions"`` or ``"comments"``).
+    columns : list[str] or None, optional
+        Subset of columns to project; defaults to all columns.
+    batch_size : int, default=128_000
+        Scan batch size in rows.
+
+    Yields
+    ------
+    pandas.DataFrame
+        Non-empty batches converted from Arrow to pandas using Arrow dtypes.
+    """
     # Normalize to a de-duped, non-empty list
     subs = _normalize_subreddits(
         [subreddits] if isinstance(subreddits, str) else subreddits

@@ -241,6 +241,29 @@ def download_sub_data(
 def iter_bucketed_batches(
     zst_archive_path: str, chunk_size: int = 256 << 20, *, progress_enabled: bool = True
 ) -> Iterator[pa.RecordBatch]:
+    """Stream Arrow record batches from a Pushshift Zstandard archive.
+
+    Parameters
+    ----------
+    zst_archive_path : str
+        Filesystem path to the ``.zst`` archive containing NDJSON Reddit data.
+    chunk_size : int, optional, default=256<<20
+        Target size in bytes for each decompressed NDJSON chunk read from disk.
+    progress_enabled : bool, optional, default=True
+        If True, display a tqdm progress bar keyed to compressed bytes read.
+
+    Yields
+    ------
+    pa.RecordBatch
+        Parsed, filtered, and bucket-sorted Arrow batches ready for downstream
+        processing. Batches are ordered by the derived ``bucket`` column so
+        partitions stay contiguous.
+
+    Notes
+    -----
+    Parsing or filtering failures are logged and skipped rather than raising,
+    so iteration continues over subsequent chunks.
+    """
     # Verify that the file exists and is a .zst file
     _validate_zst_file_path(zst_archive_path)
 
@@ -574,6 +597,7 @@ def _derive_content_type(table: pa.Table) -> tuple[pa.ChunkedArray, pa.ChunkedAr
 
 
 def _validate_zst_file_path(zst_archive_path: str) -> None:
+    """Raise if the provided path is missing or does not point to a .zst file."""
     if not zst_archive_path.endswith(".zst"):
         raise ValueError(f"File {zst_archive_path} is not a .zst file")
     if not os.path.exists(zst_archive_path):

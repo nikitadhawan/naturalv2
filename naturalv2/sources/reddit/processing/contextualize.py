@@ -79,6 +79,48 @@ def write_to_parquet_partitions(
     ] = "overwrite_or_ignore",
     run_tag: str | None = None,
 ) -> list[str]:
+    """
+    Write a stream of record batches to a hive-partitioned parquet dataset.
+
+    Parameters
+    ----------
+    data_stream : Iterable[pa.RecordBatch]
+        Record batches to persist.
+    output_dir : str
+        Destination directory for the dataset. Created if missing.
+    schema : pa.Schema
+        Schema to enforce on the written dataset.
+    parquet_compression_level : int, default=5
+        Compression level for zstd codec (1–22).
+    write_parquet_stats : {'none', 'minimal', 'all'}, default='minimal'
+        Parquet statistics granularity to emit.
+    use_dictionary : bool or dict[str, bool], default=True
+        Dictionary encoding toggle, either global or column-level.
+    max_partitions : int, default=1024
+        Maximum distinct partition directories.
+    min_rows_per_group : int, default=128_000
+        Minimum rows per row group (bounded by ``max_rows_per_group``).
+    max_rows_per_group : int, default=256_000
+        Maximum rows per row group.
+    max_open_files : int, default=512
+        Cap on concurrently open files during write.
+    existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, \
+default='overwrite_or_ignore'
+        Strategy when output already exists.
+    run_tag : str or None, optional
+        Optional prefix for generated parquet filenames.
+
+    Returns
+    -------
+    list[str]
+        Full paths of parquet files written.
+
+    Raises
+    ------
+    ValueError
+        If parameter values are invalid (e.g., non-positive ints, bad literal choices),
+        or ``output_dir`` is a file.
+    """
     # Validate Literals
     if write_parquet_stats not in ["none", "minimal", "all"]:
         raise ValueError(
@@ -135,6 +177,7 @@ def write_to_parquet_partitions(
     written_paths: list[str] = []
 
     def visitor(file: ds.WrittenFile) -> None:
+        """Collect the full path of each file written by the dataset writer."""
         written_paths.append(os.path.join(output_dir, file.path))
 
     effective_max_rows = max(1, max_rows_per_group)
@@ -173,7 +216,36 @@ def build_contextualized_dataset(
     run_tag: str | None = None,
     cleanup_source: bool = False,
 ) -> list[str]:
-    """Arrow-native contextualization pipeline for hive-partitioned Reddit data."""
+    """
+    Build a contextualized hive-partitioned dataset from Reddit parquet sources.
+
+    Parameters
+    ----------
+    source_dir : str or pathlib.Path or Sequence[str | pathlib.Path]
+        Root path(s) containing submission/comment parquet partitions.
+    dest_dir : str or pathlib.Path
+        Destination directory for contextualized parquet outputs.
+    subreddits : Sequence[str], optional
+        Required list of subreddit names to include.
+    batch_size : int, default=256_000
+        Scanner batch size for reading source data.
+    run_tag : str or None, optional
+        Tag appended to output filenames to avoid collisions (default ``"ctx"``).
+    cleanup_source : bool, default=False
+        When ``True``, remove source files after successful processing.
+
+    Returns
+    -------
+    list[str]
+        Paths to contextualized parquet files written.
+
+    Raises
+    ------
+    ValueError
+        If ``subreddits`` is missing/empty or params are invalid.
+    FileExistsError
+        If outputs for the given ``run_tag`` already exist and conflict with inputs.
+    """
 
     if subreddits is None:
         raise ValueError(
@@ -297,6 +369,7 @@ def build_contextualized_dataset(
 
 
 def _normalize_subreddits(values: Sequence[str]) -> list[str]:
+    """Strip whitespace, drop empties, and de-duplicate subreddit names."""
     cleaned = []
     for value in values:
         if value and isinstance(value, str):
@@ -310,6 +383,7 @@ def _normalize_subreddits(values: Sequence[str]) -> list[str]:
 def _make_partition_filter(
     subreddits: Sequence[str], content_type: str | None
 ) -> ds.Expression:
+    """Build a dataset filter matching subreddits, buckets, and optional content type."""
     expr: ds.Expression = ds.field("subreddit").isin(
         pa.array(subreddits, type=pa.string())
     )
@@ -325,6 +399,7 @@ class _AuthorReplyStore:
     """Spill author replies to disk per post bucket to keep memory bounded."""
 
     def __init__(self, tmp_root: str | Path | None = None) -> None:
+        """Initialize a temp directory for spilling replies, optionally under tmp_root."""
         root = (
             Path(tmp_root)
             if tmp_root
@@ -337,6 +412,7 @@ class _AuthorReplyStore:
         self._closed = False
 
     def close(self) -> None:
+        """Delete any spilled reply files and mark the store closed."""
         if self._closed:
             return
         shutil.rmtree(self._root, ignore_errors=True)
@@ -345,6 +421,7 @@ class _AuthorReplyStore:
     def add_replies(
         self, *, post_ids: pa.Array, replies: pa.Array, created_utc: pa.Array
     ) -> None:
+        """Persist replies grouped by first-character bucket to bounded directories."""
         if len(post_ids) == 0:
             return
 
@@ -377,6 +454,7 @@ class _AuthorReplyStore:
                 self._files_by_bucket[bucket].append(file_path)
 
     def fetch(self, post_ids: pa.Array | Sequence[str]) -> dict[str, list[str]]:
+        """Load replies for the provided post ids, ordered by creation time."""
         values = (
             post_ids.to_pylist()
             if isinstance(post_ids, (pa.Array, pa.ChunkedArray))
@@ -430,6 +508,7 @@ class PreparedCommentBatch(NamedTuple):
 def _prepare_comment_batch(
     *, batch: pa.RecordBatch, lookup_fn: Callable[[pa.Array], pa.Table | None]
 ) -> PreparedCommentBatch | None:
+    """Align a comment batch to submission metadata, filtering rows without matches."""
     if batch.num_rows == 0:
         return None
 
@@ -468,6 +547,7 @@ def _collect_author_replies(
     batch_size: int,
     store: "_AuthorReplyStore",
 ) -> None:
+    """Collect author replies from comments and spill them to the reply store."""
     scanner = dataset.scanner(
         filter=comment_filter,
         columns=["link_id", "author", "body", "created_utc"],
@@ -534,6 +614,7 @@ def _comment_record_batches(
     reply_store: "_AuthorReplyStore",
     batch_size: int,
 ) -> Generator[pa.RecordBatch, Any, None]:
+    """Yield contextualized comment record batches, skipping author replies."""
     scanner = dataset.scanner(
         filter=comment_filter,
         columns=[
@@ -574,6 +655,7 @@ def _submission_record_batches(
     reply_store: "_AuthorReplyStore",
     batch_size: int,
 ) -> Generator[pa.RecordBatch, Any, None]:
+    """Yield contextualized submission record batches."""
     scanner = dataset.scanner(
         filter=submission_filter,
         columns=[
@@ -612,6 +694,7 @@ def _build_comment_record_batch(
     submission_filter: ds.Expression,
     reply_store: "_AuthorReplyStore",
 ) -> pa.RecordBatch | None:
+    """Construct a contextualized comment batch joined with submission context."""
     prepared = _prepare_comment_batch(
         batch=batch,
         lookup_fn=lambda post_ids: _fetch_submission_context_table(
@@ -700,6 +783,7 @@ def _build_submission_record_batch(
     batch: pa.RecordBatch,
     reply_store: "_AuthorReplyStore",
 ) -> pa.RecordBatch | None:
+    """Construct a contextualized submission batch with appended author replies."""
     post_ids = _submission_post_id_array(batch.column("id"))
     valid_mask = _non_empty_mask(post_ids)
     if not _mask_has_true(valid_mask):
@@ -759,6 +843,7 @@ def _get_contextualized_batches(
     reply_store: "_AuthorReplyStore",
     batch_size: int,
 ) -> Generator[pa.RecordBatch, Any, None]:
+    """Chain together comment and submission batch generators."""
     yield from _comment_record_batches(
         dataset=dataset,
         comment_filter=comment_filter,
@@ -780,6 +865,7 @@ def _fetch_submission_author_table(
     submission_filter: ds.Expression,
     post_ids: pa.Array,
 ) -> pa.Table | None:
+    """Fetch author ids for a set of submission ids needed for reply matching."""
     # Query only the distinct submission ids present in the current batch
     unique_ids = _unique_strings(post_ids)
     if not unique_ids:
@@ -803,6 +889,7 @@ def _fetch_submission_context_table(
     post_ids: pa.Array,
     reply_store: "_AuthorReplyStore",
 ) -> pa.Table | None:
+    """Fetch submission context used to populate contextualized comment rows."""
     unique_ids = _unique_strings(post_ids)
     if not unique_ids:
         return None
@@ -910,38 +997,84 @@ def _processed_subreddits(source_dir: str | Path) -> set[str]:
 
 
 def _proc_dir(root: str | Path) -> Path:
+    """Ensure the hidden processing directory exists under root."""
     path = Path(root) / ".processed"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _archive_done_path(root: str | Path, archive_id: str) -> Path:
+    """Path of the marker file indicating a specific archive has been processed."""
     path = _proc_dir(root) / "archives"
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{archive_id}.done"
 
 
 def _compacted_done_path(root: str | Path, archive_id: str) -> Path:
+    """Path of the marker file indicating a specific archive has been compacted."""
     path = _proc_dir(root) / "compacted"
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{archive_id}.done"
 
 
 def is_archive_processed(root: str | Path, archive_id: str) -> bool:
+    """
+    Check for the presence of a processed marker for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+
+    Returns
+    -------
+    bool
+        True if the processed marker exists, False otherwise.
+    """
     return _archive_done_path(root, archive_id).exists()
 
 
 def is_archive_compacted(root: str | Path, archive_id: str) -> bool:
+    """
+    Check for the presence of a compacted marker for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+
+    Returns
+    -------
+    bool
+        True if the compacted marker exists, False otherwise.
+    """
     return _compacted_done_path(root, archive_id).exists()
 
 
 def _write_manifest(path: Path, payload: dict) -> None:
+    """Atomically write a small JSON payload to ``path``."""
     tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False))
     os.replace(tmp, path)  # atomic on POSIX
 
 
 def mark_archive_done(root: str | Path, archive_id: str, **extra) -> None:
+    """
+    Create or update a processed marker file for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+    **extra
+        Additional metadata fields to write alongside the timestamp.
+    """
     _write_manifest(
         _archive_done_path(root, archive_id),
         {"archive_id": archive_id, "ts": int(time.time()), **extra},
@@ -949,6 +1082,18 @@ def mark_archive_done(root: str | Path, archive_id: str, **extra) -> None:
 
 
 def mark_archive_compacted(root: str | Path, archive_id: str, **extra) -> None:
+    """
+    Create or update a compacted marker file for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+    **extra
+        Additional metadata fields to write alongside the timestamp.
+    """
     _write_manifest(
         _compacted_done_path(root, archive_id),
         {"archive_id": archive_id, "ts": int(time.time()), **extra},

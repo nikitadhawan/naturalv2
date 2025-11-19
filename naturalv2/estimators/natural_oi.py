@@ -11,7 +11,7 @@ from naturalv2.utils import get_answer_dicts
 
 
 class NaturalOI:
-    """NATURAL Outcome Imputation Estimator for Individual Treatment Effects (ITE).
+    """NATURAL Outcome Imputation Estimator.
 
     Parameters
     ----------
@@ -29,10 +29,10 @@ class NaturalOI:
     def get_individual_treatment_effects(
         self, conditionals: pd.DataFrame
     ) -> np.ndarray:
-        """Calculate Individual Treatment Effects (ITE) given conditionals.
+        """Calculate individual treatment responses given conditionals.
 
         Given a dataframe containing P(Y | X, T) for each treatment T and covariate X,
-        this method computes the ITEs for each treatment and covariate combination.
+        this method computes the response for each treatment and individual datapoint.
 
         Parameters
         ----------
@@ -44,8 +44,8 @@ class NaturalOI:
         Returns
         -------
         np.ndarray
-            An array of shape (num_treatments, num_samples) containing the ITEs for
-            each treatment and covariate combination.
+            An array of shape (num_treatments, num_samples) containing the reponses for
+            each treatment and individual datapoint.
 
         Raises
         ------
@@ -70,9 +70,7 @@ class NaturalOI:
                 f"{discretized_covariate_cols}."
             )
 
-        # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
         conditionals = conditionals.copy()
-        # outcome_idx = self.experiment.outcome_names.index(outcome)
 
         idx_to_feat = get_answer_dicts(
             {
@@ -85,16 +83,12 @@ class NaturalOI:
             for dct in idx_to_feat
         ]
 
-        conditionals.loc[:, "y_given_tx_probs"] = conditionals.apply(
+        conditionals["y_given_tx_probs"] = conditionals.apply(
             lambda row: np.array(literal_eval(row["y_given_tx_probs"])).reshape(
                 self._conditional_shape
             ),
             axis=1,
-        )
-        # choose probs corresponding to {outcome}
-        # conditionals.loc[:, "y_given_tx_probs"] = conditionals.apply(
-        #     lambda row: row["y_given_tx_probs"][2 * outcome_idx : 2 * (outcome_idx + 1)], axis=1
-        # )
+        ).values
 
         self.outcome_conditionals = self._compute_outcome_conditionals(conditionals)
         all_ites = np.zeros((self._num_treat, len(conditionals)))
@@ -136,12 +130,12 @@ class NaturalOI:
                 subset_t = subset.loc[subset[TREATMENT_COL_NAME + "_discretized"] == t]
 
                 if len(subset_t) > 0:
-                    py1_given_xt = np.array(
+                    exp_y_given_xt = np.array(
                         [
                             sum([j * prob[j] for j in range(len(prob))])
                             for prob in subset_t["y_given_tx_probs"]
                         ]
                     )
-                    outcome_conditionals[i, t] = np.mean(py1_given_xt)
+                    outcome_conditionals[i, t] = np.mean(exp_y_given_xt)
 
         return outcome_conditionals

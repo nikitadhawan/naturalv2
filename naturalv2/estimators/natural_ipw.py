@@ -12,9 +12,9 @@ from naturalv2.utils import get_answer_dicts
 class NaturalIPW:
     """NATURAL Inverse Probability Weighting (IPW) Estimator.
 
-    This class computes Individual Treatment Effects (ITE) using the IPW method.
+    This class computes individual treatment responses using the IPW method.
     It calculates the propensity scores for each treatment given the covariates
-    and uses these scores to estimate the ITEs from the conditional probabilities
+    and uses these scores to estimate the response from the conditional probabilities
     of treatment and outcome given covariates.
 
     Parameters
@@ -35,10 +35,10 @@ class NaturalIPW:
     def get_individual_treatment_effects(
         self, conditionals: pd.DataFrame
     ) -> np.ndarray:
-        """Calculate Individual Treatment Effects (ITE) given conditionals.
+        """Calculate individual treatment responses given conditionals.
 
-        Given a dataframe containing P(T, Y | X) for each treatment T and covariate X,
-        this method computes the ITEs for each treatment and covariate combination.
+        Given a dataframe containing P(T, Y | X) for each treatment T and datapoint,
+        this method computes the response for each treatment and individual datapoint.
 
         Parameters
         ----------
@@ -50,8 +50,8 @@ class NaturalIPW:
         Returns
         -------
         np.ndarray
-            An array of shape (num_treatments, num_samples) containing the ITEs for
-            each treatment and covariate combination.
+            An array of shape (num_treatments, num_samples) containing the reponses for
+            each treatment and individual datapoint.
         """
         discretized_covariate_cols = [
             f"{cov}_discretized" for cov in self._covariate_names
@@ -67,9 +67,7 @@ class NaturalIPW:
                 "Conditionals DataFrame must contain 'ty_given_x_probs' column."
             )
 
-        # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
         conditionals = conditionals.copy()
-        # outcome_idx = self.experiment.outcome_names.index(outcome)
 
         idx_to_feat = get_answer_dicts(
             {
@@ -82,16 +80,12 @@ class NaturalIPW:
             for dct in idx_to_feat
         ]  # dataset should have already been discretized and the transforms ready
 
-        conditionals.loc[:, "ty_given_x_probs"] = conditionals.apply(
+        conditionals["ty_given_x_probs"] = conditionals.apply(
             lambda row: np.array(ast.literal_eval(row["ty_given_x_probs"])).reshape(
                 self._conditional_shape
             ),
             axis=1,
-        )
-        # choose probs corresponding to {outcome}
-        # conditionals.loc[:, "ty_given_x_probs"] = conditionals.apply(
-        #     lambda row: row["ty_given_x_probs"][:, 2 * outcome_idx : 2 * (outcome_idx + 1)], axis=1
-        # )
+        ).values
 
         self.prop_score_lst = self._compute_prop_score(conditionals)
         all_ites = np.zeros((self._num_treat, len(conditionals)))

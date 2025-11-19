@@ -12,7 +12,8 @@ from naturalv2.pipeline import OUTCOME_COL_NAME, TREATMENT_COL_NAME
 
 
 class NaturalMC:
-    """NATURAL Monte Carlo Estimator for Individual Treatment Effects (ITE).
+    """NATURAL Monte Carlo Estimator for individual treatment responses.
+    TODO: Do not use for APOs; off-the-shelf estimators do not trivially extend to APOs.
 
     Parameters
     ----------
@@ -87,7 +88,6 @@ class NaturalMC:
                 "``observational_data`` columns."
             )
 
-        # array of ITEs (treat2 - treat1) per unit corresponding to {outcome}
         model = self._causal_models[self.estimator_type]()
 
         data = CausalData(

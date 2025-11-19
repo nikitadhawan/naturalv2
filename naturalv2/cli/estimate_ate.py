@@ -53,14 +53,14 @@ logger = logging.getLogger(__name__)
 
 
 def _weight_by_inclusion(
-    ites: np.ndarray, inclusion_probs: pd.DataFrame, use_weights=True
+    responses: np.ndarray, inclusion_probs: pd.DataFrame, use_weights=True
 ) -> np.ndarray:
-    """Weight individual treatment effects (ITE) by inclusion probabilities.
+    """Weight individual treatment responses by inclusion probabilities.
 
     Parameters
     ----------
-    ites : np.ndarray
-        Array of individual treatment effects (ITE) with shape
+    responses : np.ndarray
+        Array of individual treatment responses with shape
         ``[num_treatments, num_datapoints]``.
     inclusion_probs : pd.DataFrame
         DataFrame containing inclusion probabilities for each datapoint.
@@ -70,20 +70,20 @@ def _weight_by_inclusion(
     Returns
     -------
     np.ndarray
-        Weighted average treatment effects for each treatment, with shape
+        Weighted average treatment response for each treatment, with shape
         ``[num_treatments]``.
     """
-    # ites has shape [num_treatments, num_datapoints]
+    # responses has shape [num_treatments, num_datapoints]
     if not use_weights:
-        probs = np.ones(ites.shape[1])
+        probs = np.ones(responses.shape[1])
     else:
         probs = inclusion_probs.apply(
             lambda row: literal_eval(row["inclusion_probs"])[1], axis=1
         ).to_numpy()
-    return np.average(ites, axis=1, weights=probs)
+    return np.average(responses, axis=1, weights=probs)
 
 
-def _calculate_treatment_effects(
+def _calculate_treatment_responses(
     experiment: Experiment,
     outcome: str,
     estimator: NaturalIPW | NaturalMC | NaturalOI,
@@ -94,7 +94,7 @@ def _calculate_treatment_effects(
     use_inclusion_weights: bool = True,
     use_imputed_nones: bool = True,
 ) -> list[dict]:
-    """Calculate treatment effects for all outcome-treatment pairs.
+    """Calculate treatment responses for all treatments.
 
     Parameters
     ----------
@@ -120,15 +120,15 @@ def _calculate_treatment_effects(
     result_dicts = []
 
     if isinstance(estimator, NaturalMC):
-        all_ites = estimator.get_individual_treatment_effects(extractions, outcome)
-    else:
-        all_ites = estimator.get_individual_treatment_effects(extractions)
+        raise NotImplementedError("NaturalMC not implemented for treatment responses.")
+        # all_responses = estimator.get_individual_treatment_effects(extractions, outcome)
+    all_responses = estimator.get_individual_treatment_effects(extractions)
 
-    weighted_effects = _weight_by_inclusion(
-        all_ites, extractions, use_inclusion_weights
+    weighted_responses = _weight_by_inclusion(
+        all_responses, extractions, use_inclusion_weights
     )  # len: num_treatments
 
-    bootstrap_weighted_effects = np.zeros(
+    bootstrap_weighted_responses = np.zeros(
         (bootstrap_size, len(experiment.treatment_names))
     )
     for b in range(bootstrap_size):
@@ -140,45 +140,92 @@ def _calculate_treatment_effects(
         )
 
         if isinstance(estimator, NaturalMC):
-            all_ites = estimator.get_individual_treatment_effects(
+            all_responses = estimator.get_individual_treatment_effects(
                 bootstrap_data, outcome
             )
         else:
-            all_ites = estimator.get_individual_treatment_effects(bootstrap_data)
+            all_responses = estimator.get_individual_treatment_effects(bootstrap_data)
 
-        bootstrap_weighted_effects[b, :] = _weight_by_inclusion(
-            all_ites, bootstrap_data, use_inclusion_weights
+        bootstrap_weighted_responses[b, :] = _weight_by_inclusion(
+            all_responses, bootstrap_data, use_inclusion_weights
         )  # len: num_treatments
 
+    for i, treatment in enumerate(experiment.treatment_names):
+        pred_response = weighted_responses[i]
+        bootstrap_response = bootstrap_weighted_responses[:, i]
+        avg_bootstrap_response = np.mean(bootstrap_response)
+        sample_variance = np.sum((bootstrap_response - avg_bootstrap_response) ** 2) / (
+            bootstrap_size - 1
+        )
+        conf_delta = norm.ppf(1 - alpha / 2) * np.sqrt(sample_variance)
+        results = {
+            "estimator": estimator.__class__.__name__,
+            "outcome": outcome,
+            "treatment": treatment,
+            "pred_response": pred_response,
+            "CI_lower": pred_response - conf_delta,
+            "CI_upper": pred_response + conf_delta,
+        }
+        logger.info(
+            "Predicted Response: %f, (%f, %f)",
+            pred_response,
+            pred_response - conf_delta,
+            pred_response + conf_delta,
+        )
+        if (
+            experiment.status == "completed"
+            and [outcome, treatment] in experiment.apo_outcome_treatment
+        ):
+            response_idx = experiment.apo_outcome_treatment.index([outcome, treatment])
+            true_response = experiment.avg_potential_outcomes[response_idx]
+            error = abs(pred_response - true_response)
+            true_stats = experiment.apo_stats[response_idx]
+            dispersion_type, dispersion, cohort_size = true_stats
+            results.update(
+                {
+                    "true_response": true_response,
+                    "abs_error": error,
+                    "true_dispersion_type": dispersion_type,
+                    "true_dispersion": dispersion,
+                    "true_cohort_size": cohort_size,
+                }
+            )
+            logger.info(
+                "True Response: %f, %s: %s, Cohort Size: %s",
+                true_response,
+                str(dispersion_type),
+                str(dispersion),
+                str(cohort_size),
+            )
+            logger.info("Absolute Error: %f", error)
+        result_dicts.append(results)
+
+    return result_dicts, weighted_responses
+
+
+def _calculate_treatment_effects(
+    experiment,
+    outcome,
+    estimator,
+    weighted_responses,
+):
+    result_dicts = []
     for i, treat1 in enumerate(experiment.treatment_names):
         for j, treat2 in enumerate(experiment.treatment_names):
             if i < j:
                 try:
-                    pred_ate = weighted_effects[j] - weighted_effects[i]
-                    bootstrap_pred_ate = (
-                        bootstrap_weighted_effects[:, j]
-                        - bootstrap_weighted_effects[:, i]
-                    )  # len: bootstrap_size
-                    avg_bootstrap_pred_ate = np.mean(bootstrap_pred_ate)
-                    sample_variance = np.sum(
-                        (bootstrap_pred_ate - avg_bootstrap_pred_ate) ** 2
-                    ) / (bootstrap_size - 1)
-                    conf_delta = norm.ppf(1 - alpha / 2) * np.sqrt(sample_variance)
+                    pred_ate = weighted_responses[j] - weighted_responses[i]
                     results = {
                         "estimator": estimator.__class__.__name__,
                         "outcome": outcome,
                         "treatments": f"{treat2}-{treat1}",
                         "pred_ate": pred_ate,
-                        "CI_lower": pred_ate - conf_delta,
-                        "CI_upper": pred_ate + conf_delta,
                     }
-                    logger.info(
-                        "Predicted ATE: %f, (%f, %f)",
-                        pred_ate,
-                        pred_ate - conf_delta,
-                        pred_ate + conf_delta,
-                    )
-                    if experiment.status == "completed":
+                    logger.info("Predicted ATE: %f", pred_ate)
+                    if (
+                        experiment.status == "completed"
+                        and [outcome, [treat1, treat2]] in experiment.outcome_treatment
+                    ):
                         effect_idx = experiment.outcome_treatment.index(
                             [outcome, [treat1, treat2]]
                         )
@@ -202,12 +249,12 @@ def _calculate_treatment_effects(
 
 
 def _save_results(
-    results: list[dict], save_path: str, nct_id: str, exp_name: str
+    results: list[dict], save_path: str, nct_id: str, exp_name: str, eval_type: str
 ) -> None:
     """Save results to CSV file."""
     result_df = pd.DataFrame(results)
     results_path = os.path.join(
-        save_path, "results", f"{nct_id}_{exp_name}/ate_results.csv"
+        save_path, "results", f"{nct_id}_{exp_name}/{eval_type}_results.csv"
     )
 
     if os.path.exists(results_path):
@@ -242,6 +289,18 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
             exc_info=True,
         )
         return
+    # If the experiment has no _avg_potential_outcomes or it is an empty list, calculate them from the trial.
+    # Note: we can remove this once all our experiment yamls are updated to include APOs.
+    if (
+        not hasattr(experiment, "_avg_potential_outcomes")
+        or not experiment._avg_potential_outcomes
+    ):
+        from naturalv2.clinical_trial import ClinicalTrial
+
+        trial = ClinicalTrial.from_json_file(experiment.trial_path)
+        experiment._avg_potential_outcomes = []
+        experiment._set_outcome_treatment_effects(trial)
+        experiment.to_yaml(exp_file)
     os.makedirs(
         os.path.join(
             cfg.save_path, "results", f"{experiment.nct_id}_{cfg.experiment_name}"
@@ -284,7 +343,7 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                         f"{source_name}_no_date_filter"
                     )
 
-                if not curated_filepath:
+                if not curated_filepath or not os.path.exists(curated_filepath):
                     logger.warning(
                         "The source '%s' does not have a curated dataset for the "
                         "experiment %s. Skipping...",
@@ -323,14 +382,20 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                     result.update(pipeline._data_flow)
                     result["source_name"] = source_name
                     result["initial_curated"] = len(curated_df)
+                    result["conditions"] = cfg.conditions
+                    result["filter_by_date"] = cfg.filter_by_date
                     _save_results(
-                        [result], cfg.save_path, experiment.nct_id, cfg.experiment_name
+                        [result],
+                        cfg.save_path,
+                        experiment.nct_id,
+                        cfg.experiment_name,
+                        "apo",
                     )
                     continue
 
                 # Calculate and save treatment effects
                 estimator = instantiate(cfg.estimator, experiment=experiment)
-                results = _calculate_treatment_effects(
+                results, weighted_responses = _calculate_treatment_responses(
                     experiment,
                     outcome,
                     estimator,
@@ -346,10 +411,35 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
                     result.update(pipeline._data_flow)
                     result["source_name"] = source_name
                     result["initial_curated"] = len(curated_df)
+                    result["conditions"] = cfg.conditions
+                    result["filter_by_date"] = cfg.filter_by_date
 
                 _save_results(
-                    results, cfg.save_path, experiment.nct_id, cfg.experiment_name
+                    results,
+                    cfg.save_path,
+                    experiment.nct_id,
+                    cfg.experiment_name,
+                    "apo",
                 )
+
+                if cfg.ate:
+                    ate_results = _calculate_treatment_effects(
+                        experiment, outcome, estimator, weighted_responses
+                    )
+                    for ate_result in ate_results:
+                        ate_result.update(pipeline._data_flow)
+                        ate_result["source_name"] = source_name
+                        ate_result["initial_curated"] = len(curated_df)
+                        ate_result["conditions"] = cfg.conditions
+                        ate_result["filter_by_date"] = cfg.filter_by_date
+                    _save_results(
+                        ate_results,
+                        cfg.save_path,
+                        experiment.nct_id,
+                        cfg.experiment_name,
+                        "ate",
+                    )
+
             except Exception as e:
                 logger.error(
                     "Error processing %s with source '%s' and outcome '%s': %s",
@@ -371,7 +461,9 @@ async def _process_all_trials(cfg: DictConfig) -> None:
 
     else:
         # Load study object from YAML file
-        study_file = get_study_filepaths(cfg.save_path, cfg.conditions[0])["study"]
+        study_file = get_study_filepaths(cfg.save_path, cfg.conditions[0], ate=cfg.ate)[
+            "study"
+        ]
         study = Study.from_yaml(study_file)
 
         if cfg.split not in ["train", "val", "test"]:

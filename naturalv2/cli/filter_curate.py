@@ -87,7 +87,7 @@ async def _async_main(cfg: DictConfig) -> None:
         weave.init(project_name="naturalv2")
 
     study_filepaths: dict[str, str] = get_study_filepaths(
-        base_dir=cfg.save_path, condition=cfg.conditions[0]
+        base_dir=cfg.save_path, condition=cfg.conditions[0], ate=cfg.ate
     )
 
     # Load study from yaml

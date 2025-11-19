@@ -40,17 +40,17 @@ pipeline:
       _target_: naturalv2.pipeline.sample_extraction.ImputationsStage
       model_cfg: ${imputations_model}
       max_concurrent_workers: ${coalesce:imputations_model.max_parallel_requests, imputations_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
-    sample_ty:  # Use this for NATURAL-MC in place of inclusion_prob and conditional_extraction
-      _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
-      model_cfg: ${sample_model}
-      max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
-    # inclusion_prob:
-    #   _target_: naturalv2.pipeline.conditional_extraction.InclusionProbStage
-    #   model_cfg: ${probs_model}
-    #   length_norm: False
-    #   max_concurrent_workers: ${coalesce:probs_model.max_parallel_requests, probs_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
-    # conditional_extraction:
-    #   _target_: naturalv2.pipeline.conditional_extraction.ConditionalExtractionStage
-    #   model_cfg: ${probs_model}
-    #   length_norm: False
-    #   max_concurrent_workers: ${coalesce:probs_model.max_parallel_requests, probs_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
+    # sample_ty:  # Use this for NATURAL-MC in place of inclusion_prob and conditional_extraction
+    #   _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
+    #   model_cfg: ${sample_model}
+    #   max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
+    inclusion_prob:
+      _target_: naturalv2.pipeline.conditional_extraction.InclusionProbStage
+      model_cfg: ${probs_model}
+      length_norm: False
+      max_concurrent_workers: ${coalesce:probs_model.max_parallel_requests, probs_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
+    conditional_extraction:
+      _target_: naturalv2.pipeline.conditional_extraction.ConditionalExtractionStage
+      model_cfg: ${probs_model}
+      length_norm: False
+      max_concurrent_workers: ${coalesce:probs_model.max_parallel_requests, probs_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}

@@ -7,6 +7,7 @@ import pyarrow.compute as pc
 import zstandard as zstd
 
 from naturalv2.sources.reddit import pushshift_archive as pa_mod
+from naturalv2.sources.reddit.processing import _utils as utils
 
 
 def test_with_tls_fallback_retries_with_insecure_context():
@@ -105,7 +106,10 @@ def test_parse_ndjson_bytes_to_table_dequotes_and_derives_columns(monkeypatch):
 
     assert table is not None
     assert table.column("content_type").to_pylist() == ["submissions", "comments"]
-    assert table.column("bucket").to_pylist() == ["t", "t"]
+    expected_buckets = utils.bucket_from_subreddit(
+        pa.array(["TestA", "TestB"], type=pa.string())
+    ).to_pylist()
+    assert table.column("bucket").to_pylist() == expected_buckets
     assert table.column("created_utc").to_pylist() == [123, 456]
 
 

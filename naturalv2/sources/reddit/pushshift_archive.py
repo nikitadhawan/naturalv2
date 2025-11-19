@@ -1,17 +1,15 @@
 """Utilities for downloading Reddit data from The Eye archive."""
 
+import json
 import logging
 import os
 import ssl
+import time
 import urllib
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import (
-    Callable,
-    Literal,
-    Optional,
-    TypeVar,
-)
+from typing import Callable, Literal, Optional, TypeVar
 from urllib import error, request
 
 import pyarrow as pa
@@ -32,6 +30,10 @@ from tqdm import tqdm
 
 from naturalv2.sources.reddit.api import is_retryable_error
 from naturalv2.sources.reddit.processing import apply_rule_based_filter
+from naturalv2.sources.reddit.processing._utils import (
+    BUCKET_COUNT,
+    bucket_from_subreddit,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -238,6 +240,44 @@ def download_sub_data(
     return file_path if filename else None
 
 
+def is_archive_processed(root: str | Path, archive_id: str) -> bool:
+    """
+    Check for the presence of a processed marker for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+
+    Returns
+    -------
+    bool
+        True if the processed marker exists, False otherwise.
+    """
+    return _archive_done_path(root, archive_id).exists()
+
+
+def mark_archive_done(root: str | Path, archive_id: str, **extra) -> None:
+    """
+    Create or update a processed marker file for an archive.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Root directory containing the ``.processed`` metadata.
+    archive_id : str
+        Archive identifier (e.g., ``"{subreddit}-{content_type}"``).
+    **extra
+        Additional metadata fields to write alongside the timestamp.
+    """
+    _write_manifest(
+        _archive_done_path(root, archive_id),
+        {"archive_id": archive_id, "ts": int(time.time()), **extra},
+    )
+
+
 def iter_bucketed_batches(
     zst_archive_path: str, chunk_size: int = 256 << 20, *, progress_enabled: bool = True
 ) -> Iterator[pa.RecordBatch]:
@@ -297,8 +337,10 @@ def iter_bucketed_batches(
             if table is None:
                 continue
 
-            # Sort by bucket so that batches are contiguous by partitions
-            indices = pc.sort_indices(table, sort_keys=[("bucket", "ascending")])
+            # Sort by bucket and subreddit so that batches are contiguous by partitions
+            indices = pc.sort_indices(
+                table, sort_keys=[("bucket", "ascending"), ("subreddit", "ascending")]
+            )
             table = pc.take(table, indices)
             yield from table.to_batches()
     except Exception as exc:
@@ -497,9 +539,9 @@ def _parse_ndjson_bytes_to_table(
     table = table.append_column("content_type", content_type)
 
     # Construct and add the 'bucket' column to the table
-    subreddit_lower = pc.ascii_lower(table["subreddit"])
-    first_letter = pc.utf8_slice_codeunits(subreddit_lower, 0, 1)
-    bucket = pc.if_else(pc.is_valid(first_letter), first_letter, pa.scalar("_"))
+    fallback_bucket = str(0).zfill(len(str(BUCKET_COUNT - 1)))
+    bucket_labels = bucket_from_subreddit(table["subreddit"])
+    bucket = pc.if_else(pc.is_valid(bucket_labels), bucket_labels, fallback_bucket)
     return table.append_column("bucket", bucket).select(PROCESSED_RECORD_SCHEMA.names)
 
 
@@ -602,3 +644,24 @@ def _validate_zst_file_path(zst_archive_path: str) -> None:
         raise ValueError(f"File {zst_archive_path} is not a .zst file")
     if not os.path.exists(zst_archive_path):
         raise FileNotFoundError(f"File {zst_archive_path} does not exist")
+
+
+def _proc_dir(root: str | Path) -> Path:
+    """Ensure the hidden processing directory exists under root."""
+    path = Path(root) / ".processed"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _archive_done_path(root: str | Path, archive_id: str) -> Path:
+    """Path of the marker file indicating a specific archive has been processed."""
+    path = _proc_dir(root) / "archives"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{archive_id}.done"
+
+
+def _write_manifest(path: Path, payload: dict) -> None:
+    """Atomically write a small JSON payload to ``path``."""
+    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False))
+    os.replace(tmp, path)  # atomic on POSIX

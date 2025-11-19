@@ -1,8 +1,8 @@
-import pandas as pd
+from datetime import datetime
+
+import polars as pl
 import pyarrow as pa
-import pyarrow.dataset as ds
 import pytest
-from ahocorasick import Automaton
 
 from naturalv2.sources.reddit.processing import _utils as utils
 from naturalv2.sources.reddit.processing import contextualize as ctx
@@ -39,66 +39,62 @@ def test_apply_rule_based_filter_flags_common_cases():
     assert values[4] is False  # AutoModerator blocked
 
 
-def test_get_study_relevant_posts_matches_and_respects_cutoff():
-    automaton = Automaton()
-    automaton.add_word("drug", "drug")
-    automaton.make_automaton()
-
-    df = pd.DataFrame(
-        [
-            {
-                "report_text": "This drug works!",
-                "date_created": pd.Timestamp("2022-01-01"),
-            },
-            {
-                "report_text": "No keywords here",
-                "date_created": pd.Timestamp("2022-01-01"),
-            },
-        ]
-    )
-
-    matched = pfilter.get_study_relevant_posts(
-        df, automaton, cutoff_dt=None, date_column="date_created"
-    )
-    assert matched["treatments_mentioned"].explode().tolist() == ["drug"]
-
-    cutoff = pd.Timestamp("2021-12-31")
-    assert pfilter.get_study_relevant_posts(df, automaton, cutoff).empty
-
-
-def test_scan_subreddit_filters_by_partition(tmp_path):
-    table = pa.table(
+def test_scan_reddit_chunks_filters_and_limits_columns(tmp_path):
+    parquet_dir = tmp_path / "content_type=submissions" / "bucket=001"
+    parquet_dir.mkdir(parents=True)
+    file_path = parquet_dir / "sample.parquet"
+    pl.DataFrame(
         {
             "subreddit": ["TestSub", "Other"],
-            "content_type": ["submissions", "submissions"],
-            "bucket": ["t", "o"],
-            "value": [1, 2],
+            "title": ["keep", "drop"],
+            "report_text": ["body", "ignored"],
+            "score": [1, 2],
         }
-    )
-    partitioning = ds.partitioning(
-        pa.schema([("content_type", pa.string()), ("bucket", pa.string())]),
-        flavor="hive",
-    )
-    ds.write_dataset(table, tmp_path, format="parquet", partitioning=partitioning)
+    ).write_parquet(file_path)
 
-    try:
-        batches = list(
-            pfilter.scan_subreddit(
-                tmp_path.as_posix(),
-                subreddits="TestSub",
-                content_type="submissions",
-                columns=["value"],
-                batch_size=8,
-            )
+    batches = list(
+        pfilter.scan_reddit_chunks(
+            [file_path.as_posix()],
+            columns=["subreddit", "title", "report_text", "score", "missing"],
+            target_subreddits=["TestSub"],
+            batch_size=1,
         )
-    except pa.ArrowNotImplementedError as exc:  # pragma: no cover
-        pytest.skip(f"pyarrow missing kernel support: {exc}")
+    )
+
     assert len(batches) == 1
-    assert list(batches[0]["value"]) == [1]
+    batch = batches[0]
+    assert batch.shape == (1, 4)
+    assert batch["subreddit"].to_list() == ["TestSub"]
+    assert batch["title"].to_list() == ["keep"]
+    assert set(batch.columns) == {"subreddit", "title", "report_text", "score"}
+
+
+def test_scan_reddit_chunks_skips_files_without_text_columns(tmp_path):
+    file_path = tmp_path / "bucket=000" / "part.parquet"
+    file_path.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "subreddit": ["TestSub"],
+            "value": [10],
+        }
+    ).write_parquet(file_path)
+
+    # Request only non-text columns -> function should skip this file entirely.
+    batches = list(
+        pfilter.scan_reddit_chunks(
+            [file_path.as_posix()],
+            columns=["subreddit", "value"],
+            target_subreddits=None,
+            batch_size=16,
+        )
+    )
+
+    assert batches == []
 
 
 def test_write_to_parquet_partitions_creates_hive_layout(tmp_path):
     schema = ctx.CONTEXTUALIZED_RECORD_SCHEMA
+    bucket = utils.bucket_from_subreddit(pa.array(["testsub"])).to_pylist()[0]
     batch = pa.RecordBatch.from_arrays(
         [
             pa.array(["testsub"]),
@@ -107,11 +103,11 @@ def test_write_to_parquet_partitions_creates_hive_layout(tmp_path):
             pa.array(["report"]),
             pa.array(["submission"]),
             pa.array([1], type=pa.int64()),
-            pa.array(["2024-01-01"]),
+            pa.array(["2024-01-01T00:00:00Z"]),
             pa.array([""]),
             pa.array([["reply"]], type=pa.list_(pa.string())),
             pa.array(["submissions"]),
-            pa.array(["t"]),
+            pa.array([bucket]),
         ],
         names=[field.name for field in schema],
     )
@@ -129,10 +125,10 @@ def test_write_to_parquet_partitions_creates_hive_layout(tmp_path):
 
     assert len(written) == 1
     assert "content_type=submissions" in written[0]
-    assert "bucket=t" in written[0]
-    assert tmp_path.joinpath("content_type=submissions", "bucket=t").exists()
+    assert f"bucket={bucket}" in written[0]
+    assert tmp_path.joinpath("content_type=submissions", f"bucket={bucket}").exists()
     assert tmp_path.joinpath(
-        "content_type=submissions", "bucket=t", "unit-part-0.parquet"
+        "content_type=submissions", f"bucket={bucket}", "unit-part-0.parquet"
     ).exists()
 
 
@@ -187,14 +183,14 @@ def test_prepare_comment_batch_filters_and_aligns_records():
 
 def test_utils_helpers_format_and_mask():
     link_ids = pa.array(["t3_XyZ", "  ", None])
-    assert utils._comment_post_id_array(link_ids).to_pylist() == ["xyz", "", ""]
+    assert utils.comment_post_id_array(link_ids).to_pylist() == ["xyz", "", ""]
 
-    mask = utils._non_empty_mask(pa.array(["a", ""]))
+    mask = utils.non_empty_mask(pa.array(["a", ""]))
     assert mask.to_pylist() == [True, False]
-    assert utils._mask_has_true(mask) is True
-    assert utils._mask_has_true(pa.array([], type=pa.bool_())) is False
+    assert utils.mask_has_true(mask) is True
+    assert utils.mask_has_true(pa.array([], type=pa.bool_())) is False
 
-    report = utils._build_report_text_array(
+    report = utils.build_report_text_array(
         base_text=pa.array(["Base", "NoReplies"]),
         post_ids=pa.array(["p1", "p2"]),
         reply_lookup={"p1": ["one", "two"]},
@@ -202,12 +198,76 @@ def test_utils_helpers_format_and_mask():
     assert report[0].as_py().startswith("Base\n\nThe original poster also replied")
     assert report[1].as_py() == "NoReplies"
 
-    sub_series = pd.Series(["sub"], dtype="string")
-    post_series = pd.Series(["123"], dtype="string")
-    permalink_series = utils._build_submission_permalink_series(sub_series, post_series)
-    assert permalink_series.iloc[0] == "/r/sub/comments/123/"
 
-    comment_permalink = utils._build_comment_permalink_series(
-        pd.Series(["123"]), pd.Series(["c1"])
+def test_utils_builds_submission_permalinks_when_missing():
+    result = utils.build_submission_permalink_array(
+        existing=pa.array(["", "https://existing"], type=pa.string()),
+        subreddits=pa.array(["Science", ""], type=pa.string()),
+        post_ids=pa.array(["abc", "def"], type=pa.string()),
     )
-    assert comment_permalink.iloc[0] == "https://www.reddit.com/comments/123/_/c1"
+
+    assert result.to_pylist() == [
+        "https://www.reddit.com/r/Science/comments/abc/",
+        "https://existing",
+    ]
+
+
+def test_utils_builds_comment_permalinks_when_missing():
+    result = utils.build_comment_permalink_array(
+        existing=pa.array(["", "https://already"], type=pa.string()),
+        post_ids=pa.array(["abc", "xyz"], type=pa.string()),
+        comment_ids=pa.array(["c1", "c2"], type=pa.string()),
+    )
+
+    assert result.to_pylist() == [
+        "https://www.reddit.com/comments/abc/_/c1",
+        "https://already",
+    ]
+
+
+def test_utils_unique_and_cast_helpers_cover_chunked_data():
+    arr = pa.chunked_array(
+        [
+            pa.array(["A", "b", None], type=pa.string()),
+            pa.array(["b", ""], type=pa.string()),
+        ]
+    )
+    assert utils.unique_strings(arr) == ["A", "b"]
+
+    str_arr = utils.ensure_string_array(pa.array([1, None], type=pa.int32()), default="x")
+    assert str_arr.to_pylist() == ["1", "x"]
+
+    int_arr = utils.ensure_int64_array(pa.array([1.9, None], type=pa.float64()))
+    assert int_arr.to_pylist() == [1, 0]
+
+
+def test_utils_timestamp_and_filter_helpers():
+    ts = utils.ensure_timestamp_array(pa.array([None, 1], type=pa.int64()))
+    assert ts.to_pylist() == [
+        datetime.utcfromtimestamp(0),
+        datetime.utcfromtimestamp(1),
+    ]
+
+    formatted = utils.format_timestamp_array(pa.array([None, 1], type=pa.int64()))
+    assert formatted.to_pylist() == ["", "1970-01-01T00:00:01Z"]
+
+    values = pa.chunked_array([pa.array([1, 2]), pa.array([3])])
+    mask = pa.array([True, False, True])
+    filtered = utils.filter_array(values, mask)
+    assert filtered.to_pylist() == [1, 3]
+    assert isinstance(filtered, pa.Array)
+
+
+def test_utils_author_reply_and_list_helpers():
+    replies = utils.author_replies_column(
+        pa.array(["p1", "p2"], type=pa.string()),
+        reply_lookup={"p1": ["a"], "p2": []},
+    )
+    assert replies.to_pylist() == [["a"], []]
+
+    empty = utils.empty_list_array(2)
+    assert empty.type == pa.list_(pa.string())
+    assert empty.to_pylist() == [[], []]
+
+    constant = utils.constant_string_array("fill", 3)
+    assert constant.to_pylist() == ["fill", "fill", "fill"]

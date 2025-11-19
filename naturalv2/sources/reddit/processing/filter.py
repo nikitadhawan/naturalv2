@@ -1,22 +1,11 @@
-import logging
-from functools import partial
-from typing import Any, Generator, Sequence, Union
+"""Functions for filtering Reddit data."""
 
-import pandas as pd
+import logging
+from collections.abc import Iterator
+
+import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.dataset as ds
-from ahocorasick import Automaton
-
-from naturalv2.sources.components import filter_by_date
-from naturalv2.sources.components.helpers import (
-    extract_mentions,
-    normalize_text_for_matching,
-)
-from naturalv2.sources.reddit.processing.contextualize import (
-    _make_partition_filter,
-    _normalize_subreddits,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -106,112 +95,65 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
     return pc.and_kleene(valid_text_mask, ratio_ok)
 
 
-def scan_subreddit(
-    base_dir: str,
-    subreddits: str | Sequence[str],
-    content_type: str | None = None,
-    columns: list[str] | None = None,
-    batch_size: int = 128_000,
-) -> Generator[pd.DataFrame, Any, None]:
+def scan_reddit_chunks(
+    file_paths: list[str],
+    columns: list[str],
+    target_subreddits: list[str] | None = None,
+    batch_size: int = 256_000,
+) -> Iterator[pl.DataFrame]:
+    """Stream Parquet files with minimal memory footprint.
+
+    Processes files one at a time using slice + collect to read only the
+    requested rows from disk. Can filter by subreddit at scan time to avoid
+    loading irrelevant data.
     """
-    Stream parquet partitions for the given subreddit(s) as pandas DataFrames.
+    for fp in file_paths:
+        try:
+            lf = pl.scan_parquet(fp, hive_partitioning=True)
 
-    Parameters
-    ----------
-    base_dir : str
-        Root directory of the hive-partitioned dataset.
-    subreddits : str or sequence of str
-        Subreddit name(s) to include.
-    content_type : str or None, optional
-        Partition value for ``content_type`` (e.g., ``"submissions"`` or ``"comments"``).
-    columns : list[str] or None, optional
-        Subset of columns to project; defaults to all columns.
-    batch_size : int, default=128_000
-        Scan batch size in rows.
+            # Get schema and validate columns
+            schema_names = lf.collect_schema().names()
+            valid_cols = [col for col in columns if col in schema_names]
 
-    Yields
-    ------
-    pandas.DataFrame
-        Non-empty batches converted from Arrow to pandas using Arrow dtypes.
-    """
-    # Normalize to a de-duped, non-empty list
-    subs = _normalize_subreddits(
-        [subreddits] if isinstance(subreddits, str) else subreddits
-    )
-    filter_expr = _make_partition_filter(subs, content_type)
+            # Early validation - skip files without required data
+            text_cols = ["title", "initial_post", "report_text"]
+            if "subreddit" not in schema_names:
+                continue
+            if not any(col in valid_cols for col in text_cols):
+                continue
 
-    dataset = ds.dataset(base_dir, format="parquet", partitioning="hive")
-    scanner = dataset.scanner(
-        filter=filter_expr, columns=columns, use_threads=True, batch_size=batch_size
-    )
-    for record_batch in scanner.to_batches():
-        batch_df = record_batch.to_pandas(types_mapper=pd.ArrowDtype)
-        if not batch_df.empty:
-            yield batch_df
+            lf = lf.select(valid_cols)
 
+            # Filter by subreddit at scan time
+            # This uses Parquet predicate pushdown - only matching rows are read from disk
 
-def get_study_relevant_posts(
-    clean_data: Union[str, pd.DataFrame],
-    treatment_automaton: Automaton,
-    cutoff_dt: pd.Timestamp | None,
-    date_column: str = "date_created",
-) -> pd.DataFrame:
-    """Select posts mentioning treatments before an optional cutoff date.
+            offset = 0
+            while True:
+                try:
+                    # slice() then collect() only materializes the requested slice
+                    chunk = lf.slice(offset, batch_size).collect()
 
-    Parameters
-    ----------
-    clean_data : str | pandas.DataFrame
-        Either the path to a cleaned subreddit parquet file created by
-        :func:`download_submissions_and_comments` or a pre-loaded DataFrame.
-    treatment_automaton : ahocorasick.Automaton
-        Compiled ahocorasick automaton for matching treatment aliases.
-    cutoff_dt : pandas.Timestamp | None
-        If provided, only posts with dates before this timestamp are
-        considered.
-    date_column : str, default="date_created"
-        Column name containing the post/comment timestamp.
+                    if chunk.is_empty():
+                        break
 
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame of posts mentioning any treatment term, with an additional
-        ``treatments_mentioned`` column listing the matched terms.
-    """
-    if isinstance(clean_data, str):
-        df = pd.read_parquet(clean_data)
-        data_label = clean_data
-    else:
-        df = clean_data
-        data_label = "provided DataFrame chunk"
+                    if target_subreddits:
+                        chunk = chunk.filter(
+                            pl.col("subreddit").is_in(target_subreddits)
+                        )
 
-    if df.empty:
-        return pd.DataFrame()
+                    if not chunk.is_empty():
+                        yield chunk
 
-    if cutoff_dt is not None:
-        df = filter_by_date(df, cutoff_dt, date_column)
-        if df.empty:
-            return pd.DataFrame()
+                    # Exit if we got partial batch (end of file)
+                    if len(chunk) < batch_size:
+                        break
 
-    text_cols = [
-        col
-        for col in ("report_text", "title", "initial_post", "subreddit")
-        if col in df.columns
-    ]
-    if not text_cols:
-        logger.warning(
-            "No textual columns found in %s to evaluate treatment matches.",
-            data_label,
-        )
-        return pd.DataFrame()
+                    offset += batch_size
 
-    reports = (
-        df[text_cols]
-        .fillna("")
-        .astype("string")
-        .agg(" ".join, axis=1)
-        .map(normalize_text_for_matching)
-    )
+                except Exception as e:
+                    logger.warning(f"Batch error at offset {offset} in {fp}: {e}")
+                    break
 
-    mentions = reports.map(partial(extract_mentions, automaton=treatment_automaton))
-    mask = mentions.str.len().gt(0)
-    return df.loc[mask].assign(treatments_mentioned=mentions.loc[mask])
+        except Exception as e:
+            logger.warning(f"Cannot process file {fp}: {e}")
+            continue

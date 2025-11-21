@@ -18,14 +18,14 @@ from naturalv2.sources.reddit.api import (
 )
 from naturalv2.sources.reddit.processing import (
     build_contextualized_dataset,
-    is_archive_processed,
-    mark_archive_done,
     write_to_parquet_partitions,
 )
 from naturalv2.sources.reddit.pushshift_archive import (
     PROCESSED_RECORD_SCHEMA,
     download_sub_data,
+    is_archive_processed,
     iter_bucketed_batches,
+    mark_archive_done,
 )
 
 

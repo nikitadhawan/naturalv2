@@ -47,7 +47,6 @@ from naturalv2.sources.reddit.processing._utils import (
     submission_post_id_array,
     unique_strings,
 )
-from naturalv2.sources.reddit.pushshift_archive import _proc_dir, _write_manifest
 
 
 logger = logging.getLogger(__name__)
@@ -256,6 +255,9 @@ def build_contextualized_dataset(
     FileExistsError
         If outputs for the given ``run_tag`` already exist and conflict with inputs.
     """
+    from naturalv2.sources.reddit.pushshift_archive import (  # noqa: PLC0415
+        _write_manifest,
+    )
 
     if subreddits is None:
         raise ValueError(
@@ -1135,6 +1137,8 @@ def _cleanup_source_dir(
 
 def _processed_subreddits(source_dir: str | Path) -> set[str]:
     """Return the set of subreddits marked processed in the source directory."""
+    from naturalv2.sources.reddit.pushshift_archive import _proc_dir  # noqa: PLC0415
+
     archives_dir = _proc_dir(source_dir) / "archives"
     if not archives_dir.exists():
         return set()

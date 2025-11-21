@@ -125,12 +125,12 @@ def scan_reddit_chunks(
                         break
 
                     if target_subreddits:
-                        chunk = chunk.filter(
+                        filtered_chunk = chunk.filter(
                             pl.col("subreddit").is_in(target_subreddits)
                         )
 
-                    if not chunk.is_empty():
-                        yield chunk
+                    if not filtered_chunk.is_empty():
+                        yield filtered_chunk
 
                     # Exit if we got partial batch (end of file)
                     if len(chunk) < batch_size:

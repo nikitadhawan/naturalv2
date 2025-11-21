@@ -31,18 +31,6 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
     pa.ChunkedArray
         Boolean mask indicating valid rows.
 
-    Notes
-    -----
-    The resulting mask enforces multiple heuristics:
-    - Normalizes the text field by filling nulls, unescaping basic HTML entities,
-      replacing control characters, and trimming whitespace.
-    - Rejects empty strings and records that match known sentinel content such
-      as deleted or removed posts.
-    - Requires a permalink and removes rows authored by obvious bot accounts.
-    - Ensures the first 2,048 code units include at least one space, signalling
-      multi-token text.
-    - Verifies that alphabetic characters (plus spaces) make up at least half of
-      the trimmed text.
     """
 
     # Helper to cast to string and fill nulls
@@ -77,7 +65,7 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
     # Drop URLs from the full text (keep markdown link labels)
     text_no_urls = pc.replace_substring_regex(
         text,
-        r"\[([^\]]+)\]\(\s*(?:https?://|www\.)\S+\s*\)|https?://\S+|\bwww\.\S+",
+        r"(?i)\[([^\]]+)\]\(\s*(?:https?://|www\.)\S+\s*\)|https?://\S+|\bwww\.\S+",
         r"\1",  # Keep the first match (the markdown label), drop the rest
     )
 

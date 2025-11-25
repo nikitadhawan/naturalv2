@@ -128,7 +128,7 @@ def test_iter_bucketed_batches_sorts_by_bucket(monkeypatch, tmp_path):
         }
     )
 
-    def fake_parse(chunk, zst_path):
+    def fake_parse(chunk, zst_path, use_threads=True):
         return sample_table
 
     monkeypatch.setattr(pa_mod, "iter_zst_ndjson_blocks", fake_iter_blocks)

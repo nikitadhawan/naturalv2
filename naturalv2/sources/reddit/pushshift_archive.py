@@ -279,7 +279,11 @@ def mark_archive_done(root: str | Path, archive_id: str, **extra) -> None:
 
 
 def iter_bucketed_batches(
-    zst_archive_path: str, chunk_size: int = 256 << 20, *, progress_enabled: bool = True
+    zst_archive_path: str,
+    chunk_size: int = 256 << 20,
+    *,
+    progress_enabled: bool = True,
+    use_threads_for_parsing: bool = True,
 ) -> Iterator[pa.RecordBatch]:
     """Stream Arrow record batches from a Pushshift Zstandard archive.
 
@@ -290,7 +294,10 @@ def iter_bucketed_batches(
     chunk_size : int, optional, default=256<<20
         Target size in bytes for each decompressed NDJSON chunk read from disk.
     progress_enabled : bool, optional, default=True
-        If True, display a tqdm progress bar keyed to compressed bytes read.
+        If ``True``, display a tqdm progress bar keyed to compressed bytes read.
+    use_threads_for_parsing : bool, default=True
+        If ``True``, use threads when reading parsing raw JSON chunks. The will
+        set ``use_threads=True`` in ``pyarrow.json.read_json``.
 
     Yields
     ------
@@ -324,7 +331,9 @@ def iter_bucketed_batches(
             zst_archive_path, chunk_size=chunk_size, tqdm_pbar=reader_pbar
         ):
             try:
-                table = _parse_ndjson_bytes_to_table(chunk, zst_archive_path)
+                table = _parse_ndjson_bytes_to_table(
+                    chunk, zst_archive_path, use_threads=use_threads_for_parsing
+                )
             except pa.ArrowInvalid as exc:
                 logger.error(
                     "Error parsing %s: %s",
@@ -487,11 +496,12 @@ def _parse_ndjson_bytes_to_table(
     chunk: bytes | bytearray,
     zst_path: str,
     read_block_size: int = 8 << 20,  # 8 MiB
+    use_threads: bool = True,
 ) -> pa.Table | None:
     """Parse raw NDJSON bytes or bytearray to ``pyarrow.Table``."""
     # Specify read and write options for the parser
     read_options = paj.ReadOptions(
-        block_size=min(len(chunk), read_block_size), use_threads=True
+        block_size=min(len(chunk), read_block_size), use_threads=use_threads
     )
     parse_options = paj.ParseOptions(
         explicit_schema=RAW_RECORD_SCHEMA, unexpected_field_behavior="ignore"

@@ -296,7 +296,7 @@ def iter_bucketed_batches(
     progress_enabled : bool, optional, default=True
         If ``True``, display a tqdm progress bar keyed to compressed bytes read.
     use_threads_for_parsing : bool, default=True
-        If ``True``, use threads when reading parsing raw JSON chunks. The will
+        If ``True``, use threads when reading raw JSON chunks. This will
         set ``use_threads=True`` in ``pyarrow.json.read_json``.
 
     Yields

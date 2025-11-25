@@ -33,7 +33,7 @@ from tqdm.asyncio import tqdm
 
 logger = logging.getLogger(__name__)
 
-_RETRYALBLE_HTTP_ERRORS = {429, 500, 502, 503, 504}
+_RETRYABLE_HTTP_ERRORS = {429, 500, 502, 503, 504}
 
 
 def is_retryable_error(exception: BaseException) -> bool:
@@ -53,11 +53,11 @@ def is_retryable_error(exception: BaseException) -> bool:
     return (
         (
             isinstance(exception, asyncprawcore.exceptions.ResponseException)
-            and exception.response.status in _RETRYALBLE_HTTP_ERRORS
+            and exception.response.status in _RETRYABLE_HTTP_ERRORS
         )
         or (
             isinstance(exception, error.HTTPError)
-            and exception.code in _RETRYALBLE_HTTP_ERRORS
+            and exception.code in _RETRYABLE_HTTP_ERRORS
         )
         or isinstance(exception, (error.URLError, ssl.SSLError, RemoteDisconnected))
     )

@@ -498,7 +498,7 @@ class Experiment:
         common_names: set[str] = set()
         for aliases in self.treatment_common_names.get(source, {}).values():
             for alias in aliases:
-                common_names.add(alias.lower())
+                common_names.add(alias)
 
         return list(treatment_names | drugbank_names | common_names)
 

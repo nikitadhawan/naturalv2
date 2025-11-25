@@ -22,6 +22,7 @@ from typing import Any
 import ahocorasick
 import polars as pl
 import psutil
+import pyarrow as pa
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -264,7 +265,6 @@ def _worker_initializer(config: _RegistryConfig):
     """Initialize worker process with registry.
 
     Called once per worker."""
-    import pyarrow as pa  # noqa: PLC0415
 
     # Minimize CPU thrashing by setting only 2 threads per worker for polars
     # and pyarrow
@@ -419,7 +419,7 @@ def _process_and_write_chunk(
 
     # Global date filtering
     # Remove any posts AFTER the most recent publication that of the experiments
-    # that are relevant to the subreddit being processed. This mean less data
+    # that are relevant to the subreddit being processed. This means less data
     # for the automaton to try to match on
     if filter_by_date:
         df_prep = _parse_date_column(df_prep, "date_created")

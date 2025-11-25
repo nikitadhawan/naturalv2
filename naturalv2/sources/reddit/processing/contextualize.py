@@ -84,8 +84,7 @@ def write_to_parquet_partitions(
         Maximum rows per row group.
     max_open_files : int, default=512
         Cap on concurrently open files during write.
-    existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, \
-default='overwrite_or_ignore'
+    existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, default='overwrite_or_ignore'
         Strategy when output already exists.
     run_tag : str or None, optional
         Optional prefix for generated parquet filenames.

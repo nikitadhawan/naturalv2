@@ -220,7 +220,7 @@ class RedditDownloadAndClean(SourceStage):
                     continue
 
                 if zst_archive_path is None:
-                    return None
+                    return []
 
                 write_futures[
                     writer_executor.submit(

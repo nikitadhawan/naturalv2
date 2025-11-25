@@ -40,7 +40,7 @@ def plot_effects(data_sizes, avg_effect_sizes, is_filtered, save_path, use_apo=F
     plt.savefig(save_path)
 
 
-def plot_dates(
+def plot_dates(  # noqa: PLR0912, PLR0915
     data_sizes, utc_dates, date_labels, is_filtered, save_path, include_unfiltered=False
 ):
     plt.figure(figsize=(10, 6))

@@ -274,7 +274,7 @@ def _get_nct_ids(split: str, study: Study) -> list[str]:
     return [list(trial.keys())[0] for trial in study.test_trials]
 
 
-async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
+async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912, PLR0915
     """Process a single trial to estimate treatment effects."""
 
     # Load the experiment configuration
@@ -295,7 +295,7 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:
         not hasattr(experiment, "_avg_potential_outcomes")
         or not experiment._avg_potential_outcomes
     ):
-        from naturalv2.clinical_trial import ClinicalTrial
+        from naturalv2.clinical_trial import ClinicalTrial  # noqa: PLC0415
 
         trial = ClinicalTrial.from_json_file(experiment.trial_path)
         experiment._avg_potential_outcomes = []

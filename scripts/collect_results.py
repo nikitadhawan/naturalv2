@@ -76,12 +76,10 @@ def process_and_combine_results(all_results, experiment_name):
     ]
 
     final_df = final_df[required_columns]
-    final_df = final_df[final_df["abs_error"].notna()]
-
-    return final_df
+    return final_df[final_df["abs_error"].notna()]
 
 
-def create_forest_plots(final_df, data_path, output_path, experiment_name, estimator):
+def create_forest_plots(final_df, data_path, output_path, experiment_name, estimator):  # noqa: PLR0915
     # Filter for specified estimator rows
     estimator_df = final_df[final_df["estimator"] == estimator].copy()
     estimator_df = estimator_df.sort_values("true_response", ascending=True)
@@ -92,7 +90,7 @@ def create_forest_plots(final_df, data_path, output_path, experiment_name, estim
     with PdfPages(output_path) as pdf:
         for (nct_id, outcome), group_df in grouped:
             # Sort by true_response
-            group_df = group_df.sort_values("true_response", ascending=True)
+            group_df = group_df.sort_values("true_response", ascending=True)  # noqa: PLW2901
 
             if len(group_df) == 0:
                 print(f"No treatment responses for {nct_id}: {outcome}.")
@@ -105,7 +103,7 @@ def create_forest_plots(final_df, data_path, output_path, experiment_name, estim
             y_positions = range(1, len(group_df) + 1)
 
             # Plot confidence intervals from CI_lower to CI_upper
-            for i, (idx, row) in enumerate(group_df.iterrows()):
+            for i, (_idx, row) in enumerate(group_df.iterrows()):
                 y_pos = i + 1  # Start at position 1
                 pred_response = row["pred_response"]
                 ci_lower = row["CI_lower"]

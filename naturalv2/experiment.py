@@ -1007,7 +1007,7 @@ class Experiment:
             treatments.extend(measure_groups)
         return outcomes, treatments
 
-    def _build_completed_outcome_treatment(
+    def _build_completed_outcome_treatment(  # noqa: PLR0912
         self, outcomes: list[OutcomeMeasure]
     ) -> None:
         for outcome in outcomes:

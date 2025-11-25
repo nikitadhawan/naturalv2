@@ -43,12 +43,6 @@ class RedditDownloadAndClean(SourceStage):
         Degree of parallelism for downloads/cleaning; defaults to min(CPU count,
         RAM-based limit), minimum 4. RAM limit reserves 30% for OS and assumes
         ~1 GiB per worker. Split evenly between download and write workers.
-    anonymize : bool, default=True
-        Whether to anonymize text during download/clean.
-    anonymizer_score_threshold : float, default=0.85
-        Threshold for anonymizer detection.
-    anonymizer_batch_size : int, default=1
-        Batch size for anonymizer processing.
     name : str | None, optional
         Optional explicit stage name; defaults to the class name.
     """
@@ -149,7 +143,7 @@ class RedditDownloadAndClean(SourceStage):
             )
 
         final_dir = os.path.join(subs_data_dir, "final")
-        files_written = build_contextualized_dataset(
+        _ = build_contextualized_dataset(
             source_dir=staging_dir,
             dest_dir=final_dir,
             run_tag=context.experiment_name,
@@ -167,7 +161,7 @@ class RedditDownloadAndClean(SourceStage):
         # Update and persist metadata in StudyDataset
         self.persist_dataset(
             context,
-            namespace_paths={f"{context.source_name}_cleaned": files_written},
+            namespace_paths={f"{context.source_name}_cleaned": final_dir},
         )
         return state
 

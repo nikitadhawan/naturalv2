@@ -397,7 +397,7 @@ def _process_bucket(
         logger.error("Failed to process bucket %s: %s", bucket_id, exc, exc_info=True)
         return None, None
 
-    return submissions_filepath, comments_filepath
+    return str(submissions_filepath), str(comments_filepath)
 
 
 def _get_hive_path(

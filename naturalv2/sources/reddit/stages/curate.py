@@ -2,13 +2,12 @@
 
 Architecture:
 1. Main Process: Scans for Parquet files, creates batches of file paths.
-2. Workers: Initialize Registry once. Process batches. Write partial CSVs to unique temp dirs.
-3. Main Process: Consolidates partial CSVs into final output.
+2. Workers: Initialize Registry once. Process batches. Write partial parquets to unique temp dirs.
+3. Main Process: Consolidates partial parquets into final output.
 """
 
 import gc
 import glob
-import json
 import logging
 import multiprocessing as mp
 import os
@@ -35,12 +34,12 @@ from naturalv2.utils import get_experiment_filepath
 
 logger = logging.getLogger(__name__)
 
-WORKER_REGISTRY: dict[str, "SubredditContext"] = {}
+_WORKER_REGISTRY: dict[str, "_SubredditContext"] = {}
 _NUM_THREADS_PER_WORKER = 2
 
 
 @dataclass
-class RegistryConfig:
+class _RegistryConfig:
     """Configuration for building the term registry in worker processes."""
 
     experiments_data: list[dict[str, Any]]
@@ -50,7 +49,7 @@ class RegistryConfig:
 
 
 @dataclass
-class SubredditContext:
+class _SubredditContext:
     """Context for processing a single subreddit."""
 
     name: str
@@ -92,6 +91,7 @@ class RedditCurateStage(SourceStage):
         """Execute parallelized curation."""
         root_dir = state.require_metadata("data_root", stage=self.stage_name)
         study_dir = self.condition_dir(context)
+
         temp_dir = os.path.join(study_dir, f"temp_curation_{uuid.uuid4().hex}")
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -170,7 +170,7 @@ class RedditCurateStage(SourceStage):
                 )
 
             # Merge partial CSVs
-            self._consolidate_csvs(temp_dir, experiment.nct_id, final_path)
+            self._consolidate_parquet_chunks(temp_dir, experiment.nct_id, final_path)
 
             # Save updated experiment
             experiment.to_yaml(
@@ -192,7 +192,7 @@ class RedditCurateStage(SourceStage):
 
     def _prepare_registry_config(
         self, context: CurationContext, available_subreddits: list[str]
-    ) -> RegistryConfig:
+    ) -> _RegistryConfig:
         """Convert experiments to serializable configuration."""
         experiments_data = []
 
@@ -223,32 +223,31 @@ class RedditCurateStage(SourceStage):
                 }
             )
 
-        return RegistryConfig(
+        return _RegistryConfig(
             experiments_data=experiments_data,
             condition_map=context.study_dataset.sources.get(context.source_name, {}),
             available_subreddits=available_subreddits,
             filter_by_date=context.filter_by_date,
         )
 
-    def _consolidate_csvs(self, temp_root: str, nct_id: str, target_path: str):
-        """Merge all partial CSV files for an experiment."""
-        partials = glob.glob(os.path.join(temp_root, "*", f"{nct_id}.csv"))
+    def _consolidate_parquet_chunks(
+        self, temp_root: str, nct_id: str, target_path: str
+    ):
+        """Merge all partial parquet files for an experiment."""
+        partials = glob.glob(os.path.join(temp_root, "*", f"{nct_id}_*.parquet"))
 
         if not partials:
             return
 
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
-        with open(target_path, "wb") as f_out:
-            # Write first file with header
-            with open(partials[0], "rb") as f_in:
-                shutil.copyfileobj(f_in, f_out)
-
-            # Append remaining files without headers
-            for partial_path in partials[1:]:
-                with open(partial_path, "rb") as f_in:
-                    f_in.readline()  # Skip header
-                    shutil.copyfileobj(f_in, f_out)
+        for src_path in partials:
+            filename = os.path.basename(src_path)
+            dest_path = os.path.join(target_path, filename)
+            try:
+                shutil.move(src_path, dest_path)
+            except Exception as exc:
+                logger.error("Failed to move %s to %s: %s", src_path, dest_path, exc)
 
     def _get_experiment_save_path(
         self, context: CurationContext, experiment: Experiment, study_dir: str
@@ -256,12 +255,12 @@ class RedditCurateStage(SourceStage):
         """Generate save path for experiment results."""
         suffix = "" if context.filter_by_date else "_no_date_filter"
         path = os.path.join(
-            study_dir, f"{context.source_name}_{experiment.nct_id}{suffix}.csv"
+            study_dir, f"{context.source_name}_{experiment.nct_id}{suffix}"
         )
         return path, f"{context.source_name}{suffix}"
 
 
-def _worker_initializer(config: RegistryConfig):
+def _worker_initializer(config: _RegistryConfig):
     """Initialize worker process with registry.
 
     Called once per worker."""
@@ -277,11 +276,11 @@ def _worker_initializer(config: RegistryConfig):
     pa.set_cpu_count(_NUM_THREADS_PER_WORKER)
     pa.set_io_thread_count(_NUM_THREADS_PER_WORKER)
 
-    WORKER_REGISTRY.clear()
-    WORKER_REGISTRY.update(_build_worker_registry(config))
+    _WORKER_REGISTRY.clear()
+    _WORKER_REGISTRY.update(_build_worker_registry(config))
 
 
-def _build_worker_registry(config: RegistryConfig) -> dict[str, SubredditContext]:
+def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditContext]:
     """Build Aho-Corasick automaton registry for each subreddit."""
     subreddit_term_map = defaultdict(lambda: defaultdict(set))
     subreddit_publication_dates = defaultdict(dict)
@@ -315,7 +314,7 @@ def _build_worker_registry(config: RegistryConfig) -> dict[str, SubredditContext
                 subreddit_term_map[subreddit][term.lower()].add(nct_id)
 
     # Create automaton for each subreddit
-    registry: dict[str, SubredditContext] = {}
+    registry: dict[str, _SubredditContext] = {}
     for subreddit, term_map in subreddit_term_map.items():
         automaton = ahocorasick.Automaton()
         for term in term_map:
@@ -329,7 +328,7 @@ def _build_worker_registry(config: RegistryConfig) -> dict[str, SubredditContext
             default=datetime.max.replace(tzinfo=timezone.utc),
         )
 
-        registry[subreddit] = SubredditContext(
+        registry[subreddit] = _SubredditContext(
             name=subreddit,
             automaton=automaton,
             term_to_experiments=term_map,
@@ -352,7 +351,7 @@ def _process_batch_task(
     filter_by_date: bool,
 ) -> dict[str, int]:
     """Process a batch of files and write results to temp directory."""
-    if not WORKER_REGISTRY:
+    if not _WORKER_REGISTRY:
         return {}
 
     batch_id = str(uuid.uuid4())
@@ -362,12 +361,12 @@ def _process_batch_task(
     counts = defaultdict(int)
 
     # Pass target subreddits to iterator to enable predicate pushdown
-    target_subreddits = list(WORKER_REGISTRY.keys())
+    target_subreddits = list(_WORKER_REGISTRY.keys())
     chunk_iterator = scan_reddit_dataset(
         file_paths, columns, target_subreddits=target_subreddits, batch_size=128_000
     )
 
-    for df_chunk in chunk_iterator:
+    for chunk_idx, df_chunk in enumerate(chunk_iterator):
         try:
             for sub_name, sub_df in df_chunk.group_by("subreddit"):
                 normalized_sub_name = (
@@ -375,13 +374,13 @@ def _process_batch_task(
                 )
 
                 # Case-insensitive subreddit lookup
-                ctx = WORKER_REGISTRY.get(normalized_sub_name) or WORKER_REGISTRY.get(
+                ctx = _WORKER_REGISTRY.get(normalized_sub_name) or _WORKER_REGISTRY.get(
                     normalized_sub_name.lower()
                 )
 
                 if ctx:
                     _process_and_write_chunk(
-                        ctx, sub_df, worker_out_dir, filter_by_date, counts
+                        ctx, sub_df, worker_out_dir, filter_by_date, counts, chunk_idx
                     )
 
             # Memory cleanup after each chunk
@@ -397,11 +396,12 @@ def _process_batch_task(
 
 
 def _process_and_write_chunk(
-    ctx: SubredditContext,
+    ctx: _SubredditContext,
     df: pl.DataFrame,
     out_dir: str,
     filter_by_date: bool,
     counts: dict,
+    chunk_idx: int,
 ):
     """Process a subreddit chunk: match terms, filter, and write results."""
     # Prepare text for matching
@@ -489,7 +489,7 @@ def _process_and_write_chunk(
     df_final = df_final.with_columns(report_expr.alias("report"))
 
     # Serialize nested data structures for CSV
-    df_final = _serialize_nested_columns(df_final)
+    # df_final = _serialize_nested_columns(df_final)
 
     # Drop temporary columns
     cols_to_drop = [c for c in ["_matches", "_dt"] if c in df_final.columns]
@@ -499,14 +499,17 @@ def _process_and_write_chunk(
     # Write to disk, partitioned by experiment
     for key, part_df in df_final.partition_by("nct_id", as_dict=True).items():
         nct_id = key[0] if isinstance(key, tuple) else key
-
         payload_df = part_df.drop("nct_id") if "nct_id" in part_df.columns else part_df
 
-        save_path = os.path.join(out_dir, f"{nct_id}.csv")
-        write_header = not os.path.exists(save_path)
+        # Generate a unique filename for this chunk
+        # Format: {NCT_ID}_part_{UUID}_{CHUNK_INDEX}.parquet
+        # This ensures no collisions when we move files later
+        unique_suffix = f"{uuid.uuid4().hex[:8]}_{chunk_idx}"
+        filename = f"{nct_id}_part_{unique_suffix}.parquet"
+        save_path = os.path.join(out_dir, filename)
 
-        with open(save_path, "ab") as f:
-            payload_df.write_csv(f, include_header=write_header)
+        # Write Parquet with compression
+        payload_df.write_parquet(save_path, compression="lz4")
 
         counts[nct_id] += len(payload_df)
 
@@ -596,45 +599,3 @@ def _parse_date_column(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
     ).dt.replace_time_zone("UTC")
 
     return df.with_columns(date_expr.alias("_dt"))
-
-
-def _serialize_nested_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """Convert list and Struct columns to strings for CSV compatibility."""
-    cast_exprs = []
-
-    for col in df.columns:
-        dtype = df.schema[col]
-
-        if isinstance(dtype, pl.List):
-            # Format: ['item1', 'item2']
-            json_expr = pl.concat_str(
-                [
-                    pl.lit("["),
-                    pl.col(col)
-                    .list.eval(
-                        pl.concat_str(
-                            [
-                                pl.lit("'"),
-                                pl.element().fill_null("").str.replace_all("'", r"\'"),
-                                pl.lit("'"),
-                            ]
-                        )
-                    )
-                    .list.join(", "),
-                    pl.lit("]"),
-                ]
-            )
-            cast_exprs.append(json_expr.alias(col))
-
-        elif isinstance(dtype, pl.Struct):
-            # Convert struct to JSON string
-            cast_exprs.append(
-                pl.col(col)
-                .map_elements(
-                    lambda x: json.dumps(x) if x is not None else "",
-                    return_dtype=pl.String,
-                )
-                .alias(col)
-            )
-
-    return df.with_columns(cast_exprs) if cast_exprs else df

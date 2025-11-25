@@ -239,7 +239,7 @@ class RedditCurateStage(SourceStage):
         if not partials:
             return
 
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        os.makedirs(target_path, exist_ok=True)
 
         for src_path in partials:
             filename = os.path.basename(src_path)

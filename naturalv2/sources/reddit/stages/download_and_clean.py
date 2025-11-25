@@ -6,19 +6,16 @@ import os
 from concurrent.futures import as_completed
 from concurrent.futures._base import Future
 from concurrent.futures.thread import ThreadPoolExecutor
-from typing import TYPE_CHECKING
 
 import psutil
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
-from naturalv2.sources.reddit.api import (
-    get_sub_about_info,
-)
-from naturalv2.sources.reddit.processing import (
+from naturalv2.sources.reddit.api import get_sub_about_info
+from naturalv2.sources.reddit.processing import write_to_parquet_partitions
+from naturalv2.sources.reddit.processing.contextualize import (
     build_contextualized_dataset,
-    write_to_parquet_partitions,
 )
 from naturalv2.sources.reddit.pushshift_archive import (
     PROCESSED_RECORD_SCHEMA,
@@ -27,10 +24,6 @@ from naturalv2.sources.reddit.pushshift_archive import (
     iter_bucketed_batches,
     mark_archive_done,
 )
-
-
-if TYPE_CHECKING:
-    pass
 
 
 logger = logging.getLogger(__name__)
@@ -65,9 +58,6 @@ class RedditDownloadAndClean(SourceStage):
         *,
         reddit_rpm: int = 10,
         max_download_workers: int | None = None,
-        anonymize: bool = True,
-        anonymizer_score_threshold: float = 0.85,
-        anonymizer_batch_size: int = 1,
         name: str | None = None,
     ) -> None:
         """Initialize the stage."""
@@ -90,10 +80,6 @@ class RedditDownloadAndClean(SourceStage):
             # Default to min(CPU count, RAM-based cap), minimum 4
             cpu_based = cpu_count or 4
             self.max_download_workers = min(cpu_based, max_workers_by_ram)
-
-        self.anonymize = anonymize
-        self.anonymizer_score_threshold = anonymizer_score_threshold
-        self.anonymizer_batch_size = anonymizer_batch_size
 
     async def run(self, context: CurationContext, state: StageState) -> StageState:
         """Download/clean subreddit data and update state with file paths.
@@ -163,12 +149,11 @@ class RedditDownloadAndClean(SourceStage):
             )
 
         final_dir = os.path.join(subs_data_dir, "final")
-        written_files = build_contextualized_dataset(
+        files_written = build_contextualized_dataset(
             source_dir=staging_dir,
             dest_dir=final_dir,
-            subreddits=list(available_subreddits),
             run_tag=context.experiment_name,
-            cleanup_source=True,
+            cleanup_source=False,
         )
 
         # Update state
@@ -182,7 +167,7 @@ class RedditDownloadAndClean(SourceStage):
         # Update and persist metadata in StudyDataset
         self.persist_dataset(
             context,
-            namespace_paths={f"{context.source_name}_cleaned": written_files},
+            namespace_paths={f"{context.source_name}_cleaned": files_written},
         )
         return state
 

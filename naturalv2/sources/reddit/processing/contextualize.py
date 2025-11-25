@@ -1,55 +1,26 @@
 """Build contextualized datasets from Reddit parquet sources.
 
 This module provides functionality to:
-- Build contextualized datasets from Reddit submissions and comments
 - Write parquet datasets with hive partitioning
-- Track archive processing status
+- Build contextualized datasets from Reddit submissions and comments
 """
 
-import contextlib
-import json
 import logging
 import os
 import resource
-import shutil
-import tempfile
-import threading
-import time
-import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Callable, Generator, Literal, NamedTuple, Sequence
+from typing import Literal, Sequence
 
+import polars as pl
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.dataset as ds
 from tqdm import tqdm
 
-from naturalv2.sources.reddit.processing._utils import (
-    BUCKET_COUNT,
-    author_replies_column,
-    bucket_from_subreddit,
-    build_comment_permalink_array,
-    build_report_text_array,
-    build_submission_permalink_array,
-    comment_post_id_array,
-    constant_string_array,
-    empty_list_array,
-    ensure_int64_array,
-    ensure_string_array,
-    ensure_timestamp_array,
-    filter_array,
-    format_timestamp_array,
-    mask_has_true,
-    non_empty_mask,
-    post_bucket_array,
-    submission_post_id_array,
-    unique_strings,
-)
-
 
 logger = logging.getLogger(__name__)
+
 
 CONTEXTUALIZED_RECORD_SCHEMA = pa.schema(
     [
@@ -219,933 +190,220 @@ default='overwrite_or_ignore'
 def build_contextualized_dataset(
     source_dir: str | Path | Sequence[str | Path],
     dest_dir: str | Path,
-    *,
-    subreddits: Sequence[str] | None = None,
-    batch_size: int = 256_000,
-    run_tag: str | None = None,
+    run_tag: str = "ctx",
     cleanup_source: bool = False,
 ) -> list[str]:
-    """
-    Build a contextualized hive-partitioned dataset from Reddit parquet sources.
-
-    Parameters
-    ----------
-    source_dir : str or pathlib.Path or Sequence[str | pathlib.Path]
-        Root path(s) containing submission/comment parquet partitions.
-    dest_dir : str or pathlib.Path
-        Destination directory for contextualized parquet outputs.
-    subreddits : Sequence[str], optional
-        Required list of subreddit names to include.
-    batch_size : int, default=256_000
-        Scanner batch size for reading source data.
-    run_tag : str or None, optional
-        Tag appended to output filenames to avoid collisions (default ``"ctx"``).
-    cleanup_source : bool, default=False
-        When True, remove source files after successful processing.
-
-    Returns
-    -------
-    list[str]
-        Paths to contextualized parquet files written.
-
-    Raises
-    ------
-    ValueError
-        If ``subreddits`` is missing/empty or params are invalid.
-    FileExistsError
-        If outputs for the given ``run_tag`` already exist and conflict with inputs.
-    """
-    from naturalv2.sources.reddit.pushshift_archive import (  # noqa: PLC0415
-        _write_manifest,
-    )
-
-    if subreddits is None:
-        raise ValueError(
-            "`subreddits` must be provided when building contextualized datasets."
-        )
-    normalized_subreddits = _normalize_subreddits(subreddits)
-    if not normalized_subreddits:
-        raise ValueError("No valid subreddit names provided for contextualization.")
-
     dest_path = Path(dest_dir)
-    os.makedirs(dest_path, exist_ok=True)
+    dest_path.mkdir(parents=True, exist_ok=True)
 
-    effective_run_tag = run_tag or "ctx"
-    manifest_path = dest_path / "_context_manifest.json"
-    manifest: dict = {}
-    if manifest_path.exists():
-        with contextlib.suppress(Exception):
-            manifest = json.loads(manifest_path.read_text())
+    sources = [source_dir] if isinstance(source_dir, (str, Path)) else list(source_dir)
+    bucket_files = _scan_and_group_bucketed_parquet_files(sources)
 
-    manifest_run_tag = manifest.get("run_tag")
-    source_roots: Sequence[str | Path]
-    source_roots = (
-        [source_dir]
-        if isinstance(source_dir, (str, os.PathLike, Path))
-        else list(source_dir)
-    )
-
-    skip_result = _validate_and_check_skip(
-        manifest_run_tag=manifest_run_tag,
-        effective_run_tag=effective_run_tag,
-        source_roots=source_roots,
-        normalized_subreddits=normalized_subreddits,
-        dest_path=dest_path,
-    )
-    if skip_result is not None:
-        return skip_result
-
-    dest_parquet_files = _find_parquet_files(dest_path)
-    source_parquet_files = _find_parquet_files(source_dir)
-    if not source_parquet_files and dest_parquet_files:
-        logger.info(
-            "Skipping contextualized dataset build: no source partitions in %s and "
-            "destination %s already populated with %d parquet files.",
-            source_dir,
-            dest_path,
-            len(dest_parquet_files),
+    files_written = []
+    for bucket_id, file_mapping in tqdm(
+        bucket_files.items(),
+        desc="Building contextualized dataset",
+        unit="bucket",
+        leave=False,
+        dynamic_ncols=True,
+    ):
+        submission_file, comment_file = _process_bucket(
+            bucket_id, file_mapping, dest_dir, run_tag
         )
-        return dest_parquet_files
+        if submission_file:
+            files_written.append(submission_file)
 
-    dataset = ds.dataset(source_dir, format="parquet", partitioning="hive")
-    submission_filter = _make_partition_filter(normalized_subreddits, "submissions")
-    comment_filter = _make_partition_filter(normalized_subreddits, "comments")
+        if comment_file:
+            files_written.append(comment_file)
 
-    reply_store = _AuthorReplyStore()
-    written: list[str] = []
-    try:
-        _collect_author_replies(
-            dataset=dataset,
-            comment_filter=comment_filter,
-            submission_filter=submission_filter,
-            batch_size=batch_size,
-            store=reply_store,
-        )
-
-        batch_stream = _get_contextualized_batches(
-            dataset=dataset,
-            comment_filter=comment_filter,
-            submission_filter=submission_filter,
-            reply_store=reply_store,
-            batch_size=batch_size,
-        )
-
-        written = write_to_parquet_partitions(
-            data_stream=batch_stream,
-            output_dir=str(dest_dir),
-            schema=CONTEXTUALIZED_RECORD_SCHEMA,
-            parquet_compression_level=5,
-            write_parquet_stats="all",
-            use_dictionary={
-                "title": False,
-                "initial_post": False,
-                "report_text": False,
-                "author_replies": False,
-                "score": False,
-                "permalink": False,
-                "date_created": False,
-                "report_type": True,
-                "content_type": True,
-                "bucket": True,
-                "subreddit": True,
-            },
-            max_partitions=1024,
-            min_rows_per_group=64_000,
-            max_rows_per_group=128_000,
-            max_open_files=512,
-            existing_data_behavior="overwrite_or_ignore",
-            run_tag=effective_run_tag,
-        )
-        _write_manifest(
-            manifest_path,
-            {
-                "run_tag": effective_run_tag,
-                "subreddits": normalized_subreddits,
-                "source_dir": [str(root) for root in source_roots],
-                "ts": int(time.time()),
-            },
-        )
-    finally:
-        reply_store.close()
         if cleanup_source:
-            _cleanup_source_dir(source_dir)
+            for file_path in file_mapping["submissions"] + file_mapping["comments"]:
+                os.remove(file_path)
 
-    return written
-
-
-# ============================================================================
-# Dataset Building Core Functions
-# ============================================================================
+    return files_written
 
 
-def _validate_and_check_skip(
-    *,
-    manifest_run_tag: str | None,
-    effective_run_tag: str,
-    source_roots: Sequence[str | Path],
-    normalized_subreddits: list[str],
-    dest_path: Path,
-) -> list[str] | None:
-    """
-    Validate manifest and check if processing should be skipped.
+def _scan_and_group_bucketed_parquet_files(
+    source_dirs: list[Path],
+) -> dict[str, dict[str, list[str]]]:
+    bucket_files = defaultdict(lambda: {"submissions": [], "comments": []})
 
-    Returns
-    -------
-    list[str] | None
-        If processing should be skipped, returns list of existing parquet files.
-        Otherwise returns None.
-    """
-    if manifest_run_tag == effective_run_tag:
-        if not all(Path(root).exists() for root in source_roots):
-            raise FileExistsError(
-                f"Contextualized data already exists for run_tag '{effective_run_tag}' in "
-                f"{dest_path}, but one or more source dirs {source_roots} are missing. "
-                "Choose a new run_tag (experiment_name) or clean the destination."
+    for root_dir in source_dirs:
+        for file_path in Path(root_dir).glob("**/*.parquet"):
+            partitions = dict(
+                part.split("=") for part in str(file_path).split("/") if "=" in part
             )
+            bucket_id = partitions["bucket"]
+            content_type = partitions["content_type"]
 
-        processed_subs: set[str] = set()
-        for root in source_roots:
-            processed_subs.update(_processed_subreddits(root))
+            bucket_files[bucket_id][content_type].append(str(file_path))
 
-        if not processed_subs or not processed_subs.issuperset(
-            set(normalized_subreddits)
-        ):
-            raise FileExistsError(
-                f"Contextualized data already exists for run_tag '{effective_run_tag}' in "
-                f"{dest_path}, but the processed subreddits ({sorted(processed_subs)}) do not "
-                f"cover requested subreddits ({normalized_subreddits}). "
-                "Choose a new run_tag or clean the destination."
+    return bucket_files
+
+
+def _process_bucket(
+    bucket_id: str, file_mapping: dict[str, list[str]], dest_dir: Path, run_tag: str
+) -> tuple[str | None, str | None]:
+    submissions_files = file_mapping["submissions"]
+    comments_files = file_mapping["comments"]
+
+    if not submissions_files and not comments_files:
+        return None, None
+
+    # Scan inputs
+    submissions = pl.scan_parquet(
+        submissions_files,
+        schema={
+            "id": pl.String,
+            "created_utc": pl.Int64,
+            "subreddit": pl.String,
+            "title": pl.String,
+            "selftext": pl.String,
+            "author": pl.String,
+            "score": pl.Float64,
+        },
+        extra_columns="ignore",
+    ).with_columns(
+        pl.col("id").alias("post_id"),
+        pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
+        pl.lit(bucket_id).alias("bucket"),
+    )
+    comments = pl.scan_parquet(
+        comments_files,
+        schema={
+            "id": pl.String,
+            "link_id": pl.String,
+            "created_utc": pl.Int64,
+            "subreddit": pl.String,
+            "body": pl.String,
+            "author": pl.String,
+            "score": pl.Float64,
+        },
+        extra_columns="ignore",
+    ).with_columns(
+        pl.col("link_id").str.replace(r"^t3_", "").alias("post_id"),
+        pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
+        pl.lit(bucket_id).alias("bucket"),
+    )
+
+    # Find author replies
+    author_replies = (
+        comments.join(
+            submissions.select(["post_id", "author"]), on="post_id", how="inner"
+        )
+        .filter(
+            (pl.col("author") == pl.col("author_right"))
+            & pl.col("body").is_not_null()
+            & ~pl.col("body").is_in(["[deleted]", "[removed]"])
+        )
+        .select(["post_id", "body", "timestamp"])
+        .sort("timestamp")
+        .group_by("post_id")
+        .agg(pl.col("body").alias("replies"))
+    )
+
+    # Contextualize submissions
+    submissions_context = submissions.join(
+        author_replies, left_on="id", right_on="post_id", how="left"
+    ).select(
+        [
+            pl.col("subreddit"),
+            pl.col("title"),
+            pl.lit("").alias("initial_post"),
+            pl.when(pl.col("replies").is_not_null())
+            .then(pl.col("selftext") + "\n\n" + pl.col("replies").list.join("\n"))
+            .otherwise(pl.col("selftext"))
+            .alias("report_text"),
+            pl.lit("submission").alias("report_type"),
+            pl.col("score"),
+            pl.from_epoch("timestamp", time_unit="s")
+            .dt.strftime("%B %d, %Y")
+            .alias("date_created"),
+            (
+                pl.lit("/r/")
+                + pl.col("subreddit")
+                + pl.lit("/comments/")
+                + pl.col("id")
+                + pl.lit("/")
+                + pl.col("title").str.to_lowercase().str.replace_all(r"[^a-z0-9]+", "_")
+                + pl.lit("/")
+            ).alias("permalink"),
+            pl.col("replies").fill_null([]).alias("author_replies"),
+            pl.lit("submissions").alias("content_type"),
+            pl.col("bucket"),
+            pl.col("timestamp"),  # Keeping for sort later
+        ]
+    )
+
+    # Contextualize comments
+    comments_context = (
+        comments.join(submissions, on="post_id", how="left", suffix="_sub")
+        .filter(
+            pl.col("author_sub").is_null()
+            | (
+                pl.col("author").str.to_lowercase()
+                != pl.col("author_sub").str.to_lowercase()
             )
-
-        # All validations passed - check if destination files exist and skip if they do
-        dest_parquet_files = _find_parquet_files(dest_path)
-        if dest_parquet_files:
-            logger.info(
-                "Skipping contextualized dataset build: data already exists for run_tag '%s' in "
-                "%s with %d parquet files.",
-                effective_run_tag,
-                dest_path,
-                len(dest_parquet_files),
-            )
-            return dest_parquet_files
-    else:
-        existing_for_tag = sorted(dest_path.glob(f"{effective_run_tag}-part-*.parquet"))
-        if existing_for_tag:
-            raise FileExistsError(
-                f"Contextualized data already exists for run_tag '{effective_run_tag}' in "
-                f"{dest_path} (found {len(existing_for_tag)} parquet files). "
-                "Choose a new run_tag or remove the existing outputs for this tag."
-            )
-
-    return None
-
-
-def _normalize_subreddits(values: Sequence[str]) -> list[str]:
-    """Strip whitespace, drop empties, and de-duplicate subreddit names."""
-    cleaned = []
-    for value in values:
-        if value and isinstance(value, str):
-            candidate = value.strip()
-            if candidate:
-                cleaned.append(candidate)
-    # dict.fromkeys preserves order while de-duping
-    return list(dict.fromkeys(cleaned))
-
-
-def _make_partition_filter(
-    subreddits: Sequence[str], content_type: str | None
-) -> ds.Expression:
-    """Build a dataset filter matching subreddits, buckets, and optional content type."""
-    fallback_bucket = str(0).zfill(len(str(BUCKET_COUNT - 1)))
-    subreddit_arr = pa.array(subreddits, type=pa.string())
-    expr: ds.Expression = ds.field("subreddit").isin(subreddit_arr)
-    bucket_labels = unique_strings(bucket_from_subreddit(subreddit_arr))
-    expr = expr & ds.field("bucket").isin(
-        pa.array(bucket_labels or [fallback_bucket], type=pa.string())
-    )
-
-    if content_type:
-        expr = expr & (ds.field("content_type") == pa.scalar(content_type))
-    return expr
-
-
-# ============================================================================
-# Data Store Classes
-# ============================================================================
-
-
-class _AuthorReplyStore:
-    """Spill author replies to disk per post bucket to keep memory bounded."""
-
-    def __init__(self, tmp_root: str | Path | None = None) -> None:
-        """Initialize a temp directory for spilling replies, optionally under tmp_root."""
-        root = (
-            Path(tmp_root)
-            if tmp_root
-            else Path(tempfile.mkdtemp(prefix="reddit-replies-"))
         )
-        root.mkdir(parents=True, exist_ok=True)
-        self._root = root
-        self._files_by_bucket: defaultdict[str, list[Path]] = defaultdict(list)
-        self._lock = threading.Lock()
-        self._closed = False
-
-    def close(self) -> None:
-        """Delete any spilled reply files and mark the store closed."""
-        if self._closed:
-            return
-        shutil.rmtree(self._root, ignore_errors=True)
-        self._closed = True
-
-    def add_replies(
-        self, *, post_ids: pa.Array, replies: pa.Array, created_utc: pa.Array
-    ) -> None:
-        """Persist replies grouped by first-character bucket to bounded directories."""
-        if len(post_ids) == 0:
-            return
-
-        pid_arr = ensure_string_array(post_ids)
-        reply_arr = ensure_string_array(replies)
-        bucket_arr = post_bucket_array(pid_arr)
-        for bucket in unique_strings(bucket_arr):
-            mask = pc.equal(bucket_arr, pa.scalar(bucket, pa.string()))
-            if not mask_has_true(mask):
-                continue
-            subset = pa.table(
-                {
-                    "post_id": filter_array(pid_arr, mask),
-                    "reply": filter_array(reply_arr, mask),
-                    "created_utc": filter_array(created_utc, mask),
-                }
-            )
-            if subset.num_rows == 0:
-                continue
-
-            bucket_dir = self._root / bucket
-            bucket_dir.mkdir(parents=True, exist_ok=True)
-            file_path = bucket_dir / f"{uuid.uuid4().hex}.ipc"
-            with (
-                pa.OSFile(str(file_path), "wb") as sink,
-                pa.ipc.new_file(sink, subset.schema) as writer,
-            ):
-                writer.write_table(subset)
-            with self._lock:
-                self._files_by_bucket[bucket].append(file_path)
-
-    def fetch(self, post_ids: pa.Array | Sequence[str]) -> dict[str, list[str]]:
-        """Load replies for the provided post ids, ordered by creation time."""
-        values = (
-            post_ids.to_pylist()
-            if isinstance(post_ids, (pa.Array, pa.ChunkedArray))
-            else list(post_ids)
+        .select(
+            pl.col("subreddit"),
+            pl.col("title"),
+            pl.col("selftext").alias("initial_post"),
+            pl.col("body").alias("report_text"),
+            pl.lit("comment").alias("report_type"),
+            pl.col("score"),
+            pl.from_epoch("timestamp", time_unit="s")
+            .dt.strftime("%B %d, %Y")
+            .alias("date_created"),
+            (
+                pl.lit("/r/")
+                + pl.col("subreddit")
+                + pl.lit("/comments/")
+                + pl.col("post_id")
+                + pl.lit("/_/")
+                + pl.col("id")
+            ).alias("permalink"),
+            pl.lit([]).cast(pl.List(pl.String)).alias("author_replies"),
+            pl.lit("comments").alias("content_type"),
+            pl.col("bucket"),
+            pl.col("timestamp"),  # Keeping for sort later
         )
-        result: dict[str, list[str]] = defaultdict(list)
-        if not values:
-            return result
-
-        ids_by_bucket: dict[str, set[str]] = defaultdict(set)
-        for post_id in values:
-            if not post_id:
-                continue
-
-            if not post_id:
-                bucket = "_"
-            else:
-                first = post_id[0].lower()
-                bucket = first if first else "_"
-            ids_by_bucket[bucket].add(post_id)
-
-        for bucket, ids in ids_by_bucket.items():
-            if not ids:
-                continue
-            bucket_dir = self._root / bucket
-            if not bucket_dir.is_dir():
-                continue
-            dataset = ds.dataset(str(bucket_dir), format="ipc")
-            filter_expr = ds.field("post_id").isin(
-                pa.array(sorted(ids), type=pa.string())
-            )
-            table = dataset.to_table(filter=filter_expr)
-            table.sort_by([("post_id", "ascending"), ("created_utc", "ascending")])
-            if table.num_rows == 0:
-                continue
-            for post_id, reply in zip(
-                table.column("post_id").to_pylist(),
-                table.column("reply").to_pylist(),
-            ):
-                result[post_id].append(reply)
-        return dict(result)
-
-
-class PreparedCommentBatch(NamedTuple):
-    """Container for a prepared comment batch with aligned submission metadata."""
-
-    aligned: pa.RecordBatch
-    matched_post_ids: pa.Array
-    indices: pa.Array
-    lookup_table: pa.Table
-
-
-# ============================================================================
-# Batch Processing Functions
-# ============================================================================
-
-
-def _prepare_comment_batch(
-    *, batch: pa.RecordBatch, lookup_fn: Callable[[pa.Array], pa.Table | None]
-) -> PreparedCommentBatch | None:
-    """Align a comment batch to submission metadata, filtering rows without matches."""
-    if batch.num_rows == 0:
-        return None
-
-    post_ids = comment_post_id_array(batch.column("link_id"))
-    # Fast-path: drop rows without a usable post_id before any joins
-    valid_mask = non_empty_mask(post_ids)
-    if not mask_has_true(valid_mask):
-        return None
-
-    filtered = batch.filter(valid_mask)
-    post_ids = filter_array(post_ids, valid_mask)
-
-    lookup_table = lookup_fn(post_ids)
-    if lookup_table is None or lookup_table.num_rows == 0:
-        return None
-
-    submission_ids = lookup_table.column("post_id")
-    # Locate each comment's post_id within the lookup table
-    indices = pc.index_in(post_ids, submission_ids)
-    # Keep only rows whose post_ids are present in the lookup_table
-    matched_mask = pc.not_equal(indices, -1)
-    if not mask_has_true(matched_mask):
-        return None
-
-    indices = filter_array(indices, matched_mask)
-    matched_post_ids = filter_array(post_ids, matched_mask)
-    aligned = filtered.filter(matched_mask)
-    return PreparedCommentBatch(aligned, matched_post_ids, indices, lookup_table)
-
-
-def _collect_author_replies(
-    *,
-    dataset: ds.Dataset,
-    comment_filter: ds.Expression,
-    submission_filter: ds.Expression,
-    batch_size: int,
-    store: "_AuthorReplyStore",
-) -> None:
-    """Collect author replies from comments and spill them to the reply store."""
-    scanner = dataset.scanner(
-        filter=comment_filter,
-        columns=["link_id", "author", "body", "created_utc"],
-        batch_size=batch_size,
-        use_threads=True,
-    )
-    for batch in tqdm(
-        scanner.to_batches(),
-        desc="Collecting author replies",
-        unit="batch",
-        leave=False,
-        dynamic_ncols=True,
-    ):
-        prepared = _prepare_comment_batch(
-            batch=batch,
-            lookup_fn=lambda post_ids: _fetch_submission_author_table(
-                dataset=dataset,
-                submission_filter=submission_filter,
-                post_ids=post_ids,
-            ),
-        )
-        if prepared is None:
-            continue
-
-        aligned = prepared.aligned
-        matched_post_ids = prepared.matched_post_ids
-        indices = prepared.indices
-        submission_authors = prepared.lookup_table.column("author")
-
-        # Case-insensitive author equality on aligned rows
-        comment_authors = pc.utf8_lower(ensure_string_array(aligned.column("author")))
-        target_authors = pc.take(submission_authors, indices, boundscheck=False)
-        target_authors = pc.fill_null(target_authors, pa.scalar("", pa.string()))
-        is_author_reply = pc.equal(comment_authors, target_authors)
-
-        # Create a mask for author replies that are not null
-        has_body = pc.is_valid(aligned.column("body"))
-        # Combine author match + presence of a body to find candidate replies
-        reply_mask = pc.and_(is_author_reply, has_body)
-        if not mask_has_true(reply_mask):
-            continue
-
-        # Get the post_ids, replies and timestamp
-        reply_post_ids = filter_array(matched_post_ids, reply_mask)
-        if len(reply_post_ids) == 0:
-            continue
-
-        reply_bodies = filter_array(
-            ensure_string_array(aligned.column("body")), reply_mask
-        )
-        reply_created_utc = filter_array(aligned.column("created_utc"), reply_mask)
-
-        # Add to store to spill to disk
-        store.add_replies(
-            post_ids=reply_post_ids, replies=reply_bodies, created_utc=reply_created_utc
-        )
-
-
-def _get_contextualized_batches(
-    *,
-    dataset: ds.Dataset,
-    comment_filter: ds.Expression,
-    submission_filter: ds.Expression,
-    reply_store: "_AuthorReplyStore",
-    batch_size: int,
-) -> Generator[pa.RecordBatch, Any, None]:
-    """Chain together comment and submission batch generators."""
-    yield from _comment_record_batches(
-        dataset=dataset,
-        comment_filter=comment_filter,
-        submission_filter=submission_filter,
-        reply_store=reply_store,
-        batch_size=batch_size,
-    )
-    yield from _submission_record_batches(
-        dataset=dataset,
-        submission_filter=submission_filter,
-        reply_store=reply_store,
-        batch_size=batch_size,
     )
 
-
-def _comment_record_batches(
-    *,
-    dataset: ds.Dataset,
-    comment_filter: ds.Expression,
-    submission_filter: ds.Expression,
-    reply_store: "_AuthorReplyStore",
-    batch_size: int,
-) -> Generator[pa.RecordBatch, Any, None]:
-    """Yield contextualized comment record batches, skipping author replies."""
-    scanner = dataset.scanner(
-        filter=comment_filter,
-        columns=[
-            "id",
-            "link_id",
-            "author",
-            "body",
-            "score",
-            "created_utc",
-            "permalink",
-        ],
-        batch_size=batch_size,
-        use_threads=True,
-    )
-    for batch in tqdm(
-        scanner.to_batches(),
-        desc="Writing comments",
-        unit="batch",
-        leave=False,
-        dynamic_ncols=True,
-    ):
-        if batch.num_rows == 0:
-            continue
-        record_batch = _build_comment_record_batch(
-            batch=batch,
-            dataset=dataset,
-            submission_filter=submission_filter,
-            reply_store=reply_store,
-        )
-        if record_batch is not None:
-            yield record_batch
-
-
-def _submission_record_batches(
-    *,
-    dataset: ds.Dataset,
-    submission_filter: ds.Expression,
-    reply_store: "_AuthorReplyStore",
-    batch_size: int,
-) -> Generator[pa.RecordBatch, Any, None]:
-    """Yield contextualized submission record batches."""
-    scanner = dataset.scanner(
-        filter=submission_filter,
-        columns=[
-            "id",
-            "subreddit",
-            "title",
-            "selftext",
-            "score",
-            "created_utc",
-            "permalink",
-            "author",
-        ],
-        batch_size=batch_size,
-        use_threads=True,
-    )
-    for batch in tqdm(
-        scanner.to_batches(),
-        desc="Writing submissions",
-        unit="batch",
-        leave=False,
-        dynamic_ncols=True,
-    ):
-        if batch.num_rows == 0:
-            continue
-        record_batch = _build_submission_record_batch(
-            batch=batch, reply_store=reply_store
-        )
-        if record_batch is not None:
-            yield record_batch
-
-
-def _build_comment_record_batch(
-    *,
-    batch: pa.RecordBatch,
-    dataset: ds.Dataset,
-    submission_filter: ds.Expression,
-    reply_store: "_AuthorReplyStore",
-) -> pa.RecordBatch | None:
-    """Construct a contextualized comment batch joined with submission context."""
-    prepared = _prepare_comment_batch(
-        batch=batch,
-        lookup_fn=lambda post_ids: _fetch_submission_context_table(
-            dataset=dataset,
-            submission_filter=submission_filter,
-            post_ids=post_ids,
-            reply_store=reply_store,
-        ),
-    )
-    if prepared is None:
-        return None
-
-    filtered = prepared.aligned
-    post_ids = prepared.matched_post_ids
-    indices = prepared.indices
-    context_table = prepared.lookup_table
-
-    target_authors = pc.take(
-        context_table.column("author_normalized"), indices, boundscheck=False
-    )
-    comment_authors = pc.utf8_lower(ensure_string_array(filtered.column("author")))
-    is_author_reply = pc.equal(
-        comment_authors, pc.fill_null(target_authors, pa.scalar("", pa.string()))
-    )
-    # Exclude author replies; we only want comments from other users
-    non_author_mask = pc.invert(is_author_reply)
-    if not mask_has_true(non_author_mask):
-        return None
-
-    indices = filter_array(indices, non_author_mask)
-    filtered = filtered.filter(non_author_mask)
-    post_ids = filter_array(post_ids, non_author_mask)
-
-    # Guard against any lingering invalid indices before using them in a take()
-    valid_idx_mask = pc.and_(pc.is_valid(indices), pc.greater_equal(indices, 0))
-    if not mask_has_true(valid_idx_mask):
-        return None
-
-    indices = filter_array(indices, valid_idx_mask)
-    filtered = filtered.filter(valid_idx_mask)
-    post_ids = filter_array(post_ids, valid_idx_mask)
-
-    indices = pc.cast(indices, pa.int64(), safe=False)
-    # Align submission context to the filtered comment rows
-    context_rows = context_table.take(indices)
-
-    submission_subreddit = ensure_string_array(context_rows.column("subreddit"))
-    submission_title = ensure_string_array(context_rows.column("title"))
-    submission_report_text = ensure_string_array(context_rows.column("report_text"))
-
-    num_rows = filtered.num_rows
-    if num_rows == 0:
-        return None
-    created_ts = ensure_timestamp_array(filtered.column("created_utc"))
-
-    report_text = ensure_string_array(filtered.column("body"))
-    score = ensure_int64_array(filtered.column("score"))
-    date_created = format_timestamp_array(created_ts)
-    permalink = build_comment_permalink_array(
-        existing=ensure_string_array(filtered.column("permalink"), default=""),
-        post_ids=post_ids,
-        comment_ids=ensure_string_array(filtered.column("id")),
-    )
-    report_type = constant_string_array("comment", num_rows)
-    author_replies = empty_list_array(num_rows)
-    content_type = constant_string_array("comments", num_rows)
-    bucket = bucket_from_subreddit(submission_subreddit)
-
-    arrays = {
-        "subreddit": submission_subreddit,
-        "title": submission_title,
-        "initial_post": submission_report_text,
-        "report_text": report_text,
-        "report_type": report_type,
-        "score": score,
-        "date_created": date_created,
-        "permalink": permalink,
-        "author_replies": author_replies,
-        "content_type": content_type,
-        "bucket": bucket,
-    }
-    sorted_arrays = _sort_batch_arrays_by_subreddit_and_created(
-        arrays, created_ts=created_ts
-    )
-    batch_arrays = [
-        sorted_arrays["subreddit"],
-        sorted_arrays["title"],
-        sorted_arrays["initial_post"],
-        sorted_arrays["report_text"],
-        sorted_arrays["report_type"],
-        sorted_arrays["score"],
-        sorted_arrays["date_created"],
-        sorted_arrays["permalink"],
-        sorted_arrays["author_replies"],
-        sorted_arrays["content_type"],
-        sorted_arrays["bucket"],
-    ]
-    return pa.RecordBatch.from_arrays(batch_arrays, schema=CONTEXTUALIZED_RECORD_SCHEMA)
-
-
-def _build_submission_record_batch(
-    *,
-    batch: pa.RecordBatch,
-    reply_store: "_AuthorReplyStore",
-) -> pa.RecordBatch | None:
-    """Construct a contextualized submission batch with appended author replies."""
-    post_ids = submission_post_id_array(batch.column("id"))
-    valid_mask = non_empty_mask(post_ids)
-    if not mask_has_true(valid_mask):
-        return None
-
-    filtered = batch.filter(valid_mask)
-    post_ids = filter_array(post_ids, valid_mask)
-
-    if filtered.num_rows == 0:
-        return None
-
-    subreddit = ensure_string_array(filtered.column("subreddit"))
-    title = ensure_string_array(filtered.column("title"))
-    base_text = ensure_string_array(filtered.column("selftext"))
-    # Rehydrate replies for each submission so we can append them to the text
-    reply_lookup = reply_store.fetch(post_ids)
-
-    report_text = build_report_text_array(
-        base_text=base_text,
-        post_ids=post_ids,
-        reply_lookup=reply_lookup,
-    )
-    initial_post = constant_string_array("", filtered.num_rows)
-    report_type = constant_string_array("submission", filtered.num_rows)
-    score = ensure_int64_array(filtered.column("score"))
-    created_ts = ensure_timestamp_array(filtered.column("created_utc"))
-    date_created = format_timestamp_array(created_ts)
-    permalink = build_submission_permalink_array(
-        existing=ensure_string_array(filtered.column("permalink"), default=""),
-        subreddits=subreddit,
-        post_ids=post_ids,
-    )
-    replies_column = author_replies_column(post_ids, reply_lookup)
-    content_type = constant_string_array("submissions", filtered.num_rows)
-    bucket = bucket_from_subreddit(subreddit)
-
-    arrays = {
-        "subreddit": subreddit,
-        "title": title,
-        "initial_post": initial_post,
-        "report_text": report_text,
-        "report_type": report_type,
-        "score": score,
-        "date_created": date_created,
-        "permalink": permalink,
-        "author_replies": replies_column,
-        "content_type": content_type,
-        "bucket": bucket,
-    }
-    sorted_arrays = _sort_batch_arrays_by_subreddit_and_created(
-        arrays, created_ts=created_ts
-    )
-    batch_arrays = [
-        sorted_arrays["subreddit"],
-        sorted_arrays["title"],
-        sorted_arrays["initial_post"],
-        sorted_arrays["report_text"],
-        sorted_arrays["report_type"],
-        sorted_arrays["score"],
-        sorted_arrays["date_created"],
-        sorted_arrays["permalink"],
-        sorted_arrays["author_replies"],
-        sorted_arrays["content_type"],
-        sorted_arrays["bucket"],
-    ]
-    return pa.RecordBatch.from_arrays(batch_arrays, schema=CONTEXTUALIZED_RECORD_SCHEMA)
-
-
-# ============================================================================
-# Submission/Context Fetching Functions
-# ============================================================================
-
-
-def _fetch_submission_author_table(
-    *,
-    dataset: ds.Dataset,
-    submission_filter: ds.Expression,
-    post_ids: pa.Array,
-) -> pa.Table | None:
-    """Fetch author ids for a set of submission ids needed for reply matching."""
-    # Query only the distinct submission ids present in the current batch
-    unique_ids = unique_strings(post_ids)
-    if not unique_ids:
-        return None
-
-    filter_expr = submission_filter & ds.field("id").isin(
-        pa.array(unique_ids, type=pa.string())
-    )
-    table = dataset.to_table(filter=filter_expr, columns=["id", "author"])
-    if table.num_rows == 0:
-        return None
-    post_id_arr = submission_post_id_array(table.column("id"))
-    author_arr = pc.utf8_lower(ensure_string_array(table.column("author")))
-    return pa.table({"post_id": post_id_arr, "author": author_arr})
-
-
-def _fetch_submission_context_table(
-    *,
-    dataset: ds.Dataset,
-    submission_filter: ds.Expression,
-    post_ids: pa.Array,
-    reply_store: "_AuthorReplyStore",
-) -> pa.Table | None:
-    """Fetch submission context used to populate contextualized comment rows."""
-    unique_ids = unique_strings(post_ids)
-    if not unique_ids:
-        return None
-    filter_expr = submission_filter & ds.field("id").isin(
-        pa.array(unique_ids, type=pa.string())
-    )
-    columns = [
-        "id",
-        "subreddit",
-        "title",
-        "selftext",
-        "score",
-        "created_utc",
-        "permalink",
-        "author",
-    ]
-    table = dataset.to_table(filter=filter_expr, columns=columns)
-    if table.num_rows == 0:
-        return None
-
-    post_id_arr = submission_post_id_array(table.column("id"))
-    subreddit = ensure_string_array(table.column("subreddit"))
-    title = ensure_string_array(table.column("title"))
-    # Pull any previously collected author replies for these submissions
-    reply_lookup = reply_store.fetch(post_id_arr)
-
-    report_text = build_report_text_array(
-        base_text=ensure_string_array(table.column("selftext")),
-        post_ids=post_id_arr,
-        reply_lookup=reply_lookup,
-    )
-    score = ensure_int64_array(table.column("score"))
-    created = table.column("created_utc")
-    permalink = build_submission_permalink_array(
-        existing=ensure_string_array(table.column("permalink"), default=""),
-        subreddits=subreddit,
-        post_ids=post_id_arr,
-    )
-    bucket = bucket_from_subreddit(subreddit)
-    author_norm = pc.utf8_lower(ensure_string_array(table.column("author")))
-
-    return pa.table(
-        {
-            "post_id": post_id_arr,
-            "subreddit": subreddit,
-            "title": title,
-            "report_text": report_text,
-            "score": score,
-            "created_utc": created,
-            "permalink": permalink,
-            "bucket": bucket,
-            "author_normalized": author_norm,
-        }
-    )
-
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-
-def _sort_batch_arrays_by_subreddit_and_created(
-    arrays: dict[str, pa.Array], *, created_ts: pa.Array
-) -> dict[str, pa.Array]:
-    """
-    Return arrays sorted by subreddit then creation time.
-
-    Sorting here improves row-group stats and compression without changing the
-    external schema. Sorting keys are kept narrow to avoid materializing large
-    intermediate tables.
-    """
-    if len(created_ts) == 0:
-        return arrays
-
-    sort_table = pa.table({"subreddit": arrays["subreddit"], "_created_ts": created_ts})
-    indices = pc.sort_indices(
-        sort_table,
-        sort_keys=[("subreddit", "ascending"), ("_created_ts", "ascending")],
-    )
-    return {
-        name: pc.take(arr, indices, boundscheck=False) for name, arr in arrays.items()
+    # Union, sort and write to disk
+    parquet_options = {
+        "compression": "zstd",
+        "compression_level": 5,
+        "statistics": "full",
+        "row_group_size": 64_000,
+        "data_page_size": 10 << 20,  # 10 MiB
     }
 
+    try:
+        submissions_filepath = _get_hive_path(
+            dest_dir, "submissions", bucket_id, filename=f"{run_tag}-part-0.parquet"
+        )
+        submissions_context.sort(["subreddit", "timestamp"]).sink_parquet(
+            submissions_filepath, **parquet_options
+        )
 
-def _find_parquet_files(
-    roots: str | Path | Sequence[str | Path],
-) -> list[str]:
-    """Return sorted parquet file paths under one or more roots."""
-    root_list: Sequence[str | Path]
-    root_list = [roots] if isinstance(roots, (str, Path, os.PathLike)) else list(roots)
+        comments_filepath = _get_hive_path(
+            dest_dir, "comments", bucket_id, filename=f"{run_tag}-part-0.parquet"
+        )
+        comments_context.sort(["subreddit", "timestamp"]).sink_parquet(
+            comments_filepath, **parquet_options
+        )
+    except Exception as exc:
+        logger.error("Failed to process bucket %s: %s", bucket_id, exc, exc_info=True)
+        return None, None
 
-    files: set[str] = set()
-    for root in root_list:
-        base = Path(root)
-        if not base.exists():
-            continue
-        for path in base.rglob("*.parquet"):
-            if path.is_file():
-                files.add(str(path))
-    return sorted(files)
-
-
-def _cleanup_source_dir(
-    source_dir: str | Path, preserved: Sequence[str] = (".processed",)
-) -> None:
-    """Remove everything under ``source_dir`` except the preserved entries."""
-    base = Path(source_dir)
-    if not base.exists():
-        return
-
-    for entry in base.iterdir():
-        if entry.name in preserved:
-            continue
-        with contextlib.suppress(Exception):
-            if entry.is_dir():
-                shutil.rmtree(entry, ignore_errors=True)
-            else:
-                entry.unlink()
+    return submissions_filepath, comments_filepath
 
 
-def _processed_subreddits(source_dir: str | Path) -> set[str]:
-    """Return the set of subreddits marked processed in the source directory."""
-    from naturalv2.sources.reddit.pushshift_archive import _proc_dir  # noqa: PLC0415
-
-    archives_dir = _proc_dir(source_dir) / "archives"
-    if not archives_dir.exists():
-        return set()
-
-    subreddits: set[str] = set()
-    for done_file in archives_dir.glob("*.done"):
-        stem = done_file.stem  # "subreddit-content_type"
-        if "-" in stem:
-            subreddits.add(stem.split("-", 1)[0])
-    return subreddits
+def _get_hive_path(
+    base_dir: Path, content_type: str, bucket_id: str, filename: str
+) -> Path:
+    """Standardized Hive Path Builder."""
+    path = Path(base_dir) / f"content_type={content_type}" / f"bucket={bucket_id}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / filename

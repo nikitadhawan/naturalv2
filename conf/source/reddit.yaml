@@ -12,9 +12,6 @@ stages:
     _target_: naturalv2.sources.reddit.RedditDownloadAndClean
     reddit_rpm: 95
     max_download_workers: null
-    anonymize: False
-    anonymizer_score_threshold: 0.85
-    anonymizer_batch_size: 1000
   treatment_synonyms:
     _target_: naturalv2.sources.stages.SynonymStage
     attribute: treatment

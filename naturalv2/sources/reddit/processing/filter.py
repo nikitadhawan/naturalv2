@@ -6,6 +6,7 @@ from collections.abc import Iterator
 import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.dataset as ds
 
 
 logger = logging.getLogger(__name__)
@@ -83,65 +84,48 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
     return pc.and_kleene(valid_text_mask, ratio_ok)
 
 
-def scan_reddit_chunks(
+def scan_reddit_dataset(
     file_paths: list[str],
     columns: list[str],
     target_subreddits: list[str] | None = None,
-    batch_size: int = 256_000,
+    batch_size: int = 128_000,
 ) -> Iterator[pl.DataFrame]:
-    """Stream Parquet files with minimal memory footprint.
+    """Stream chunks of Reddit data from partitioned dataset."""
 
-    Processes files one at a time using slice + collect to read only the
-    requested rows from disk. Can filter by subreddit at scan time to avoid
-    loading irrelevant data.
-    """
-    for fp in file_paths:
-        try:
-            lf = pl.scan_parquet(fp, hive_partitioning=True)
+    # Define the filter expression
+    filter_expr = None
+    if target_subreddits:
+        # Create a pyarrow expression: subreddit is in [list]
+        filter_expr = ds.field("subreddit").isin(target_subreddits)
 
-            # Get schema and validate columns
-            schema_names = lf.collect_schema().names()
-            valid_cols = [col for col in columns if col in schema_names]
+    # Initialize PyArrow Dataset
+    dataset = ds.dataset(file_paths, format="parquet")
 
-            # Early validation - skip files without required data
-            text_cols = ["title", "initial_post", "report_text"]
-            if "subreddit" not in schema_names:
-                continue
-            if not any(col in valid_cols for col in text_cols):
-                continue
+    # Filter columns to only those that exist in the actual dataset schema
+    # This handles cases where requested columns don't exist in the parquet files
+    available_columns = set(dataset.schema.names)
 
-            lf = lf.select(valid_cols)
+    # Skip files that don't have any text columns
+    # Text columns are: title, initial_post, report_text
+    text_columns = {"title", "initial_post", "report_text"}
+    if not text_columns.intersection(available_columns):
+        return
 
-            # Filter by subreddit at scan time
-            # This uses Parquet predicate pushdown - only matching rows are read from disk
+    filtered_columns = [col for col in columns if col in available_columns]
+    if not filtered_columns:
+        return
 
-            offset = 0
-            while True:
-                try:
-                    # slice() then collect() only materializes the requested slice
-                    chunk = lf.slice(offset, batch_size).collect()
+    # Create a Scanner
+    # This pushes the filter down to the I/O layer.
+    # It will skip row groups where 'subreddit' stats don't match the list.
+    scanner = dataset.scanner(
+        columns=filtered_columns, filter=filter_expr, batch_size=batch_size
+    )
 
-                    if chunk.is_empty():
-                        break
-
-                    if target_subreddits:
-                        filtered_chunk = chunk.filter(
-                            pl.col("subreddit").is_in(target_subreddits)
-                        )
-
-                    if not filtered_chunk.is_empty():
-                        yield filtered_chunk
-
-                    # Exit if we got partial batch (end of file)
-                    if len(chunk) < batch_size:
-                        break
-
-                    offset += batch_size
-
-                except Exception as e:
-                    logger.warning(f"Batch error at offset {offset} in {fp}: {e}")
-                    break
-
-        except Exception as e:
-            logger.warning(f"Cannot process file {fp}: {e}")
-            continue
+    # Stream Batches
+    # to_batches() returns an iterator that keeps its place.
+    # It only decompresses the specific row groups that pass the filter.
+    for batch in scanner.to_batches():
+        if batch.num_rows > 0:
+            # Zero-copy convert to Polars
+            yield pl.from_arrow(batch)

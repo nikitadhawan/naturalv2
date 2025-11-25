@@ -10,6 +10,7 @@ import gc
 import glob
 import json
 import logging
+import multiprocessing as mp
 import os
 import shutil
 import uuid
@@ -26,14 +27,16 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from naturalv2.experiment import Experiment
+from naturalv2.sources.components.helpers import extract_mentions
 from naturalv2.sources.core import CurationContext, SourceStage, StageState
-from naturalv2.sources.reddit.processing.filter import scan_reddit_chunks
+from naturalv2.sources.reddit.processing.filter import scan_reddit_dataset
 from naturalv2.utils import get_experiment_filepath
 
 
 logger = logging.getLogger(__name__)
 
 WORKER_REGISTRY: dict[str, "SubredditContext"] = {}
+_NUM_THREADS_PER_WORKER = 2
 
 
 @dataclass
@@ -62,14 +65,16 @@ class RedditCurateStage(SourceStage):
 
     def __init__(self, *, curation_workers: int | None = None, name: str | None = None):
         super().__init__(name=name)
-        cpu_count: int | None = psutil.cpu_count(logical=True)
+        cpu_count: int = psutil.cpu_count(logical=True) or 1
 
         # Auto-calculate worker count based on available memory
         total_mem_gb = psutil.virtual_memory().total / (1024**3)
-        safe_workers = int((total_mem_gb - 4) / 6)  # Reserve 4GB, 6GB per worker
-        self.workers = curation_workers or max(
-            1, min(cpu_count or safe_workers, safe_workers)
+        mem_workers_limit = int(  # Reserve 4GB; set 3GB per worker
+            (total_mem_gb - 4) / 3
         )
+        cpu_workers_limit = max(1, cpu_count // _NUM_THREADS_PER_WORKER)
+        safe_workers = min(mem_workers_limit, cpu_workers_limit)
+        self.workers = curation_workers or max(1, safe_workers)
 
         self._curation_columns = [
             "subreddit",
@@ -109,8 +114,10 @@ class RedditCurateStage(SourceStage):
         total_counts = defaultdict(int)
 
         # Process batches in parallel
+        num_workers = min(len(batches), self.workers)
         with ProcessPoolExecutor(
-            max_workers=min(len(batches), self.workers),
+            max_workers=num_workers,
+            mp_context=mp.get_context("spawn"),
             initializer=_worker_initializer,
             initargs=(registry_config,),
         ) as pool:
@@ -129,7 +136,7 @@ class RedditCurateStage(SourceStage):
                 for future in tqdm(
                     as_completed(futures),
                     total=len(futures),
-                    desc="Curating experiment datasets",
+                    desc=f"Curating experiment datasets [{num_workers} workers]",
                     leave=False,
                     dynamic_ncols=True,
                 ):
@@ -258,9 +265,20 @@ def _worker_initializer(config: RegistryConfig):
     """Initialize worker process with registry.
 
     Called once per worker."""
+    import pyarrow as pa  # noqa: PLC0415
+
+    # Minimize CPU thrashing by setting only 2 threads per worker for polars
+    # and pyarrow
+    os.environ["POLARS_MAX_THREADS"] = str(_NUM_THREADS_PER_WORKER)
+    os.environ["OMP_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
+    os.environ["MKL_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
+
+    pa.set_cpu_count(_NUM_THREADS_PER_WORKER)
+    pa.set_io_thread_count(_NUM_THREADS_PER_WORKER)
+
     WORKER_REGISTRY.clear()
     WORKER_REGISTRY.update(_build_worker_registry(config))
-    os.environ["POLARS_MAX_THREADS"] = "1"
 
 
 def _build_worker_registry(config: RegistryConfig) -> dict[str, SubredditContext]:
@@ -345,8 +363,8 @@ def _process_batch_task(
 
     # Pass target subreddits to iterator to enable predicate pushdown
     target_subreddits = list(WORKER_REGISTRY.keys())
-    chunk_iterator = scan_reddit_chunks(
-        file_paths, columns, target_subreddits=target_subreddits, batch_size=256_000
+    chunk_iterator = scan_reddit_dataset(
+        file_paths, columns, target_subreddits=target_subreddits, batch_size=128_000
     )
 
     for df_chunk in chunk_iterator:
@@ -412,12 +430,17 @@ def _process_and_write_chunk(
         return
 
     # Term matching with Aho-Corasick
-    match_fn = lambda t: _match_terms(t, ctx.automaton)
+    automaton = ctx.automaton
+
+    def batch_matcher(text_series: pl.Series) -> pl.Series:
+        results = [
+            extract_mentions(text, automaton) if text is not None else []
+            for text in text_series
+        ]
+        return pl.Series(results, dtype=pl.List(pl.String))
 
     df_matches = df_prep.with_columns(
-        pl.col("_normalized_text")
-        .map_elements(match_fn, return_dtype=pl.List(pl.Utf8))
-        .alias("_matches")
+        pl.col("_normalized_text").map_batches(batch_matcher).alias("_matches")
     ).filter(pl.col("_matches").list.len() > 0)
 
     if df_matches.is_empty():
@@ -573,11 +596,6 @@ def _parse_date_column(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
     ).dt.replace_time_zone("UTC")
 
     return df.with_columns(date_expr.alias("_dt"))
-
-
-def _match_terms(text: str, automaton: ahocorasick.Automaton) -> list[str]:
-    """Find all matching terms in text using Aho-Corasick."""
-    return list({val for _, val in automaton.iter(text or "")})
 
 
 def _serialize_nested_columns(df: pl.DataFrame) -> pl.DataFrame:

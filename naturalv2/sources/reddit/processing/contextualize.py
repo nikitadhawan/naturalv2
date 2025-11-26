@@ -5,6 +5,7 @@ This module provides functionality to:
 - Build contextualized datasets from Reddit submissions and comments
 """
 
+import hashlib
 import logging
 import os
 import resource
@@ -58,6 +59,7 @@ def write_to_parquet_partitions(
     existing_data_behavior: Literal[
         "error", "delete_matching", "overwrite_or_ignore"
     ] = "overwrite_or_ignore",
+    use_threads: bool = True,
     run_tag: str | None = None,
 ) -> list[str]:
     """Write a stream of record batches to a hive-partitioned parquet dataset.
@@ -86,6 +88,8 @@ def write_to_parquet_partitions(
         Cap on concurrently open files during write.
     existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, default='overwrite_or_ignore'
         Strategy when output already exists.
+    use_threads : bool, default=True
+        If ``True``, use multiple threads when writing parquet partitions.
     run_tag : str or None, optional
         Optional prefix for generated parquet filenames.
 
@@ -172,6 +176,7 @@ def write_to_parquet_partitions(
         partitioning=PARTITIONING,
         schema=schema,
         file_options=write_opts,
+        use_threads=use_threads,
         max_partitions=max_partitions,
         min_rows_per_group=effective_min_rows,
         max_rows_per_group=effective_max_rows,
@@ -192,13 +197,44 @@ def build_contextualized_dataset(
     run_tag: str = "ctx",
     cleanup_source: bool = False,
 ) -> list[str]:
+    """Build contextualized datasets from Reddit parquet sources.
+
+    Processes Reddit submission and comment parquet files organized by bucket,
+    enriches them with contextual information (author replies, permalinks, etc.),
+    and writes the results to a hive-partitioned parquet dataset.
+
+    Parameters
+    ----------
+    source_dir : str or Path or Sequence[str or Path]
+        Source directory or directories containing bucketed parquet files.
+        Files should be organized with hive partitioning (content_type=* and bucket=*).
+    dest_dir : str or Path
+        Destination directory for the contextualized dataset. Will be created
+        if it doesn't exist.
+    run_tag : str, default='ctx'
+        Prefix tag for generated parquet filenames.
+    cleanup_source : bool, default=False
+        If ``True``, delete source parquet files after successful processing.
+
+    Returns
+    -------
+    list[str]
+        List of full file paths to all parquet files written.
+
+    Notes
+    -----
+    The function processes data bucket by bucket, joining submissions with
+    their associated comments and author replies. Each bucket is written to
+    separate parquet files partitioned by content_type (submissions/comments)
+    and bucket ID.
+    """
     dest_path = Path(dest_dir)
     dest_path.mkdir(parents=True, exist_ok=True)
 
     sources = [source_dir] if isinstance(source_dir, (str, Path)) else list(source_dir)
     bucket_files = _scan_and_group_bucketed_parquet_files(sources)
 
-    files_written = []
+    files_written: list[str] = []
     for bucket_id, file_mapping in tqdm(
         bucket_files.items(),
         desc="Building contextualized dataset",
@@ -206,18 +242,27 @@ def build_contextualized_dataset(
         leave=False,
         dynamic_ncols=True,
     ):
+        files_to_delete = []
         submission_file, comment_file = _process_bucket(
             bucket_id, file_mapping, dest_dir, run_tag
         )
         if submission_file:
             files_written.append(submission_file)
+            files_to_delete.extend(file_mapping["submissions"])
 
         if comment_file:
             files_written.append(comment_file)
+            files_to_delete.extend(file_mapping["comments"])
 
         if cleanup_source:
-            for file_path in file_mapping["submissions"] + file_mapping["comments"]:
-                os.remove(file_path)
+            for file_path in files_to_delete:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to cleanup source file %s: %s", file_path, exc
+                    )
 
     return files_written
 
@@ -225,6 +270,36 @@ def build_contextualized_dataset(
 def _scan_and_group_bucketed_parquet_files(
     source_dirs: list[Path],
 ) -> dict[str, dict[str, list[str]]]:
+    """Scan source directories and group parquet files by bucket and content type.
+
+    Recursively searches for parquet files in the given directories and groups
+    them by bucket ID and content type (submissions or comments) based on
+    hive partition naming conventions in the file paths.
+
+    Parameters
+    ----------
+    source_dirs : list[Path]
+        List of root directories to scan for parquet files.
+
+    Returns
+    -------
+    dict[str, dict[str, list[str]]]
+        Nested dictionary mapping bucket IDs to content type dictionaries.
+        Each content type dictionary maps 'submissions' or 'comments' to
+        a list of file paths. Structure: {bucket_id: {'submissions': [...],
+        'comments': [...]}}.
+
+    Raises
+    ------
+    KeyError
+        If a parquet file is found without required partition keys ('bucket'
+        and 'content_type') in its path.
+
+    Notes
+    -----
+    Expects parquet files to be organized with hive partitioning where the
+    path contains segments like 'bucket=*' and 'content_type=*'.
+    """
     bucket_files = defaultdict(lambda: {"submissions": [], "comments": []})
 
     for root_dir in source_dirs:
@@ -243,11 +318,69 @@ def _scan_and_group_bucketed_parquet_files(
 def _process_bucket(
     bucket_id: str, file_mapping: dict[str, list[str]], dest_dir: Path, run_tag: str
 ) -> tuple[str | None, str | None]:
+    """Process a single bucket of Reddit data into contextualized format.
+
+    Loads submission and comment parquet files for a given bucket, enriches
+    them with contextual information (author replies, permalinks, formatted
+    dates), and writes the results to hive-partitioned parquet files.
+
+    Parameters
+    ----------
+    bucket_id : str
+        Identifier for the bucket being processed.
+    file_mapping : dict[str, list[str]]
+        Dictionary mapping content types to file paths. Expected keys are
+        'submissions' and 'comments', each mapping to a list of parquet
+        file paths.
+    dest_dir : Path
+        Base destination directory for output files.
+    run_tag : str
+        Prefix tag for generated parquet filenames.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Tuple of (submissions_filepath, comments_filepath). Each element is
+        the full path to the written parquet file, or ``None`` if processing
+        failed or no data was available for that content type.
+
+    Notes
+    -----
+    For submissions, this function:
+    - Joins submissions with author replies (comments by the submission author)
+    - Combines selftext with author replies into report_text
+    - Generates permalinks and formatted dates
+
+    For comments, this function:
+    - Filters out comments by the submission author
+    - Includes the original submission's title and selftext as context
+    - Generates permalinks and formatted dates
+
+    Both outputs are sorted by subreddit and timestamp before writing.
+    """
     submissions_files = file_mapping["submissions"]
     comments_files = file_mapping["comments"]
 
     if not submissions_files and not comments_files:
         return None, None
+
+    if not submissions_files and not comments_files:
+        return None, None
+
+    # Generate Unique ID for this specific batch of inputs
+    batch_hash = _compute_input_hash(submissions_files + comments_files)
+    target_filename = f"{run_tag}-{batch_hash}.parquet"
+
+    # Check existence BEFORE processing (for idempotency)
+    submissions_filepath = _get_hive_path(
+        dest_dir, "submissions", bucket_id, target_filename
+    )
+    comments_filepath = _get_hive_path(dest_dir, "comments", bucket_id, target_filename)
+
+    # If both exist, we assume this exact input batch was already processed.
+    # We return the paths so the caller knows they are "done" (and can cleanup source).
+    if submissions_filepath.exists() and comments_filepath.exists():
+        return str(submissions_filepath), str(comments_filepath)
 
     # Scan inputs
     submissions = pl.scan_parquet(
@@ -379,30 +512,64 @@ def _process_bucket(
     }
 
     try:
-        submissions_filepath = _get_hive_path(
-            dest_dir, "submissions", bucket_id, filename=f"{run_tag}-part-0.parquet"
-        )
         submissions_context.sort(["subreddit", "timestamp"]).sink_parquet(
             submissions_filepath, **parquet_options
         )
 
-        comments_filepath = _get_hive_path(
-            dest_dir, "comments", bucket_id, filename=f"{run_tag}-part-0.parquet"
-        )
         comments_context.sort(["subreddit", "timestamp"]).sink_parquet(
             comments_filepath, **parquet_options
         )
     except Exception as exc:
         logger.error("Failed to process bucket %s: %s", bucket_id, exc, exc_info=True)
+
         return None, None
 
     return str(submissions_filepath), str(comments_filepath)
 
 
+def _compute_input_hash(file_paths: list[str]) -> str:
+    """Generate a deterministic short hash based on input file paths."""
+    if not file_paths:
+        return "empty"
+
+    hasher = hashlib.md5()
+    # Sort to ensure order of files doesn't change the hash
+    for path in sorted(file_paths):
+        hasher.update(str(path).encode("utf-8"))
+
+    return hasher.hexdigest()[:12]
+
+
 def _get_hive_path(
     base_dir: Path, content_type: str, bucket_id: str, filename: str
 ) -> Path:
-    """Standardized Hive Path Builder."""
+    """Build a standardized Hive-partitioned file path.
+
+    Constructs a directory structure following Hive partitioning conventions
+    and returns the full path including the filename. Creates parent
+    directories if they don't exist.
+
+    Parameters
+    ----------
+    base_dir : Path
+        Base directory for the partitioned structure.
+    content_type : str
+        Content type partition value (e.g., 'submissions' or 'comments').
+    bucket_id : str
+        Bucket partition value.
+    filename : str
+        Name of the file to place in the partitioned directory.
+
+    Returns
+    -------
+    Path
+        Full path to the file: base_dir/content_type={content_type}/bucket={bucket_id}/filename
+
+    Notes
+    -----
+    The resulting directory structure follows Hive partitioning format:
+    base_dir/content_type={value}/bucket={value}/filename.parquet
+    """
     path = Path(base_dir) / f"content_type={content_type}" / f"bucket={bucket_id}"
     path.mkdir(parents=True, exist_ok=True)
     return path / filename

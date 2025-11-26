@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import psutil
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.processing import (
@@ -49,22 +50,23 @@ class RedditDumpProcessor(SourceStage):
     ) -> "StageState":
         source_dir = self.source_dir(context)
 
-        staging_dir = os.path.join(source_dir, "reddit_dump", "staging")
-        write_to_parquet_partitions(
-            data_stream=self._stream_record_batches(),
-            output_dir=staging_dir,
-            schema=PROCESSED_RECORD_SCHEMA,
-            existing_data_behavior="delete_matching",
-            run_tag=context.experiment_name,
-        )
+        with logging_redirect_tqdm():
+            staging_dir = os.path.join(source_dir, "reddit_dump", "staging")
+            write_to_parquet_partitions(
+                data_stream=self._stream_record_batches(),
+                output_dir=staging_dir,
+                schema=PROCESSED_RECORD_SCHEMA,
+                existing_data_behavior="delete_matching",
+                run_tag=context.experiment_name,
+            )
 
-        final_dir = os.path.join(source_dir, "reddit_dump", "final")
-        _ = build_contextualized_dataset(
-            source_dir=staging_dir,
-            dest_dir=final_dir,
-            run_tag=context.experiment_name,
-            cleanup_source=False,
-        )
+            final_dir = os.path.join(source_dir, "reddit_dump", "final")
+            _ = build_contextualized_dataset(
+                source_dir=staging_dir,
+                dest_dir=final_dir,
+                run_tag=context.experiment_name,
+                cleanup_source=True,
+            )
 
         # Update state
         state.payload = final_dir

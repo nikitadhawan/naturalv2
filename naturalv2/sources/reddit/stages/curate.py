@@ -26,7 +26,10 @@ import pyarrow as pa
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from naturalv2.sources.components.helpers import extract_mentions
+from naturalv2.sources.components.helpers import (
+    build_treatment_automaton,
+    extract_mentions,
+)
 from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.processing.filter import scan_reddit_dataset
 from naturalv2.utils import get_experiment_filepath
@@ -322,10 +325,7 @@ def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditConte
     # Create automaton for each subreddit
     registry: dict[str, _SubredditContext] = {}
     for subreddit, term_map in subreddit_term_map.items():
-        automaton = ahocorasick.Automaton()
-        for term in term_map:
-            automaton.add_word(term, term)
-        automaton.make_automaton()
+        automaton = build_treatment_automaton(list(term_map.keys()))
 
         # Get the date of the most recent experiment for which the subreddit is relevant
         publication_dates = subreddit_publication_dates[subreddit]
@@ -424,7 +424,7 @@ def _process_and_write_chunk(
     )
 
     # Global date filtering
-    # Remove any posts AFTER the most recent publication that of the experiments
+    # Remove any posts AFTER the most recent publication that one of the experiments
     # that are relevant to the subreddit being processed. This means less data
     # for the automaton to try to match on
     if filter_by_date:

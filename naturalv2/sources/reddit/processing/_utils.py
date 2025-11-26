@@ -1,6 +1,7 @@
 """Helpers for processing Reddit data."""
 
 import hashlib
+import resource
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -8,6 +9,19 @@ import pyarrow.compute as pc
 
 BUCKET_COUNT = 1024
 BUCKET_PAD_WIDTH = len(str(BUCKET_COUNT - 1))
+
+
+def get_max_open_files() -> int:
+    """Compute the maximum number of open files, accounting for system overhead.
+
+    Returns
+    -------
+    int
+        95% of the system-level soft ulimit
+    """
+    soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+    return int(soft_limit * 0.95)
 
 
 def ensure_string_array(arr: pa.Array | pa.ChunkedArray, default: str = "") -> pa.Array:

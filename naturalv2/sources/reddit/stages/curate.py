@@ -17,7 +17,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ahocorasick
 import polars as pl
@@ -26,11 +26,15 @@ import pyarrow as pa
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from naturalv2.experiment import Experiment
 from naturalv2.sources.components.helpers import extract_mentions
-from naturalv2.sources.core import CurationContext, SourceStage, StageState
+from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.processing.filter import scan_reddit_dataset
 from naturalv2.utils import get_experiment_filepath
+
+
+if TYPE_CHECKING:
+    from naturalv2.experiment import Experiment
+    from naturalv2.sources.core import CurationContext, StageState
 
 
 logger = logging.getLogger(__name__)
@@ -88,7 +92,9 @@ class RedditCurateStage(SourceStage):
             "author_replies",
         ]
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
+    async def run(
+        self, context: "CurationContext", state: "StageState"
+    ) -> "StageState":
         """Execute parallelized curation."""
         root_dir = state.require_metadata("data_root", stage=self.stage_name)
         study_dir = self.condition_dir(context)
@@ -192,7 +198,7 @@ class RedditCurateStage(SourceStage):
         return state
 
     def _prepare_registry_config(
-        self, context: CurationContext, available_subreddits: list[str]
+        self, context: "CurationContext", available_subreddits: list[str]
     ) -> _RegistryConfig:
         """Convert experiments to serializable configuration."""
         experiments_data = []
@@ -251,7 +257,7 @@ class RedditCurateStage(SourceStage):
                 logger.error("Failed to move %s to %s: %s", src_path, dest_path, exc)
 
     def _get_experiment_save_path(
-        self, context: CurationContext, experiment: Experiment, study_dir: str
+        self, context: "CurationContext", experiment: "Experiment", study_dir: str
     ) -> tuple[str, str]:
         """Generate save path for experiment results."""
         suffix = "" if context.filter_by_date else "_no_date_filter"

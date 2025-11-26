@@ -4,13 +4,12 @@ import os
 import queue
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import psutil
-import pyarrow as pa
 from tqdm import tqdm
 
-from naturalv2.sources.core import CurationContext, SourceStage, StageState
+from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.processing import (
     build_contextualized_dataset,
     write_to_parquet_partitions,
@@ -20,6 +19,11 @@ from naturalv2.sources.reddit.pushshift_archive import (
     iter_bucketed_batches,
 )
 
+
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+    from naturalv2.sources.core import CurationContext, StageState
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,9 @@ class RedditDumpProcessor(SourceStage):
         self.num_workers = num_workers or cpu_count
         self.chunk_size = chunk_size
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
+    async def run(
+        self, context: "CurationContext", state: "StageState"
+    ) -> "StageState":
         source_dir = self.source_dir(context)
 
         staging_dir = os.path.join(source_dir, "reddit_dump", "staging")
@@ -74,7 +80,7 @@ class RedditDumpProcessor(SourceStage):
         )
         return state
 
-    def _stream_record_batches(self) -> Iterator[pa.RecordBatch]:
+    def _stream_record_batches(self) -> Iterator["pa.RecordBatch"]:
         """Yield record batches from one or more Reddit archive sources."""
         normalized_paths = _normalize_paths(self.archive_dir_or_paths)
         zst_files = list(_discover_zst_archives(normalized_paths))

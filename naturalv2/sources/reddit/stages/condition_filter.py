@@ -13,18 +13,18 @@ from aiolimiter import AsyncLimiter
 from tqdm.asyncio import tqdm_asyncio
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from naturalv2.models.lm import APIModel
 from naturalv2.prompts.utils import load_prompt
 from naturalv2.sources.components.llm_extraction import (
     ExtractType,
     extract_curation_info,
 )
-from naturalv2.sources.core import CurationContext, SourceStage, StageState
+from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.api import search_posts_in_subreddit, search_subreddits
 
 
 if TYPE_CHECKING:
-    pass
+    from naturalv2.models.lm import APIModel
+    from naturalv2.sources.core import CurationContext, StageState
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class RedditConditionFilter(SourceStage):
     def __init__(
         self,
         *,
-        llm: APIModel,
+        llm: "APIModel",
         llm_max_concurrency: int = 10,
         reddit_rpm: int = 10,
         subreddit_post_limit: int = 5,
@@ -72,7 +72,9 @@ class RedditConditionFilter(SourceStage):
         self.subreddit_post_limit = subreddit_post_limit
         self.subreddit_post_char_limit = subreddit_post_char_limit
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
+    async def run(
+        self, context: "CurationContext", state: "StageState"
+    ) -> "StageState":
         """Execute subreddit discovery and LLM filtering for conditions.
 
         Parameters

@@ -14,8 +14,8 @@ stages:
     max_download_workers: null
   # process_archive_dump:
   #   _target_: naturalv2.sources.reddit.RedditDumpProcessor
-  #   archive_dir_or_path: ???
-  #   num_workers: null
+  #   archive_dir_or_paths: ??
+  #   num_threads: null
   treatment_synonyms:
     _target_: naturalv2.sources.stages.SynonymStage
     attribute: treatment

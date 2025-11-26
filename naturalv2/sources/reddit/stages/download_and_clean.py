@@ -6,12 +6,13 @@ import os
 from concurrent.futures import as_completed
 from concurrent.futures._base import Future
 from concurrent.futures.thread import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import psutil
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from naturalv2.sources.core import CurationContext, SourceStage, StageState
+from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.api import get_sub_about_info
 from naturalv2.sources.reddit.processing import write_to_parquet_partitions
 from naturalv2.sources.reddit.processing.contextualize import (
@@ -25,6 +26,9 @@ from naturalv2.sources.reddit.pushshift_archive import (
     mark_archive_done,
 )
 
+
+if TYPE_CHECKING:
+    from naturalv2.sources.core import CurationContext, StageState
 
 logger = logging.getLogger(__name__)
 
@@ -57,25 +61,26 @@ class RedditDownloadAndClean(SourceStage):
         """Initialize the stage."""
         super().__init__(name=name)
         self.reddit_rpm = reddit_rpm
-        cpu_count: int | None = psutil.cpu_count(logical=False)
+
+        cpu_count: int = psutil.cpu_count(logical=False) or 2
         if max_download_workers is not None:
-            self.max_download_workers = min(max_download_workers, cpu_count or 2)
+            self.max_download_workers = min(max_download_workers, cpu_count)
         else:
-            # Calculate RAM-based cap: each worker uses ~1 GiB:
+            # Calculate RAM-based cap: each worker uses ~2 GiB:
             #   - Includes decompression window (up to 2 GiB limit, but typically much less)
             #   - 256 MiB chunk buffer + Arrow tables + parquet write buffers
             # Reserve 30% of RAM for OS/other processes
             available_ram_bytes = psutil.virtual_memory().available
             ram_reserved_bytes = int(available_ram_bytes * 0.3)
             ram_usable_bytes = available_ram_bytes - ram_reserved_bytes
-            memory_per_worker_bytes = 1 << 30  # 1 GiB per worker
+            memory_per_worker_bytes = 2 << 30  # 2 GiB per worker
             max_workers_by_ram = max(1, ram_usable_bytes // memory_per_worker_bytes)
 
-            # Default to min(CPU count, RAM-based cap), minimum 4
-            cpu_based = cpu_count or 4
-            self.max_download_workers = min(cpu_based, max_workers_by_ram)
+            self.max_download_workers = min(cpu_count, max_workers_by_ram)
 
-    async def run(self, context: CurationContext, state: StageState) -> StageState:
+    async def run(
+        self, context: "CurationContext", state: "StageState"
+    ) -> "StageState":
         """Download/clean subreddit data and update state with file paths.
 
         Parameters
@@ -109,13 +114,9 @@ class RedditDownloadAndClean(SourceStage):
         source_dir, subs_data_dir = self._get_subs_data_dir(context)
 
         if not relevant_subreddits:
-            logger.error(
-                "%s: no relevant subreddits found for any conditions", self.stage_name
+            raise RuntimeError(
+                f"{self.stage_name}: no relevant subreddits found for any conditions",
             )
-            state.update(
-                available_subreddits=[], data_root=subs_data_dir, source_dir=source_dir
-            )
-            return state
 
         # Filter out subreddits that are not available in the Pushshift archives
         subs_about = await get_sub_about_info(source_dir, self.reddit_rpm)
@@ -147,7 +148,7 @@ class RedditDownloadAndClean(SourceStage):
             source_dir=staging_dir,
             dest_dir=final_dir,
             run_tag=context.experiment_name,
-            cleanup_source=False,
+            cleanup_source=True,
         )
 
         # Update state
@@ -171,6 +172,31 @@ class RedditDownloadAndClean(SourceStage):
         num_dl = max(1, self.max_download_workers // 2)
         num_wr = max(1, self.max_download_workers - num_dl)
 
+        def _writer_worker(
+            zst_archive_path: str, archive_dataset_dir: str
+        ) -> list[str]:
+            """Write a partitioned parquet dataset per archive.
+
+            This is done this way so that it's easy to tell which archive was
+            downloaded and processed completely, so that we skip that in new runs.
+            """
+            files_written = write_to_parquet_partitions(
+                data_stream=iter_bucketed_batches(
+                    zst_archive_path,
+                    use_threads_for_parsing=False,  # using threads at file level
+                ),
+                output_dir=archive_dataset_dir,
+                schema=PROCESSED_RECORD_SCHEMA,
+                existing_data_behavior="delete_matching",
+                use_threads=False,  # turn off pyarrow's internal threading
+            )
+
+            if files_written:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(zst_archive_path)
+
+            return files_written
+
         done: list[str] = []
 
         download_futures: dict[Future, tuple[str, str]] = {}
@@ -189,6 +215,8 @@ class RedditDownloadAndClean(SourceStage):
                     archive_id = f"{subreddit}-{content_type}"
 
                     if is_archive_processed(output_dir, archive_id):
+                        # Skip subreddit-content_type that has already been
+                        # downloaded and processed
                         done.append(archive_id)
                         continue
 
@@ -199,7 +227,7 @@ class RedditDownloadAndClean(SourceStage):
                         dl_executor.submit(
                             download_sub_data, subreddit, content_type, output_dir
                         )
-                    ] = archive_id, archive_dataset_dir
+                    ] = (archive_id, archive_dataset_dir)
 
             for dl_fut in tqdm(
                 as_completed(download_futures),
@@ -220,15 +248,14 @@ class RedditDownloadAndClean(SourceStage):
                     continue
 
                 if zst_archive_path is None:
-                    return []
+                    continue
 
                 write_futures[
                     writer_executor.submit(
-                        write_to_parquet_partitions,
-                        data_stream=iter_bucketed_batches(zst_archive_path),
-                        output_dir=archive_dataset_dir,
-                        schema=PROCESSED_RECORD_SCHEMA,
-                        existing_data_behavior="delete_matching",
+                        _writer_worker,
+                        zst_archive_path,
+                        archive_id,
+                        archive_dataset_dir,
                     )
                 ] = (archive_id, zst_archive_path)
 
@@ -261,12 +288,9 @@ class RedditDownloadAndClean(SourceStage):
                         zst_archive_path,
                     )
 
-                with contextlib.suppress(FileNotFoundError):
-                    os.remove(zst_archive_path)
-
         return done
 
-    def _get_subs_data_dir(self, context: CurationContext) -> tuple[str, str]:
+    def _get_subs_data_dir(self, context: "CurationContext") -> tuple[str, str]:
         """Return the source directory and ensure the ``subs_data`` subdir exists.
 
         Returns
@@ -281,7 +305,7 @@ class RedditDownloadAndClean(SourceStage):
 
 
 def _get_relevant_subreddits(
-    context: CurationContext,
+    context: "CurationContext",
     condition_to_subreddit_map: dict[str, list[str]],
 ) -> set[str]:
     """Collect subreddits relevant to any condition in the experiments.

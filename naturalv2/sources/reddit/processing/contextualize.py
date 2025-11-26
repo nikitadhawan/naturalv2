@@ -19,6 +19,8 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 from tqdm import tqdm
 
+from naturalv2.sources.reddit.processing._utils import get_max_open_files
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ def write_to_parquet_partitions(
     max_partitions: int = 1024,
     min_rows_per_group: int = 128_000,
     max_rows_per_group: int = 256_000,
-    max_open_files: int = 512,
+    max_open_files: int | None = None,
     existing_data_behavior: Literal[
         "error", "delete_matching", "overwrite_or_ignore"
     ] = "overwrite_or_ignore",
@@ -84,8 +86,9 @@ def write_to_parquet_partitions(
         Minimum rows per row group (bounded by ``max_rows_per_group``).
     max_rows_per_group : int, default=256_000
         Maximum rows per row group.
-    max_open_files : int, default=512
-        Cap on concurrently open files during write.
+    max_open_files : int | None, default=None
+        Cap on concurrently open files during write. If ``None``, it will be set
+        to 95% of the soft ulimit of the current system.
     existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, default='overwrite_or_ignore'
         Strategy when output already exists.
     use_threads : bool, default=True
@@ -134,7 +137,6 @@ def write_to_parquet_partitions(
         ("max_partitions", max_partitions),
         ("min_rows_per_group", min_rows_per_group),
         ("max_rows_per_group", max_rows_per_group),
-        ("max_open_files", max_open_files),
     ]:
         if param_value <= 0:
             raise ValueError(f"{param_name} must be a positive integer")
@@ -156,6 +158,8 @@ def write_to_parquet_partitions(
     )
 
     soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if max_open_files is None:
+        max_open_files = get_max_open_files()
 
     written_paths: list[str] = []
 

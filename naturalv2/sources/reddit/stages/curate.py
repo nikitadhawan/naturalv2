@@ -222,7 +222,15 @@ class RedditCurateStage(SourceStage):
             else:
                 publication_date = datetime.max.replace(tzinfo=timezone.utc)
 
-            terms = experiment.get_all_treatment_names_for_source(context.source_name)
+            treatment_names = set(experiment.treatment_names)
+            common_names: set[str] = set()
+            for aliases in experiment.treatment_common_names.get(
+                context.source_name, {}
+            ).values():
+                for alias in aliases:
+                    if len(alias) > 3:  # ignore short common names
+                        common_names.add(alias)
+            terms = list(treatment_names | common_names)
 
             experiments_data.append(
                 {

@@ -85,8 +85,8 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
 
 
 def scan_reddit_dataset(
-    file_paths: list[str],
-    columns: list[str],
+    file_paths: list[str] | str,
+    columns: list[str] | None = None,
     target_subreddits: list[str] | None = None,
     batch_size: int = 128_000,
 ) -> Iterator[pl.DataFrame]:
@@ -105,15 +105,11 @@ def scan_reddit_dataset(
     # This handles cases where requested columns don't exist in the parquet files
     available_columns = set(dataset.schema.names)
 
-    # Skip files that don't have any text columns
-    # Text columns are: title, initial_post, report_text
-    text_columns = {"title", "initial_post", "report_text"}
-    if not text_columns.intersection(available_columns):
-        return
-
-    filtered_columns = [col for col in columns if col in available_columns]
-    if not filtered_columns:
-        return
+    filtered_columns: list[str] | None = None
+    if columns:
+        filtered_columns = [col for col in columns if col in available_columns]
+        if not filtered_columns:
+            return
 
     # Create a Scanner
     # This pushes the filter down to the I/O layer.

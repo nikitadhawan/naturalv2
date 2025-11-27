@@ -200,8 +200,9 @@ class RedditCurateStage(SourceStage):
 
         return state
 
+    @staticmethod
     def _prepare_registry_config(
-        self, context: "CurationContext", available_subreddits: list[str]
+        context: "CurationContext", available_subreddits: list[str]
     ) -> _RegistryConfig:
         """Convert experiments to serializable configuration."""
         experiments_data = []
@@ -248,9 +249,8 @@ class RedditCurateStage(SourceStage):
             filter_by_date=context.filter_by_date,
         )
 
-    def _consolidate_parquet_chunks(
-        self, temp_root: str, nct_id: str, target_path: str
-    ):
+    @staticmethod
+    def _consolidate_parquet_chunks(temp_root: str, nct_id: str, target_path: str):
         """Merge all partial parquet files for an experiment."""
         partials = glob.glob(os.path.join(temp_root, "*", f"{nct_id}_*.parquet"))
 
@@ -267,8 +267,9 @@ class RedditCurateStage(SourceStage):
             except Exception as exc:
                 logger.error("Failed to move %s to %s: %s", src_path, dest_path, exc)
 
+    @staticmethod
     def _get_experiment_save_path(
-        self, context: "CurationContext", experiment: "Experiment", study_dir: str
+        context: "CurationContext", experiment: "Experiment", study_dir: str
     ) -> tuple[str, str]:
         """Generate save path for experiment results."""
         suffix = "" if context.filter_by_date else "_no_date_filter"

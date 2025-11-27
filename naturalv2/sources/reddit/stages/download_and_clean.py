@@ -181,10 +181,7 @@ class RedditDownloadAndClean(SourceStage):
             downloaded and processed completely, so that we skip that in new runs.
             """
             files_written = write_to_parquet_partitions(
-                data_stream=iter_bucketed_batches(
-                    zst_archive_path,
-                    use_threads_for_parsing=False,  # using threads at file level
-                ),
+                data_stream=iter_bucketed_batches(zst_archive_path),
                 output_dir=archive_dataset_dir,
                 schema=PROCESSED_RECORD_SCHEMA,
                 existing_data_behavior="delete_matching",

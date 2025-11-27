@@ -5,6 +5,7 @@ import gc
 import logging
 import os
 from collections.abc import Iterable
+from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -21,7 +22,9 @@ from naturalv2.sources.reddit.processing import (
 from naturalv2.sources.reddit.processing._utils import BUCKET_COUNT, get_max_open_files
 from naturalv2.sources.reddit.pushshift_archive import (
     PROCESSED_RECORD_SCHEMA,
+    is_archive_processed,
     iter_bucketed_batches,
+    mark_archive_done,
 )
 
 
@@ -98,20 +101,26 @@ class RedditDumpProcessor(SourceStage):
             )
 
         with logging_redirect_tqdm():
+            done: list[str] = []
             staging_dir = os.path.join(source_dir, "reddit_dump", "staging")
 
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.num_threads
             ) as executor:
-                futures = {
-                    executor.submit(
-                        self._process_single_file,
-                        path,
-                        staging_dir,
-                        context.experiment_name,
-                    ): path
-                    for path in zst_files
-                }
+                futures: dict[Future, Path] = {}
+                for path in zst_files:
+                    if is_archive_processed(staging_dir, path.stem):
+                        done.append(path.stem)
+                        continue
+
+                    futures[
+                        executor.submit(
+                            self._process_single_file,
+                            path,
+                            staging_dir,
+                            context.experiment_name,
+                        )
+                    ] = path
 
                 for future in tqdm(
                     concurrent.futures.as_completed(futures),
@@ -124,9 +133,18 @@ class RedditDumpProcessor(SourceStage):
                 ):
                     path = futures[future]
                     try:
-                        future.result()
+                        files_written = future.result()
+                        if files_written:
+                            mark_archive_done(staging_dir, path.stem)
                     except Exception as exc:
                         logger.exception("Failed to process %s: %s", path.name, exc)
+
+            if done:
+                logger.info(
+                    "%s: Completed processing of %d subreddit archives",
+                    self.stage_name,
+                    len(done),
+                )
 
             final_dir = os.path.join(source_dir, "reddit_dump", "final")
             _ = build_contextualized_dataset(
@@ -147,7 +165,9 @@ class RedditDumpProcessor(SourceStage):
         )
         return state
 
-    def _process_single_file(self, zst_path: Path, output_dir: str, run_tag: str):
+    def _process_single_file(
+        self, zst_path: Path, output_dir: str, run_tag: str
+    ) -> list[str]:
         """Read, parse and filter ``.zst`` file, and write to parquet partitions."""
         try:
             # Create the iterator for this specific file
@@ -156,7 +176,7 @@ class RedditDumpProcessor(SourceStage):
             )
 
             # Write directly to parquet
-            write_to_parquet_partitions(
+            files_written = write_to_parquet_partitions(
                 data_stream=batch_iter,
                 output_dir=output_dir,
                 schema=PROCESSED_RECORD_SCHEMA,
@@ -166,6 +186,8 @@ class RedditDumpProcessor(SourceStage):
         finally:
             gc.collect()
             pa.default_memory_pool().release_unused()
+
+        return files_written
 
 
 def _normalize_paths(dir_or_file_path: str | Path | Sequence[str | Path]) -> list[Path]:

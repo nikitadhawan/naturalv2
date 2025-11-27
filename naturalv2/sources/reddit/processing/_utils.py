@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 
-BUCKET_COUNT = 1024
+BUCKET_COUNT = 256
 BUCKET_PAD_WIDTH = len(str(BUCKET_COUNT - 1))
 
 

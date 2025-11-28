@@ -29,6 +29,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from naturalv2.sources.components.helpers import (
     build_treatment_automaton,
     extract_mentions,
+    iter_canonical_variations,
     normalize_text_for_matching,
 )
 from naturalv2.sources.core import SourceStage
@@ -330,7 +331,8 @@ def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditConte
         for subreddit in relevant_subreddits:
             subreddit_publication_dates[subreddit][nct_id] = publication_datetime
             for term in terms:
-                subreddit_term_map[subreddit][term.lower()].add(nct_id)
+                for canonical_term in iter_canonical_variations(term):
+                    subreddit_term_map[subreddit][canonical_term].add(nct_id)
 
     # Create automaton for each subreddit
     registry: dict[str, _SubredditContext] = {}

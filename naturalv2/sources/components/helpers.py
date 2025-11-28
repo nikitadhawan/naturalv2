@@ -169,6 +169,42 @@ def normalize_text_for_matching(text: str) -> str:
     return _RE_LETTER_TO_NUM.sub(" ", normalized)
 
 
+def iter_canonical_variations(text: str) -> list[str]:
+    """Generate all canonical variations for a single treatment term.
+
+    This encapsulates the logic for normalization, connector collapsing,
+    and parenthetical stripping so it can be shared between the automaton
+    builder and the registry builder.
+    """
+    variations = set()
+    normalised_text = normalize_text_for_matching(text)
+
+    if not normalised_text:
+        return []
+
+    # Replace runs of connector punctuation with a single space so variants like
+    # "sandoz-topiramate" and "Sandoz Topiramate" match the same alias
+    collapsed_full = " ".join(
+        token for token in CONNECTOR_SPLIT.split(normalised_text) if token
+    )
+    if collapsed_full:
+        variations.add(collapsed_full)
+
+    # Also keep a version without trailing qualifiers in parentheses, because posts
+    # often drop the parenthetical note
+    stripped_text = PAREN_STRIP.sub(" ", normalised_text)
+    stripped_text = re.sub(r"\s+", " ", stripped_text).strip(" -_/+,;:")
+
+    if stripped_text and stripped_text != normalised_text:
+        collapsed_stripped = " ".join(
+            token for token in CONNECTOR_SPLIT.split(stripped_text) if token
+        )
+        if collapsed_stripped:
+            variations.add(collapsed_stripped)
+
+    return list(variations)
+
+
 def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
     """Build an Aho–Corasick automaton over normalised treatment aliases.
 
@@ -183,36 +219,13 @@ def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
         Automaton that can be iterated to find every alias occurrence in one
         pass over canonicalised text.
     """
-    canonical_aliases: set[str] = set()
-
-    for alias in aliases:
-        normalised_alias = normalize_text_for_matching(alias)
-        if not normalised_alias:
-            continue  # Empty or whitespace-only alias
-
-        # Replace runs of connector punctuation with a single space so
-        # variants like "sandoz-topiramate" and "Sandoz Topiramate" match
-        # the same alias
-        collapsed_alias = " ".join(
-            token for token in CONNECTOR_SPLIT.split(normalised_alias) if token
-        )
-        if collapsed_alias:
-            canonical_aliases.add(collapsed_alias)
-
-        # Also keep a version without trailing qualifiers in parentheses,
-        # because posts often drop the parenthetical note
-        stripped_alias = PAREN_STRIP.sub(" ", normalised_alias)
-        stripped_alias = re.sub(r"\s+", " ", stripped_alias).strip(" -_/+,;:")
-        if stripped_alias and stripped_alias != normalised_alias:
-            collapsed_stripped_alias = " ".join(
-                token for token in CONNECTOR_SPLIT.split(stripped_alias) if token
-            )
-            if collapsed_stripped_alias:
-                canonical_aliases.add(collapsed_stripped_alias)
-
     automaton = ahocorasick.Automaton()
-    for canonical_alias in sorted(canonical_aliases):
-        automaton.add_word(canonical_alias, canonical_alias)
+
+    # Use the shared iterator to ensure consistency
+    for alias in aliases:
+        for canonical_alias in iter_canonical_variations(alias):
+            # Map the pattern -> canonical form
+            automaton.add_word(canonical_alias, canonical_alias)
 
     automaton.make_automaton()
     return automaton
@@ -291,38 +304,16 @@ def extract_mentions(text: str, automaton: ahocorasick.Automaton) -> list[str]:
     list[str]
         A list of mentions found in the text.
     """
-    # Collapse punctuation connectors to spaces so aliases match regardless
-    # of hyphens/underscores
-    canonical_text, canonical_to_original = canonicalize_reports_for_matching(text)
+    canonical_text, _ = canonicalize_reports_for_matching(text)
     if not canonical_text:
         return []
 
-    found_mentions: list[str] = []
-    emitted_mentions: set[str] = set()  # For quick deduplication
+    found_mentions: set[str] = set()
 
-    for end_index, matched_alias in automaton.iter(canonical_text):
-        start_index = end_index - len(matched_alias) + 1
-        if start_index < 0:
-            # Safety guard in case the automaton reports an unexpected position
-            continue
-
-        # Translate the canonical span back to the original text indices
-        original_start = canonical_to_original[start_index]
-        original_end = canonical_to_original[end_index] + 1
-
-        # Grab the exact substring from the original text
-        mention_text = text[original_start:original_end]
-
-        # Look right after the alias for an optional qualifier/dose string
-        # and include it
-        dose_tail = _DOSE_TAIL_REGEX.match(text[original_end:])
-        if dose_tail:
-            mention_text += dose_tail.group(0)
-
-        cleaned_mention = mention_text.strip()
-        if cleaned_mention and cleaned_mention not in emitted_mentions:
-            emitted_mentions.add(cleaned_mention)
-            found_mentions.append(cleaned_mention)
+    # .iter() returns (end_index, value).
+    # In build_treatment_automaton, we set 'value' to be the canonical_alias.
+    for _, canonical_alias in automaton.iter(canonical_text):
+        found_mentions.add(canonical_alias)
 
     return sorted(found_mentions)
 

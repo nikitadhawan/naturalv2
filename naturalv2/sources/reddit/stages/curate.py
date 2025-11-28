@@ -29,6 +29,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from naturalv2.sources.components.helpers import (
     build_treatment_automaton,
     extract_mentions,
+    normalize_text_for_matching,
 )
 from naturalv2.sources.core import SourceStage
 from naturalv2.sources.reddit.processing.filter import scan_reddit_dataset
@@ -428,7 +429,7 @@ def _process_and_write_chunk(
 
     df_prep = df.with_columns(
         pl.concat_str(txt_cols, separator=" ", ignore_nulls=True)
-        .str.to_lowercase()
+        .map_elements(normalize_text_for_matching, return_dtype=pl.String)
         .alias("_normalized_text")
     )
 

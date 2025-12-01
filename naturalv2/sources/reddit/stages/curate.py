@@ -429,7 +429,6 @@ def _process_batch_task(
     try:
         for df_chunk in chunk_iterator:
             try:
-                batch_id = uuid.uuid4().hex[:8]
                 for sub_name, sub_df in df_chunk.group_by("subreddit"):
                     normalized_sub_name = (
                         sub_name[0] if isinstance(sub_name, tuple) else sub_name
@@ -446,7 +445,11 @@ def _process_batch_task(
                         if matches_df is not None and not matches_df.is_empty():
                             # Write immediately to the open file handle
                             _stream_to_disk(
-                                matches_df, writers, worker_out_dir, counts, batch_id
+                                matches_df,
+                                writers,
+                                worker_out_dir,
+                                counts,
+                                batch_id[:8],
                             )
 
                 # Memory cleanup after each chunk

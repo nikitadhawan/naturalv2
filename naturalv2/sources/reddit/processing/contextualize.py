@@ -438,18 +438,44 @@ def _process_bucket(
         .agg(pl.col("body").alias("replies"))
     )
 
-    # Contextualize submissions
-    submissions_context = submissions.join(
+    # Create the enriched text column
+    submissions_enriched = submissions.join(
         author_replies, left_on="id", right_on="post_id", how="left"
     ).select(
+        [
+            pl.col("id").alias("post_id"),
+            pl.col("author"),
+            pl.col("subreddit"),
+            pl.col("title"),
+            pl.col("score"),
+            pl.col("timestamp"),
+            pl.col("bucket"),
+            pl.col("selftext"),
+            pl.col("replies"),
+            pl.when(
+                pl.col("replies").is_not_null().and_(pl.col("replies").list.len() > 0)
+            )
+            .then(
+                pl.col("selftext").fill_null("")
+                + pl.lit(
+                    "\n\nThe original poster also replied with the following comments in the thread:"
+                )
+                + pl.col("replies")
+                .list.eval(pl.lit("\n> ") + pl.element())
+                .list.join("")
+            )
+            .otherwise(pl.col("selftext").fill_null(""))
+            .alias("enriched_text"),
+        ]
+    )
+
+    # Contextualize Submissions
+    submissions_context = submissions_enriched.select(
         [
             pl.col("subreddit"),
             pl.col("title"),
             pl.lit("").alias("initial_post"),
-            pl.when(pl.col("replies").is_not_null())
-            .then(pl.col("selftext") + "\n\n" + pl.col("replies").list.join("\n"))
-            .otherwise(pl.col("selftext"))
-            .alias("report_text"),
+            pl.col("enriched_text").alias("report_text"),
             pl.lit("submission").alias("report_type"),
             pl.col("score"),
             pl.from_epoch("timestamp", time_unit="s")
@@ -459,7 +485,7 @@ def _process_bucket(
                 pl.lit("/r/")
                 + pl.col("subreddit")
                 + pl.lit("/comments/")
-                + pl.col("id")
+                + pl.col("post_id")
                 + pl.lit("/")
                 + pl.col("title").str.to_lowercase().str.replace_all(r"[^a-z0-9]+", "_")
                 + pl.lit("/")
@@ -471,9 +497,10 @@ def _process_bucket(
         ]
     )
 
-    # Contextualize comments
+    # Contextualize Comments
+    # Join against 'submissions_enriched'
     comments_context = (
-        comments.join(submissions, on="post_id", how="left", suffix="_sub")
+        comments.join(submissions_enriched, on="post_id", how="left", suffix="_sub")
         .filter(
             pl.col("author_sub").is_null()
             | (
@@ -484,7 +511,8 @@ def _process_bucket(
         .select(
             pl.col("subreddit"),
             pl.col("title"),
-            pl.col("selftext").alias("initial_post"),
+            # Use 'enriched_text' as initial_post to match Code A
+            pl.col("enriched_text").alias("initial_post"),
             pl.col("body").alias("report_text"),
             pl.lit("comment").alias("report_type"),
             pl.col("score"),

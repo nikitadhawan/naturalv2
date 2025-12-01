@@ -368,9 +368,6 @@ def _process_bucket(
     if not submissions_files and not comments_files:
         return None, None
 
-    if not submissions_files and not comments_files:
-        return None, None
-
     # Generate Unique ID for this specific batch of inputs
     batch_hash = _compute_input_hash(submissions_files + comments_files)
     target_filename = f"{run_tag}-{batch_hash}.parquet"

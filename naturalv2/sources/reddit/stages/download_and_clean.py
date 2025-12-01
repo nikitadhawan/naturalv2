@@ -251,7 +251,6 @@ class RedditDownloadAndClean(SourceStage):
                     writer_executor.submit(
                         _writer_worker,
                         zst_archive_path,
-                        archive_id,
                         archive_dataset_dir,
                     )
                 ] = (archive_id, zst_archive_path)
@@ -272,8 +271,12 @@ class RedditDownloadAndClean(SourceStage):
                     written_files = wr_fut.result()
                 except Exception:
                     logging.error(
-                        "%s: Write failed for %s", self.stage_name, archive_id
+                        "%s: Write failed for %s",
+                        self.stage_name,
+                        archive_id,
+                        exc_info=True,
                     )
+                    written_files = None
 
                 if written_files:
                     mark_archive_done(output_dir, archive_id)

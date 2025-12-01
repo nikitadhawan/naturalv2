@@ -23,6 +23,7 @@ import ahocorasick
 import polars as pl
 import psutil
 import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -67,23 +68,48 @@ class _SubredditContext:
     term_to_experiments: dict[str, set[str]]
     experiment_publication_dates: dict[str, datetime]
     global_max_date: datetime
+    # Pre-calculated map of NCT_ID -> [List of valid terms]
+    experiment_to_terms: dict[str, list[str]]
 
 
 class RedditCurateStage(SourceStage):
-    """Parallelized Reddit curation stage."""
+    """Reddit curation stage.
 
-    def __init__(self, *, curation_workers: int | None = None, name: str | None = None):
+    Parameters
+    ----------
+    num_workers : int | None, optional, default=None
+        The number of workers to use to curate experiment data in parallel.
+        If ``None``, a safe default will be set based on the available memory
+        and CPUs.
+    max_files_per_worker : int, default=20
+        The maximum number of parquet files processed by one worker.
+    batch_size : int, default=32_000
+        The number of rows when scanning subreddits from parquet partitions.
+    name : str | None, optional
+        Optional explicit stage name; defaults to the class name.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_workers: int | None = None,
+        max_files_per_worker: int = 20,
+        batch_size: int = 32_000,
+        name: str | None = None,
+    ):
         super().__init__(name=name)
         cpu_count: int = psutil.cpu_count(logical=True) or 1
 
         # Auto-calculate worker count based on available memory
-        total_mem_gb = psutil.virtual_memory().total / (1024**3)
-        mem_workers_limit = int(  # Reserve 4GB; set 3GB per worker
-            (total_mem_gb - 4) / 3
+        total_mem_gb = psutil.virtual_memory().available / (1024**3)
+        mem_workers_limit = int(  # Reserve 4GB; set 2GB per worker
+            (total_mem_gb - 4) / 6
         )
         cpu_workers_limit = max(1, cpu_count // _NUM_THREADS_PER_WORKER)
         safe_workers = min(mem_workers_limit, cpu_workers_limit)
-        self.workers = curation_workers or max(1, safe_workers)
+        self.num_workers = num_workers or max(1, safe_workers)
+        self.max_files_per_worker = max_files_per_worker
+        self.batch_size = batch_size
 
         self._curation_columns = [
             "subreddit",
@@ -110,6 +136,7 @@ class RedditCurateStage(SourceStage):
         # Prepare configuration
         available_subreddits = state.metadata.get("available_subreddits", [])
         registry_config = self._prepare_registry_config(context, available_subreddits)
+        registry = _build_worker_registry(registry_config)
 
         # Discover Parquet files
         # We do this manually, instead of letting polars use hive partitioning scheme,
@@ -118,7 +145,9 @@ class RedditCurateStage(SourceStage):
         logger.info(f"Found {len(all_files)} Parquet files")
 
         # Create batches
-        batch_size = max(1, min(len(all_files) // self.workers, 20))
+        batch_size = max(
+            1, min(len(all_files) // self.num_workers, self.max_files_per_worker)
+        )
         batches = [
             all_files[i : i + batch_size] for i in range(0, len(all_files), batch_size)
         ]
@@ -126,18 +155,19 @@ class RedditCurateStage(SourceStage):
         total_counts = defaultdict(int)
 
         # Process batches in parallel
-        num_workers = min(len(batches), self.workers)
+        num_workers = min(len(batches), self.num_workers)
         with ProcessPoolExecutor(
             max_workers=num_workers,
             mp_context=mp.get_context("spawn"),
             initializer=_worker_initializer,
-            initargs=(registry_config,),
+            initargs=(registry,),
         ) as pool:
             futures = [
                 pool.submit(
                     _process_batch_task,
                     batch,
                     temp_dir,
+                    batch_size=self.batch_size,
                     columns=self._curation_columns,
                     filter_by_date=context.filter_by_date,
                 )
@@ -281,7 +311,7 @@ class RedditCurateStage(SourceStage):
         return path, f"{context.source_name}{suffix}"
 
 
-def _worker_initializer(config: _RegistryConfig):
+def _worker_initializer(registry: dict[str, _SubredditContext]) -> None:
     """Initialize worker process with registry.
 
     Called once per worker."""
@@ -297,7 +327,7 @@ def _worker_initializer(config: _RegistryConfig):
     pa.set_io_thread_count(_NUM_THREADS_PER_WORKER)
 
     _WORKER_REGISTRY.clear()
-    _WORKER_REGISTRY.update(_build_worker_registry(config))
+    _WORKER_REGISTRY.update(registry)
 
 
 def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditContext]:
@@ -346,12 +376,19 @@ def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditConte
             default=datetime.max.replace(tzinfo=timezone.utc),
         )
 
+        # Invert the term map to create (NCT -> Valid Terms)
+        exp_to_terms = defaultdict(list)
+        for term, nct_ids in term_map.items():
+            for nct_id in nct_ids:
+                exp_to_terms[nct_id].append(term)
+
         registry[subreddit] = _SubredditContext(
             name=subreddit,
             automaton=automaton,
             term_to_experiments=term_map,
             experiment_publication_dates=publication_dates,
             global_max_date=global_max_datetime,
+            experiment_to_terms=exp_to_terms,
         )
 
     return registry
@@ -366,6 +403,7 @@ def _process_batch_task(
     file_paths: list[str],
     temp_output_dir: str,
     columns: list[str],
+    batch_size: int,
     filter_by_date: bool,
 ) -> dict[str, int]:
     """Process a batch of files and write results to temp directory."""
@@ -378,56 +416,65 @@ def _process_batch_task(
 
     counts = defaultdict(int)
 
+    # Keep open file handles for this batch
+    # Dict[nct_id, pyarrow.parquet.ParquetWriter]
+    writers: dict[str, pq.ParquetWriter] = {}
+
     # Pass target subreddits to iterator to enable predicate pushdown
     target_subreddits = list(_WORKER_REGISTRY.keys())
     chunk_iterator = scan_reddit_dataset(
-        file_paths, columns, target_subreddits=target_subreddits, batch_size=128_000
+        file_paths, columns, target_subreddits=target_subreddits, batch_size=batch_size
     )
 
-    for chunk_idx, df_chunk in enumerate(chunk_iterator):
-        try:
-            for sub_name, sub_df in df_chunk.group_by("subreddit"):
-                normalized_sub_name = (
-                    sub_name[0] if isinstance(sub_name, tuple) else sub_name
-                )
-
-                # Case-insensitive subreddit lookup
-                ctx = _WORKER_REGISTRY.get(normalized_sub_name) or _WORKER_REGISTRY.get(
-                    normalized_sub_name.lower()
-                )
-
-                if ctx:
-                    _process_and_write_chunk(
-                        ctx, sub_df, worker_out_dir, filter_by_date, counts, chunk_idx
+    try:
+        for df_chunk in chunk_iterator:
+            try:
+                batch_id = uuid.uuid4().hex[:8]
+                for sub_name, sub_df in df_chunk.group_by("subreddit"):
+                    normalized_sub_name = (
+                        sub_name[0] if isinstance(sub_name, tuple) else sub_name
                     )
 
-            # Memory cleanup after each chunk
-            del df_chunk
+                    # Case-insensitive subreddit lookup
+                    ctx = _WORKER_REGISTRY.get(
+                        normalized_sub_name
+                    ) or _WORKER_REGISTRY.get(normalized_sub_name.lower())
 
-        except Exception as e:
-            logger.error(f"Worker error in batch {batch_id}: {e}")
-        finally:
-            # Force garbage collection more frequently
-            gc.collect()
+                    if ctx:
+                        matches_df = _process_chunk(ctx, sub_df, filter_by_date)
+
+                        if matches_df is not None and not matches_df.is_empty():
+                            # Write immediately to the open file handle
+                            _stream_to_disk(
+                                matches_df, writers, worker_out_dir, counts, batch_id
+                            )
+
+                # Memory cleanup after each chunk
+                del df_chunk
+
+            except Exception as e:
+                logger.error("Worker error in batch %s: %s", batch_id, e)
+            finally:
+                # Force garbage collection more frequently
+                gc.collect()
+    finally:
+        # Close all open writers when batch finishes
+        for writer in writers.values():
+            writer.close()
 
     return dict(counts)
 
 
-def _process_and_write_chunk(
-    ctx: _SubredditContext,
-    df: pl.DataFrame,
-    out_dir: str,
-    filter_by_date: bool,
-    counts: dict,
-    chunk_idx: int,
-):
+def _process_chunk(
+    ctx: _SubredditContext, df: pl.DataFrame, filter_by_date: bool
+) -> pl.DataFrame | None:
     """Process a subreddit chunk: match terms, filter, and write results."""
     # Prepare text for matching
     txt_cols = [
         col for col in ["title", "initial_post", "report_text"] if col in df.columns
     ]
     if not txt_cols:
-        return
+        return None
 
     df_prep = df.with_columns(
         pl.concat_str(txt_cols, separator=" ", ignore_nulls=True)
@@ -445,7 +492,7 @@ def _process_and_write_chunk(
         df_prep = df_prep.filter(pl.col("_dt") <= ctx.global_max_date)
 
     if df_prep.is_empty():
-        return
+        return None
 
     # Term matching with Aho-Corasick
     automaton = ctx.automaton
@@ -461,8 +508,10 @@ def _process_and_write_chunk(
         pl.col("_normalized_text").map_batches(batch_matcher).alias("_matches")
     ).filter(pl.col("_matches").list.len() > 0)
 
+    del df_prep
+
     if df_matches.is_empty():
-        return
+        return None
 
     df_matches = df_matches.drop("_normalized_text").with_columns(
         pl.col("_matches").alias("treatments_mentioned")
@@ -470,6 +519,8 @@ def _process_and_write_chunk(
 
     # Explode matches and join with experiments
     df_exploded = df_matches.explode("_matches")
+
+    del df_matches
 
     lookup_data = [
         (term, nct_id)
@@ -479,6 +530,27 @@ def _process_and_write_chunk(
     df_lookup = pl.DataFrame(lookup_data, schema=["_matches", "nct_id"], orient="row")
 
     df_final = df_exploded.join(df_lookup, on="_matches", how="inner")
+
+    # Create a lightweight DataFrame defining valid terms per Experiment
+    valid_terms_data = [(nct, terms) for nct, terms in ctx.experiment_to_terms.items()]
+    df_valid_terms = pl.DataFrame(
+        valid_terms_data,
+        schema={"nct_id": pl.String, "valid_terms": pl.List(pl.String)},
+        orient="row",
+    )
+
+    # Join valid terms to the main result
+    # We join on 'nct_id' so every row knows what terms are allowed for its
+    # assigned experiment
+    df_final = df_final.join(df_valid_terms, on="nct_id", how="left")
+
+    # Intersect the found terms with valid terms
+    # "treatments_mentioned" = ["Advil", "Tylenol"]
+    # "valid_terms" (for Exp A) = ["Advil", "Motrin"]
+    # Result = ["Advil"]
+    df_final = df_final.with_columns(
+        pl.col("treatments_mentioned").list.set_intersection(pl.col("valid_terms"))
+    ).drop("valid_terms")
 
     # Experiment-specific date filter
     # Now we apply the date filter on the experiment-level, using the publication
@@ -500,7 +572,7 @@ def _process_and_write_chunk(
         df_final = df_final.unique(subset=["nct_id", "permalink"])
 
     if df_final.is_empty():
-        return
+        return None
 
     # Build markdown report
     report_expr = _build_report_expr(df_final.columns)
@@ -514,22 +586,46 @@ def _process_and_write_chunk(
     if cols_to_drop:
         df_final = df_final.drop(cols_to_drop)
 
-    # Write to disk, partitioned by experiment
-    for key, part_df in df_final.partition_by("nct_id", as_dict=True).items():
+    return df_final
+
+
+def _stream_to_disk(
+    df: pl.DataFrame, writers: dict, out_dir: str, counts: dict, batch_id: str
+) -> None:
+    """Write a chunk to the appropriate ParquetWriter, creating it if needed."""
+
+    # Group by NCT ID so we route data to the correct file
+    for key, part_df in df.partition_by("nct_id", as_dict=True).items():
         nct_id = key[0] if isinstance(key, tuple) else key
+
+        # Remove nct_id column (it's in the filename)
         payload_df = part_df.drop("nct_id") if "nct_id" in part_df.columns else part_df
 
-        # Generate a unique filename for this chunk
-        # Format: {NCT_ID}_part_{UUID}_{CHUNK_INDEX}.parquet
-        # This ensures no collisions when we move files later
-        unique_suffix = f"{uuid.uuid4().hex[:8]}_{chunk_idx}"
-        filename = f"{nct_id}_part_{unique_suffix}.parquet"
-        save_path = os.path.join(out_dir, filename)
+        # Convert to Arrow Table
+        table = payload_df.to_arrow()
 
-        # Write Parquet with compression
-        payload_df.write_parquet(save_path, compression="lz4")
+        if nct_id not in writers:
+            # Initialize Writer on first contact
+            filename = f"{nct_id}_{batch_id}.parquet"
+            save_path = os.path.join(out_dir, filename)
 
-        counts[nct_id] += len(payload_df)
+            # Use schema from the first chunk
+            writers[nct_id] = pq.ParquetWriter(
+                save_path, table.schema, compression="lz4"
+            )
+
+        # Check for schema mismatch (safe-guard)
+        # If columns are missing/added, this would normally crash.
+        # Since we use consistent input columns, this is usually fine.
+        try:
+            writers[nct_id].write_table(table)
+            counts[nct_id] += len(payload_df)
+        except Exception:
+            # Fallback: Cast to existing schema if there's a slight mismatch (e.g. null vs string)
+            # This is slower but safer
+            safe_table = table.cast(writers[nct_id].schema)
+            writers[nct_id].write_table(safe_table)
+            counts[nct_id] += len(payload_df)
 
 
 # -----------------------------------------------------------------------------

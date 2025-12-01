@@ -224,6 +224,9 @@ def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
     # Use the shared iterator to ensure consistency
     for alias in aliases:
         for canonical_alias in iter_canonical_variations(alias):
+            if len(canonical_alias) <= 3:  # Drop short canonical forms
+                continue
+
             # Map the pattern -> canonical form
             automaton.add_word(canonical_alias, canonical_alias)
 

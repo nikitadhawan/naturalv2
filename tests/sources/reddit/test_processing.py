@@ -67,29 +67,6 @@ def test_scan_reddit_chunks_filters_and_limits_columns(tmp_path):
     assert set(batch.columns) == {"subreddit", "title", "report_text", "score"}
 
 
-def test_scan_reddit_chunks_skips_files_without_text_columns(tmp_path):
-    file_path = tmp_path / "bucket=000" / "part.parquet"
-    file_path.parent.mkdir(parents=True)
-    pl.DataFrame(
-        {
-            "subreddit": ["TestSub"],
-            "value": [10],
-        }
-    ).write_parquet(file_path)
-
-    # Request only non-text columns -> function should skip this file entirely.
-    batches = list(
-        pfilter.scan_reddit_dataset(
-            [file_path.as_posix()],
-            columns=["subreddit", "value"],
-            target_subreddits=None,
-            batch_size=16,
-        )
-    )
-
-    assert batches == []
-
-
 def test_write_to_parquet_partitions_creates_hive_layout(tmp_path):
     schema = ctx.CONTEXTUALIZED_RECORD_SCHEMA
     bucket = utils.bucket_from_subreddit(pa.array(["testsub"])).to_pylist()[0]

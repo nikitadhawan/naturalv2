@@ -9,7 +9,6 @@ Architecture:
 import gc
 import glob
 import logging
-import multiprocessing as mp
 import os
 import shutil
 import uuid
@@ -21,20 +20,36 @@ from typing import TYPE_CHECKING, Any
 
 import ahocorasick
 import polars as pl
-import psutil
-import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from naturalv2.sources.components.helpers import (
+    CONNECTOR_CHAR_SET,
+    CONNECTOR_SPLIT,
+    POST_NFKC_TRANSLATION_TABLE,
+    PRE_NFKC_TRANSLATION_TABLE,
     build_treatment_automaton,
-    extract_mentions,
     iter_canonical_variations,
-    normalize_text_for_matching,
 )
 from naturalv2.sources.core import SourceStage
-from naturalv2.sources.reddit.processing.filter import scan_reddit_dataset
+from naturalv2.sources.reddit.processing._utils import (
+    get_default_num_workers,
+    get_tqdm_position,
+    release_memory,
+)
+from naturalv2.sources.reddit.processing._utils import (
+    worker_initializer as common_worker_initializer,
+)
+from naturalv2.sources.reddit.processing.contextualize import (
+    CONTEXTUALIZED_RECORD_SCHEMA,
+    PARTITIONING,
+)
+from naturalv2.sources.reddit.processing.filter import (
+    get_subreddit_filter_expr,
+    scan_reddit_dataset,
+)
 from naturalv2.utils import get_experiment_filepath
 
 
@@ -45,8 +60,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_WORKER_REGISTRY: dict[str, "_SubredditContext"] = {}
 _NUM_THREADS_PER_WORKER = 2
+_WORKER_REGISTRY: dict[str, "_SubredditContext"] = {}
 
 
 @dataclass
@@ -81,9 +96,7 @@ class RedditCurateStage(SourceStage):
         The number of workers to use to curate experiment data in parallel.
         If ``None``, a safe default will be set based on the available memory
         and CPUs.
-    max_files_per_worker : int, default=20
-        The maximum number of parquet files processed by one worker.
-    batch_size : int, default=32_000
+    batch_size : int, default=16_384
         The number of rows when scanning subreddits from parquet partitions.
     name : str | None, optional
         Optional explicit stage name; defaults to the class name.
@@ -93,22 +106,14 @@ class RedditCurateStage(SourceStage):
         self,
         *,
         num_workers: int | None = None,
-        max_files_per_worker: int = 20,
-        batch_size: int = 32_000,
+        batch_size: int = 16_384,
         name: str | None = None,
-    ):
+    ) -> None:
         super().__init__(name=name)
-        cpu_count: int = psutil.cpu_count(logical=True) or 1
 
-        # Auto-calculate worker count based on available memory
-        total_mem_gb = psutil.virtual_memory().available / (1024**3)
-        mem_workers_limit = int(  # Reserve 4GB; set 2GB per worker
-            (total_mem_gb - 4) / 6
+        self.num_workers = num_workers or get_default_num_workers(
+            mem_gb_per_worker=8, threads_per_worker=_NUM_THREADS_PER_WORKER
         )
-        cpu_workers_limit = max(1, cpu_count // _NUM_THREADS_PER_WORKER)
-        safe_workers = min(mem_workers_limit, cpu_workers_limit)
-        self.num_workers = num_workers or max(1, safe_workers)
-        self.max_files_per_worker = max_files_per_worker
         self.batch_size = batch_size
 
         self._curation_columns = [
@@ -133,46 +138,50 @@ class RedditCurateStage(SourceStage):
         temp_dir = os.path.join(study_dir, f"temp_curation_{uuid.uuid4().hex}")
         os.makedirs(temp_dir, exist_ok=True)
 
-        # Prepare configuration
+        # Prepare registry
         available_subreddits = state.metadata.get("available_subreddits", [])
         registry_config = self._prepare_registry_config(context, available_subreddits)
-        registry = _build_worker_registry(registry_config)
+        registry = _build_registry(registry_config)
 
-        # Discover Parquet files
-        # We do this manually, instead of letting polars use hive partitioning scheme,
-        # so that we can distribute parquet files to different workers
-        all_files = glob.glob(os.path.join(root_dir, "**", "*.parquet"), recursive=True)
-        logger.info(f"Found {len(all_files)} Parquet files")
-
-        # Create batches
-        batch_size = max(
-            1, min(len(all_files) // self.num_workers, self.max_files_per_worker)
+        # Create pyarrow dataset for automatic file discovery
+        dataset = ds.dataset(
+            root_dir,
+            schema=CONTEXTUALIZED_RECORD_SCHEMA,
+            format="parquet",
+            partitioning=PARTITIONING,
         )
-        batches = [
-            all_files[i : i + batch_size] for i in range(0, len(all_files), batch_size)
-        ]
 
         total_counts = defaultdict(int)
 
-        # Process batches in parallel
-        num_workers = min(len(batches), self.num_workers)
+        # Process files in parallel
+        num_workers = min(len(registry), self.num_workers)
         with ProcessPoolExecutor(
             max_workers=num_workers,
-            mp_context=mp.get_context("spawn"),
             initializer=_worker_initializer,
             initargs=(registry,),
         ) as pool:
-            futures = [
-                pool.submit(
-                    _process_batch_task,
-                    batch,
-                    temp_dir,
-                    batch_size=self.batch_size,
-                    columns=self._curation_columns,
-                    filter_by_date=context.filter_by_date,
-                )
-                for batch in batches
-            ]
+            futures = []
+            for subreddit in registry:
+                filter_expr = get_subreddit_filter_expr([subreddit])
+
+                fragments = dataset.get_fragments(filter_expr)
+                file_paths = [frag.path for frag in fragments]
+
+                if not file_paths:
+                    continue
+
+                for file_path in file_paths:
+                    futures.append(
+                        pool.submit(
+                            _process_batch_task,
+                            file_path,
+                            subreddit,
+                            temp_dir,
+                            batch_size=self.batch_size,
+                            columns=self._curation_columns,
+                            filter_by_date=context.filter_by_date,
+                        )
+                    )
 
             with logging_redirect_tqdm():
                 for future in tqdm(
@@ -180,6 +189,7 @@ class RedditCurateStage(SourceStage):
                     total=len(futures),
                     desc=f"Curating experiment datasets [{num_workers} workers]",
                     leave=False,
+                    position=0,
                     dynamic_ncols=True,
                 ):
                     try:
@@ -314,24 +324,50 @@ class RedditCurateStage(SourceStage):
 def _worker_initializer(registry: dict[str, _SubredditContext]) -> None:
     """Initialize worker process with registry.
 
-    Called once per worker."""
+    This function is called once per worker process in the ProcessPoolExecutor
+    to set up the shared registry and configure PyArrow thread settings.
 
-    # Minimize CPU thrashing by setting only 2 threads per worker for polars
-    # and pyarrow
-    os.environ["POLARS_MAX_THREADS"] = str(_NUM_THREADS_PER_WORKER)
-    os.environ["OMP_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
-    os.environ["MKL_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(_NUM_THREADS_PER_WORKER)
+    Parameters
+    ----------
+    registry : dict[str, _SubredditContext]
+        Mapping of subreddit names to their processing contexts, including
+        Aho-Corasick automatons and experiment metadata.
 
-    pa.set_cpu_count(_NUM_THREADS_PER_WORKER)
-    pa.set_io_thread_count(_NUM_THREADS_PER_WORKER)
+    Notes
+    -----
+    This initialization ensures that each worker has its own copy of the
+    registry to avoid serialization overhead on every task submission.
+    """
+
+    common_worker_initializer(num_threads=_NUM_THREADS_PER_WORKER)
 
     _WORKER_REGISTRY.clear()
     _WORKER_REGISTRY.update(registry)
 
 
-def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditContext]:
-    """Build Aho-Corasick automaton registry for each subreddit."""
+def _build_registry(config: _RegistryConfig) -> dict[str, _SubredditContext]:
+    """Build Aho-Corasick automaton registry for each subreddit.
+
+    Creates a mapping of subreddit names to processing contexts, where each
+    context contains an Aho-Corasick automaton for efficient multi-pattern
+    string matching of treatment terms.
+
+    Parameters
+    ----------
+    config : _RegistryConfig
+        Configuration containing experiments data, condition-to-subreddit mappings,
+        available subreddits, and date filtering preferences.
+
+    Returns
+    -------
+    dict[str, _SubredditContext]
+        Mapping of subreddit names to their processing contexts. Each context
+        includes:
+        - Aho-Corasick automaton for treatment term matching
+        - Term-to-experiment mappings
+        - Publication dates for date filtering
+        - Experiment-to-terms reverse mappings
+    """
     subreddit_term_map = defaultdict(lambda: defaultdict(set))
     subreddit_publication_dates = defaultdict(dict)
     allowed_subreddits = (
@@ -400,13 +436,45 @@ def _build_worker_registry(config: _RegistryConfig) -> dict[str, _SubredditConte
 
 
 def _process_batch_task(
-    file_paths: list[str],
+    file_path: str,
+    subreddit: str,
     temp_output_dir: str,
     columns: list[str],
     batch_size: int,
     filter_by_date: bool,
 ) -> dict[str, int]:
-    """Process a batch of files and write results to temp directory."""
+    """Process a batch of files and write results to temp directory.
+
+    Scans a Parquet file for Reddit posts/comments from a specific subreddit,
+    matches treatment terms using the pre-built Aho-Corasick automaton, and
+    streams matching records to temporary Parquet files grouped by experiment ID.
+
+    Parameters
+    ----------
+    file_path : str
+        Absolute path to the Parquet file to process.
+    subreddit : str
+        Name of the subreddit being processed.
+    temp_output_dir : str
+        Directory path where temporary Parquet files will be written.
+    columns : list[str]
+        List of column names to read from the Parquet file.
+    batch_size : int
+        Number of rows to read per batch when scanning the dataset.
+    filter_by_date : bool
+        Whether to filter posts by publication date of experiments.
+
+    Returns
+    -------
+    dict[str, int]
+        Mapping of experiment IDs (NCT IDs) to the count of matching records
+        found in this batch.
+
+    Notes
+    -----
+    This function maintains open ParquetWriter handles for each experiment
+    to enable efficient streaming writes without loading all data into memory.
+    """
     if not _WORKER_REGISTRY:
         return {}
 
@@ -420,50 +488,45 @@ def _process_batch_task(
     # Dict[nct_id, pyarrow.parquet.ParquetWriter]
     writers: dict[str, pq.ParquetWriter] = {}
 
-    # Pass target subreddits to iterator to enable predicate pushdown
-    target_subreddits = list(_WORKER_REGISTRY.keys())
-    chunk_iterator = scan_reddit_dataset(
-        file_paths, columns, target_subreddits=target_subreddits, batch_size=batch_size
-    )
-
     try:
-        for df_chunk in chunk_iterator:
+        ctx = _WORKER_REGISTRY[subreddit]
+        for df in tqdm(
+            scan_reddit_dataset(
+                file_path,
+                schema=CONTEXTUALIZED_RECORD_SCHEMA,
+                partitioning=PARTITIONING,
+                columns=columns,
+                subreddit=ctx.name,
+                batch_size=batch_size,
+                use_threads=False,
+            ),
+            desc=f"Curating from {ctx.name}",
+            leave=False,
+            position=get_tqdm_position(),
+        ):
             try:
-                for sub_name, sub_df in df_chunk.group_by("subreddit"):
-                    normalized_sub_name = (
-                        sub_name[0] if isinstance(sub_name, tuple) else sub_name
+                matches_df = _process_chunk(ctx, df, filter_by_date)
+
+                if matches_df is not None and not matches_df.is_empty():
+                    # Write immediately to the open file handle
+                    _stream_to_disk(
+                        matches_df, writers, worker_out_dir, counts, batch_id[:8]
                     )
-
-                    # Case-insensitive subreddit lookup
-                    ctx = _WORKER_REGISTRY.get(
-                        normalized_sub_name
-                    ) or _WORKER_REGISTRY.get(normalized_sub_name.lower())
-
-                    if ctx:
-                        matches_df = _process_chunk(ctx, sub_df, filter_by_date)
-
-                        if matches_df is not None and not matches_df.is_empty():
-                            # Write immediately to the open file handle
-                            _stream_to_disk(
-                                matches_df,
-                                writers,
-                                worker_out_dir,
-                                counts,
-                                batch_id[:8],
-                            )
-
-                # Memory cleanup after each chunk
-                del df_chunk
-
-            except Exception as e:
-                logger.error("Worker error in batch %s: %s", batch_id, e)
+                del df
+                del matches_df
             finally:
-                # Force garbage collection more frequently
                 gc.collect()
+
     finally:
         # Close all open writers when batch finishes
         for writer in writers.values():
             writer.close()
+
+        # Clean up worker memory
+        writers.clear()
+        del writers
+
+        release_memory()
 
     return dict(counts)
 
@@ -471,7 +534,33 @@ def _process_batch_task(
 def _process_chunk(
     ctx: _SubredditContext, df: pl.DataFrame, filter_by_date: bool
 ) -> pl.DataFrame | None:
-    """Process a subreddit chunk: match terms, filter, and write results."""
+    """Process a subreddit chunk: match terms, filter, and write results.
+
+    Normalizes text from Reddit posts/comments, uses the Aho-Corasick automaton
+    to find treatment mentions, joins with experiment metadata, and applies
+    date filtering based on experiment publication dates.
+
+    Parameters
+    ----------
+    ctx : _SubredditContext
+        Subreddit processing context containing the Aho-Corasick automaton,
+        term mappings, and publication dates.
+    df : pl.DataFrame
+        DataFrame containing Reddit posts/comments to process.
+    filter_by_date : bool
+        Whether to filter records by publication dates.
+
+    Returns
+    -------
+    pl.DataFrame | None
+        DataFrame containing matched records with columns:
+        - All original columns from input DataFrame
+        - nct_id: Experiment ID
+        - treatments_mentioned: List of treatment terms found
+        - report: Markdown-formatted report text
+        Returns None if no matches are found.
+
+    """
     # Prepare text for matching
     txt_cols = [
         col for col in ["title", "initial_post", "report_text"] if col in df.columns
@@ -479,11 +568,7 @@ def _process_chunk(
     if not txt_cols:
         return None
 
-    df_prep = df.with_columns(
-        pl.concat_str(txt_cols, separator=" ", ignore_nulls=True)
-        .map_elements(normalize_text_for_matching, return_dtype=pl.String)
-        .alias("_normalized_text")
-    )
+    df_prep = df
 
     # Global date filtering
     # Remove any posts AFTER the most recent publication that one of the experiments
@@ -494,21 +579,36 @@ def _process_chunk(
         df_prep = df_prep.filter(pl.col("_dt").is_not_null())
         df_prep = df_prep.filter(pl.col("_dt") <= ctx.global_max_date)
 
-    if df_prep.is_empty():
-        return None
+        if df_prep.is_empty():
+            return None
 
-    # Term matching with Aho-Corasick
-    automaton = ctx.automaton
+    df_prep = (
+        df_prep.with_columns(
+            pl.concat_str(txt_cols, separator=" ", ignore_nulls=True).alias("_raw_text")
+        )
+        .with_columns(_get_normalization_expr("_raw_text").alias("_normalized_text"))
+        .drop("_raw_text")
+    )
 
-    def batch_matcher(text_series: pl.Series) -> pl.Series:
-        results = [
-            extract_mentions(text, automaton) if text is not None else []
-            for text in text_series
-        ]
+    def batch_automaton_matcher(text_series: pl.Series) -> pl.Series:
+        results = []
+        for text in text_series:
+            if not text:
+                results.append([])
+                continue
+
+            found = set()
+
+            for _, canonical_alias in ctx.automaton.iter(text):
+                found.add(canonical_alias)
+            results.append(sorted(found))
+
         return pl.Series(results, dtype=pl.List(pl.String))
 
     df_matches = df_prep.with_columns(
-        pl.col("_normalized_text").map_batches(batch_matcher).alias("_matches")
+        pl.col("_normalized_text")
+        .map_batches(batch_automaton_matcher)
+        .alias("_matches")
     ).filter(pl.col("_matches").list.len() > 0)
 
     del df_prep
@@ -581,9 +681,6 @@ def _process_chunk(
     report_expr = _build_report_expr(df_final.columns)
     df_final = df_final.with_columns(report_expr.alias("report"))
 
-    # Serialize nested data structures for CSV
-    # df_final = _serialize_nested_columns(df_final)
-
     # Drop temporary columns
     cols_to_drop = [c for c in ["_matches", "_dt"] if c in df_final.columns]
     if cols_to_drop:
@@ -595,7 +692,33 @@ def _process_chunk(
 def _stream_to_disk(
     df: pl.DataFrame, writers: dict, out_dir: str, counts: dict, batch_id: str
 ) -> None:
-    """Write a chunk to the appropriate ParquetWriter, creating it if needed."""
+    """Write a chunk to the appropriate ParquetWriter, creating it if needed.
+
+    Partitions the DataFrame by experiment ID (NCT ID) and streams each partition
+    to its corresponding Parquet file. Creates new ParquetWriter instances on
+    first contact with each experiment.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        DataFrame containing matched records with an 'nct_id' column.
+    writers : dict
+        Dictionary mapping NCT IDs to open ParquetWriter instances.
+        Modified in place to add new writers as needed.
+    out_dir : str
+        Directory path where Parquet files will be written.
+    counts : dict
+        Dictionary mapping NCT IDs to record counts.
+        Modified in place to update counts.
+    batch_id : str
+        Unique identifier for this batch, used in output filenames.
+
+    Notes
+    -----
+    This function maintains open file handles to avoid repeated file open/close
+    operations, which significantly improves write performance. Schema mismatches
+    are handled by casting to the existing schema if necessary.
+    """
 
     # Group by NCT ID so we route data to the correct file
     for key, part_df in df.partition_by("nct_id", as_dict=True).items():
@@ -637,18 +760,44 @@ def _stream_to_disk(
 
 
 def _build_report_expr(available_cols: list[str]) -> pl.Expr:
-    """Generate markdown report column expression."""
+    """Generate markdown report column expression.
+
+    Creates a Polars expression that formats Reddit post/comment data into
+    structured markdown reports. The format differs for submissions vs comments.
+
+    Parameters
+    ----------
+    available_cols : list[str]
+        List of column names available in the DataFrame.
+
+    Returns
+    -------
+    pl.Expr
+        Polars expression that generates markdown-formatted report text.
+        For submissions, includes: subreddit, title, date, post content.
+        For comments, includes: subreddit, initial post, date, comment content.
+
+    Raises
+    ------
+    ValueError
+        If required columns (date_created, subreddit, title, report_text,
+        report_type) are not available.
+
+    """
 
     def safe_col(name: str) -> pl.Expr:
         """Return column or empty string if not available."""
         return pl.col(name).fill_null("") if name in available_cols else pl.lit("")
 
-    # Format date column
     date_col = "date_created"
-    if date_col in available_cols:
-        date_expr = pl.col(date_col).fill_null("").cast(pl.String)
-    else:
-        date_expr = pl.lit("")
+    if not all(
+        col in available_cols
+        for col in [date_col, "subreddit", "title", "report_text", "report_type"]
+    ):
+        raise ValueError("Required columns for report generation are not available.")
+
+    # Format date column
+    date_expr = pl.col(date_col).fill_null("").cast(pl.String)
 
     # Submission format
     fmt_submission = pl.format(
@@ -676,9 +825,6 @@ def _build_report_expr(available_cols: list[str]) -> pl.Expr:
         safe_col("report_text"),
     )
 
-    if "report_type" not in available_cols:
-        return fmt_submission
-
     return (
         pl.when(pl.col("report_type") == "submission")
         .then(fmt_submission)
@@ -694,7 +840,37 @@ def _build_report_expr(available_cols: list[str]) -> pl.Expr:
 
 
 def _parse_date_column(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
-    """Parse date column using multiple format strategies."""
+    """Parse date column using multiple format strategies.
+
+    Attempts to parse dates using multiple formats including ISO 8601 strings,
+    human-readable formats, and Unix timestamps. Creates a new UTC-aware
+    datetime column '_dt'.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Input DataFrame containing the date column to parse.
+    date_col : str
+        Name of the column containing date values to parse.
+
+    Returns
+    -------
+    pl.DataFrame
+        DataFrame with an additional '_dt' column containing parsed UTC datetime
+        values. Returns the original DataFrame if the date column doesn't exist.
+
+    Notes
+    -----
+    Supported date formats:
+    - ISO 8601 with timezone (e.g., "2024-01-15T10:30:00Z")
+    - ISO 8601 with microseconds
+    - Date only (e.g., "2024-01-15")
+    - Human-readable (e.g., "January 15, 2024")
+    - Unix timestamps (seconds since epoch)
+
+    The function uses `pl.coalesce` to try formats in sequence, using the
+    first successful parse.
+    """
     if date_col not in df.columns:
         return df
 
@@ -716,3 +892,80 @@ def _parse_date_column(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
     ).dt.replace_time_zone("UTC")
 
     return df.with_columns(date_expr.alias("_dt"))
+
+
+def _get_normalization_expr(col_name: str) -> pl.Expr:
+    """Create Polars expression for text normalization.
+
+    Generates a Polars expression equivalent to `normalize_text_for_matching`
+    from the helpers module, implementing the same 8-step normalization pipeline
+    for consistent treatment term matching.
+
+    Parameters
+    ----------
+    col_name : str
+        Name of the column containing text to normalize.
+
+    Returns
+    -------
+    pl.Expr
+        Polars expression that performs text normalization with these steps:
+        1. Pre-NFKC character translation
+        2. NFKC Unicode normalization
+        3. Post-NFKC character translation
+        4. NFD normalization + accent removal
+        5. Lowercase conversion
+        6. Letter-number boundary spacing
+        7. Connector collapsing
+        8. Connector trimming
+
+    See Also
+    --------
+    naturalv2.sources.components.helpers.normalize_text_for_matching :
+        The original function this expression replicates.
+
+    Notes
+    -----
+    This vectorized implementation is significantly faster than applying
+    the Python function row-by-row using `map_batches`.
+    """
+
+    pre_nfkc_map = {
+        chr(k): (v if v is not None else "")
+        for k, v in PRE_NFKC_TRANSLATION_TABLE.items()
+    }
+    post_nfkc_map = {
+        chr(k): (v if v is not None else "")
+        for k, v in POST_NFKC_TRANSLATION_TABLE.items()
+    }
+
+    # \p{M} matches all Unicode combining marks (accents)
+    strip_accents_pattern = r"\p{M}"
+
+    # Connector Pattern: Matches _ / + , ; : space and hyphen
+    # Hyphen must be last in the class to be a literal
+    connector_pattern = CONNECTOR_SPLIT.pattern
+
+    return (
+        pl.col(col_name)
+        .fill_null("")
+        # Pre-NFKC Translation Table
+        .str.replace_many(pre_nfkc_map, ascii_case_insensitive=False)
+        # NFKC Normalization (Canonicalize unicode forms)
+        .str.normalize("NFKC")
+        # Apply Translation Table
+        .str.replace_many(post_nfkc_map, ascii_case_insensitive=False)
+        # NFD + Strip Accents (café -> cafe)
+        .str.normalize("NFD")
+        .str.replace_all(strip_accents_pattern, "")
+        .str.to_lowercase()
+        # Handle Letter-Number Boundaries (10mg -> 10 mg)
+        # Use ${1} syntax for capture groups in Polars
+        .str.replace_all(r"(\d)([a-z])", "${1} ${2}")
+        .str.replace_all(r"([a-z])(\d)", "${1} ${2}")
+        # Collapse Connectors
+        # This turns "10mg-advil" -> "10 mg advil"
+        .str.replace_all(connector_pattern, " ")
+        # Remove leading/trailing connectors
+        .str.strip_chars("".join(CONNECTOR_CHAR_SET))
+    )

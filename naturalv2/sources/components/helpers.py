@@ -17,31 +17,17 @@ import regex as re
 
 logger = logging.getLogger(__name__)
 
-_HYPHEN_RUNES = "\u2010\u2011\u2012\u2013\u2014\u2212-"
+_HYPHEN_RUNS = "\u2010\u2011\u2012\u2013\u2014\u2212-"
 _ZERO_WIDTH = "\u200b\u200c\u200d\u2060"
-_TRANSLATION_TABLE = {
-    **{ord(c): "-" for c in _HYPHEN_RUNES},
+
+# Characters to remove before NFKC normalization
+# Without this, ™ and ® can get converted to TM and R, and match attempts fail
+PRE_NFKC_TRANSLATION_TABLE = {ord("™"): None, ord("®"): None, ord("\ufeff"): None}
+
+POST_NFKC_TRANSLATION_TABLE = {
+    **{ord(c): "-" for c in _HYPHEN_RUNS},
     **{ord(c): None for c in _ZERO_WIDTH},
-    # Map superscript digits down to normal digits so “m²” and “m2” line up.
-    ord("¹"): "1",
-    ord("²"): "2",
-    ord("³"): "3",
-    ord("⁴"): "4",
-    ord("⁵"): "5",
-    ord("⁶"): "6",
-    ord("⁷"): "7",
-    ord("⁸"): "8",
-    ord("⁹"): "9",
-    ord("⁰"): "0",
-    # Replace common oddities (non-breaking spaces, ®, ™, hair spaces) before we
-    # normalize further
     ord("\xa0"): " ",  # non-breaking space; `&nbsp` in HTML
-    ord("\u2007"): " ",  # figure space, often used in tables
-    ord("\u202f"): " ",  # narrow no-break space, common in SI
-    ord("\u200a"): " ",  # hair space
-    ord("\ufeff"): None,
-    ord("®"): None,
-    ord("™"): None,
     ord("^"): None,
     ord("•"): " ",
     ord("→"): " ",
@@ -50,26 +36,27 @@ _TRANSLATION_TABLE = {
     # Different “micro” symbols both become a simple “u”
     ord("µ"): "u",
     ord("μ"): "u",
+    # Swap Greek letters for simple words so Unicode and ASCII versions match up
+    ord("α"): "alpha",
+    ord("β"): "beta",
+    ord("γ"): "gamma",
+    ord("δ"): "delta",
+    ord("Δ"): "delta",
+    ord("ε"): "epsilon",
+    ord("κ"): "kappa",
+    ord("Ω"): "omega",
+    ord("ω"): "omega",
 }
-
-# Swap Greek letters for simple words so Unicode and ASCII versions match up
-GREEK_CHAR_MAP = {
-    "α": "alpha",
-    "β": "beta",
-    "γ": "gamma",
-    "δ": "delta",
-    "Δ": "delta",
-    "ε": "epsilon",
-    "κ": "kappa",
-}
-
-_RE_SPACES = re.compile(r"\s+")  # regex to match one or more spaces
-_RE_NUM_TO_LETTER = re.compile(r"(?<=\d)(?=[a-z])")
-_RE_LETTER_TO_NUM = re.compile(r"(?<=[a-z])(?=\d)")
 
 # Break aliases on the connectors above so we can rebuild them with the flexible
 # pattern e.g. "calcium-magnesium+citrate" -> ["calcium", "magnesium", "citrate"]
 CONNECTOR_SPLIT = re.compile(r"[-_/+,;:\s]+")
+
+NUM_TO_DIGIT_RE = re.compile(r"(\d)([a-z])")
+DIGIT_TO_NUM_RE = re.compile(r"([a-z])(\d)")
+
+CONNECTOR_CHAR_SET = set("-_/+,;:")
+CONNECTOR_CHAR_SET.add(" ")
 
 # Strip simple parenthetical notes (e.g., “(oral)”) when we need a shorter fallback
 # alias. For example, "sitagliptin (oral tablet)" -> "sitagliptin "
@@ -118,63 +105,131 @@ _DOSE_TAIL_REGEX = re.compile(
     rf"(?:{_QUALIFIER_PATTERN}{_DOSE_PATTERN})", flags=re.IGNORECASE | re.UNICODE
 )
 
-CONNECTOR_CHAR_SET = set("-_/+,;:")
-CONNECTOR_CHAR_SET.add(" ")
-
 
 @lru_cache(maxsize=50_000)
 def normalize_text_for_matching(text: str) -> str:
-    """Normalize text for matching.
+    """
+    Normalize text for case-insensitive, accent-insensitive matching.
+
+    Applies a comprehensive normalization pipeline to standardize text for
+    matching operations. The process handles Unicode variations, case differences,
+    accent marks, symbol replacements, and spacing to ensure consistent matches
+    across different text representations.
+
+    The normalization pipeline performs these steps in order:
+    1. Remove specific problematic characters (™, ®, BOM)
+    2. Apply NFKC normalization to standardize Unicode forms
+    3. Convert to lowercase
+    4. Replace various symbols (hyphens, Greek letters, etc.)
+    5. Apply NFD normalization and remove accent marks
+    6. Insert spaces between numbers and letters ("10mg" → "10 mg")
+    7. Collapse connector characters to single spaces
+    8. Strip leading/trailing punctuation
 
     Parameters
     ----------
     text : str
-        Raw alias or surface-form text.
+        Raw alias or surface-form text to normalize. Can be treatment names,
+        drug aliases, or any text requiring standardization.
 
     Returns
     -------
     str
-        Normalized representation used for dictionary matching.
+        Normalized representation suitable for case-insensitive, accent-insensitive
+        matching. Returns empty string if input is empty or None.
+
+    Examples
+    --------
+    >>> normalize_text_for_matching("Ibuprofen-200mg")
+    'ibuprofen 200 mg'
+
+    >>> normalize_text_for_matching("Naproxen/Naprosyn")
+    'naproxen naprosyn'
+
+    >>> normalize_text_for_matching("α-blocker")
+    'alpha blocker'
+
+    Notes
+    -----
+    This function is cached with LRU cache (maxsize=50,000) for performance,
+    as the same aliases are often normalized repeatedly.
+
+    Greek letters are replaced with their English names (α→"alpha", β→"beta", etc.)
+    to ensure matches between Unicode and ASCII representations.
+
+    Various hyphen-like characters (\\u2010-\\u2014, \\u2212, -) are all normalized
+    to spaces to handle inconsistent hyphenation.
+
     """
     if not text:
         return ""
 
-    # Use the translation table to swap common symbol lookalikes for plain text
-    pre_normalized = text.translate(_TRANSLATION_TABLE)
+    # Initial translation to remove unwanted characters before normalization
+    text = text.translate(PRE_NFKC_TRANSLATION_TABLE)
 
-    if pre_normalized.isascii():
-        # ASCII only, skip NFKC/NFKD
-        normalized = pre_normalized.casefold()
-    else:
-        # Make sure the text uses a standard Unicode form and lowercase
-        normalized = unicodedata.normalize("NFKC", pre_normalized).casefold()
+    # Apply NFKC normalization to standardize Unicode forms
+    text = unicodedata.normalize("NFKC", text)
 
-        # Clean up any new codepoints that were added after NFKC normalization
-        normalized = normalized.translate(_TRANSLATION_TABLE)
+    # Transform text to lowercase for case-insensitive matching
+    text = text.lower()
 
-    # Remove accent marks (so “crème” and “creme” normalize the same way) only
-    # if non-ASCII remains
-    if not normalized.isascii():
-        normalized = unicodedata.normalize("NFKD", normalized)
-        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    # Apply translation table for symbol replacements
+    text = text.translate(POST_NFKC_TRANSLATION_TABLE)
 
-    # Replace Greek letters and micro symbols with simple ASCII text
-    normalized = "".join(GREEK_CHAR_MAP.get(char, char) for char in normalized)
+    # Apply NFD normalization to separate accents for removal
+    text = unicodedata.normalize("NFD", text)
 
-    # Shrink repeated spaces and trim loose punctuation on the ends
-    normalized = _RE_SPACES.sub(" ", normalized).strip(" -_/+,;:")
+    # Remove accent marks
+    text = "".join(c for c in text if not unicodedata.combining(c))
 
-    # Ensure numbers glued to units (“10mg”) match spaced forms (“10 mg”)
-    normalized = _RE_NUM_TO_LETTER.sub(" ", normalized)
-    return _RE_LETTER_TO_NUM.sub(" ", normalized)
+    # Insert Space Between Numbers and Letters (e.g., "10mg" -> "10 mg")
+    text = NUM_TO_DIGIT_RE.sub(r"\1 \2", text)
+    text = DIGIT_TO_NUM_RE.sub(r"\1 \2", text)
+
+    # Collapse Separators
+    text = CONNECTOR_SPLIT.sub(" ", text)
+
+    # Trim Leading/Trailing Connectors
+    return text.strip("".join(CONNECTOR_CHAR_SET))
 
 
 def iter_canonical_variations(text: str) -> list[str]:
-    """Generate all canonical variations for a single treatment term.
+    """
+    Generate all canonical variations for a single treatment term.
 
-    This encapsulates the logic for normalization, connector collapsing,
-    and parenthetical stripping so it can be shared between the automaton
-    builder and the registry builder.
+    Creates multiple normalized versions of a treatment name by applying different
+    text transformations. This generates variations to improve matching recall:
+    - Full normalized version with connector characters collapsed
+    - Version without parenthetical qualifiers (e.g., "(oral)", "(tablet)")
+
+    These variations handle cases where text appears with or without qualifiers,
+    or with different connector styles (hyphen vs. space).
+
+    Parameters
+    ----------
+    text : str
+        Raw treatment term, alias, or drug name to generate variations for.
+
+    Returns
+    -------
+    list of str
+        List of unique canonical variations, typically 1-2 variations. Returns
+        empty list if input normalizes to empty string.
+
+    Examples
+    --------
+    >>> iter_canonical_variations("Ibuprofen-200mg (oral tablet)")
+    ['ibuprofen 200 mg oral tablet', 'ibuprofen 200 mg']
+
+    >>> iter_canonical_variations("calcium-magnesium+citrate")
+    ['calcium magnesium citrate']
+
+    Notes
+    -----
+    This function encapsulates the logic for normalization, connector collapsing,
+    and parenthetical stripping so it can be shared between the automaton builder
+    and the treatment registry builder.
+
     """
     variations = set()
     normalised_text = normalize_text_for_matching(text)
@@ -206,18 +261,41 @@ def iter_canonical_variations(text: str) -> list[str]:
 
 
 def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
-    """Build an Aho–Corasick automaton over normalised treatment aliases.
+    """
+    Build an Aho-Corasick automaton for fast multi-pattern string matching.
+
+    Creates a finite-state automaton that can find all occurrences of multiple
+    treatment aliases in text in a single pass.
+
+    Each alias is normalized and expanded into canonical variations (with and
+    without parenthetical qualifiers). Short variations (≤3 characters) are
+    filtered out to reduce false positives.
 
     Parameters
     ----------
-    aliases : Sequence[str]
-        Raw treatment names and aliases (brand names, doses, etc.).
+    aliases : Sequence of str
+        Raw treatment names and aliases including brand names, generic names,
+        dosage forms, etc. Can contain special characters, Unicode, mixed case.
 
     Returns
     -------
     ahocorasick.Automaton
-        Automaton that can be iterated to find every alias occurrence in one
-        pass over canonicalised text.
+        Compiled automaton ready for matching. Call ``.iter(text)`` to find
+        all alias occurrences in one pass over canonicalized text.
+
+    Notes
+    -----
+    The automaton maps each pattern to its canonical form, not the original alias.
+    This ensures consistent representation in match results.
+
+    Very short canonical forms (3 characters or less) are excluded because they
+    generate too many false positives (e.g., "mg", "ml", "a", "b").
+
+    See Also
+    --------
+    iter_canonical_variations : Generates variations for each alias
+    extract_mentions : Uses the automaton to find mentions in text
+
     """
     automaton = ahocorasick.Automaton()
 
@@ -235,23 +313,53 @@ def build_treatment_automaton(aliases: Sequence[str]) -> ahocorasick.Automaton:
 
 
 def canonicalize_reports_for_matching(text: str) -> tuple[str, list[int]]:
-    """Collapse connector characters to single spaces and track original indices.
+    """
+    Collapse connector characters to spaces and track original character indices.
+
+    Transforms text to match the canonical form used in the automaton by replacing
+    runs of connector characters (hyphens, slashes, spaces, etc.) with single spaces.
+    Also inserts spaces at digit-letter boundaries ("10mg" → "10 mg").
+
+    Maintains a mapping from each character in the output to its position in the
+    original text, enabling recovery of exact substrings when matches are found.
+    This is crucial for extracting the original text rather than the normalized form.
 
     Parameters
     ----------
     text : str
-        Normalised post text to prepare for automaton matching.
+        Normalized post text to prepare for automaton matching. Should already be
+        normalized via ``normalize_text_for_matching()``.
 
     Returns
     -------
     canonical_text : str
-        Text where each run of connector characters (hyphen, slash, space, etc.)
-        has been replaced by a single space.  This mirrors how we canonicalise
-        aliases when building the automaton.
-    index_map : list[int]
-        For every character position in ``canonical_text`` we record the
-        corresponding index in the original ``text`` so we can recover the exact
-        substring once a match is reported.
+        Text where each run of connector characters (hyphen, slash, space, comma,
+        semicolon, colon, underscore, plus) has been replaced by a single space.
+        This mirrors how aliases are canonicalized when building the automaton.
+    index_map : list of int
+        Index mapping where ``index_map[i]`` gives the position in the original
+        ``text`` corresponding to ``canonical_text[i]``. Used to recover exact
+        substrings from match positions.
+
+    Examples
+    --------
+    >>> text = "ibuprofen-200mg/5ml"
+    >>> canonical, indices = canonicalize_reports_for_matching(text)
+    >>> canonical
+    'ibuprofen 200 mg 5 ml'
+    >>> len(canonical) == len(indices)
+    True
+
+    Notes
+    -----
+    Connector characters are defined in ``CONNECTOR_CHAR_SET``: `-_/+,;:` and space.
+
+    Consecutive connector characters are collapsed to a single space to prevent
+    multiple spaces in the output, which would interfere with pattern matching.
+
+    Spaces are automatically inserted at digit-letter boundaries (e.g., "10mg"
+    becomes "10 mg") to ensure matches against patterns that include such spacing.
+
     """
     canonical_characters: list[str] = []
     canonical_to_original_indices: list[int] = []
@@ -293,19 +401,57 @@ def canonicalize_reports_for_matching(text: str) -> tuple[str, list[int]]:
 
 
 def extract_mentions(text: str, automaton: ahocorasick.Automaton) -> list[str]:
-    """Extract mentions from a text string using an ahocorasick automaton.
+    """
+    Extract all treatment mentions from text using an Aho-Corasick automaton.
+
+    Canonicalizes the input text and finds all occurrences of treatment aliases
+    using the provided automaton. Returns unique canonical forms of matched aliases
+    in sorted order.
+
+    This is the main entry point for finding treatment mentions in posts, comments,
+    or other text documents.
 
     Parameters
     ----------
     text : str
-        The text to extract mentions from.
+        The text to extract mentions from. Can be raw text (doesn't need to be
+        pre-normalized). Empty or None text returns empty list.
     automaton : ahocorasick.Automaton
-        The automaton to use for extracting mentions.
+        Pre-built automaton created by ``build_treatment_automaton()``. Must be
+        finalized with ``.make_automaton()``.
 
     Returns
     -------
-    list[str]
-        A list of mentions found in the text.
+    list of str
+        Sorted list of unique canonical treatment mentions found in the text.
+        Each mention is in its canonical form (lowercase, normalized). Returns
+        empty list if no matches found or if input text is empty.
+
+    Examples
+    --------
+    >>> aliases = ["Ibuprofen", "Advil", "Naproxen"]
+    >>> automaton = build_treatment_automaton(aliases)
+    >>> text = "I take Advil-200mg for pain, sometimes Naproxen too."
+    >>> mentions = extract_mentions(text, automaton)
+    >>> mentions
+    ['advil', 'naproxen']
+
+    Notes
+    -----
+    The function automatically handles text canonicalization via
+    ``canonicalize_reports_for_matching()``, so raw text can be passed directly.
+
+    Duplicate mentions are automatically removed - if "ibuprofen" appears multiple
+    times in the text, it appears only once in the output.
+
+    The returned mentions are in canonical form (normalized), not the original text.
+    This ensures consistent representation across different text variations.
+
+    See Also
+    --------
+    build_treatment_automaton : Creates the automaton
+    canonicalize_reports_for_matching : Text canonicalization function
+
     """
     canonical_text, _ = canonicalize_reports_for_matching(text)
     if not canonical_text:
@@ -324,26 +470,57 @@ def extract_mentions(text: str, automaton: ahocorasick.Automaton) -> list[str]:
 def filter_by_date(
     adf: pd.DataFrame, cutoff_dt: pd.Timestamp, date_col: str
 ) -> pd.DataFrame:
-    """Filter a DataFrame by a date cutoff.
+    """
+    Filter a DataFrame to include only rows before a specified date.
+
+    Filters rows based on a date column, keeping only those with valid dates
+    that occur strictly before the cutoff date. Rows with unparsable dates
+    (NaT values) are automatically removed. This is commonly used to exclude
+    data from after a trial enrollment cutoff or to filter posts by date.
 
     Parameters
     ----------
     adf : pandas.DataFrame
-        The DataFrame to filter.
+        The DataFrame to filter. Can be empty (returns empty DataFrame).
     cutoff_dt : pandas.Timestamp
-        The cutoff timestamp. Only rows with dates before this date will be kept.
+        The cutoff timestamp. Only rows with dates strictly before this date
+        will be kept (exclusive upper bound).
     date_col : str
         The name of the column in the DataFrame containing date information.
+        Can contain strings, datetime objects, or other parsable date formats.
 
     Returns
     -------
     pandas.DataFrame
-        A DataFrame filtered to include only rows with dates on or before the cutoff
-        date.
+        A filtered DataFrame with index reset (starting from 0). Contains only
+        rows with valid dates before the cutoff. Returns empty DataFrame if
+        input is empty or no rows satisfy the condition.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> df = pd.DataFrame(
+    ...     {
+    ...         "created_utc": ["2020-01-01", "2020-06-01", "2021-01-01"],
+    ...         "text": ["post1", "post2", "post3"],
+    ...     }
+    ... )
+    >>> cutoff = pd.Timestamp("2020-07-01")
+    >>> filtered = filter_by_date(df, cutoff, "created_utc")
+    >>> len(filtered)
+    2
 
     Notes
     -----
-    Rows with unparsable dates (``NaT``) are dropped. The result is index-reset.
+    Rows with unparsable dates (resulting in NaT after ``pd.to_datetime()``) are
+    dropped from the result. A debug log message is emitted if any such rows exist.
+
+    The comparison is strictly less than (``<``), not less than or equal (``<=``),
+    so a row dated exactly at the cutoff time is excluded.
+
+    The result has its index reset to start from 0, so the returned DataFrame
+    has a clean sequential index regardless of the input index.
+
     """
     if adf.empty:
         return pd.DataFrame()

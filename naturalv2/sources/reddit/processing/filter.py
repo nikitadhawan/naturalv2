@@ -1,6 +1,5 @@
 """Functions for filtering Reddit data."""
 
-import gc
 import logging
 from collections.abc import Iterator
 
@@ -9,7 +8,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 
-from naturalv2.sources.reddit.processing._utils import bucket_from_subreddit
+from naturalv2.sources.reddit.processing._utils import (
+    bucket_from_subreddit,
+    release_memory,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -247,9 +249,7 @@ def scan_reddit_dataset(
             print(f"Error scanning file: {e}")
             continue
         finally:
-            pa.default_memory_pool().release_unused()
-            # Force Python to clear circular references immediately
-            gc.collect()
+            release_memory()
 
 
 def get_subreddit_filter_expr(subreddits: list[str]) -> pc.Expression:

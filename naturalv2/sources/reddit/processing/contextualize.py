@@ -19,8 +19,6 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 from tqdm import tqdm
 
-from naturalv2.sources.reddit.processing._utils import get_max_open_files
-
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +53,9 @@ def write_to_parquet_partitions(
     write_parquet_stats: Literal["none", "minimal", "all"] = "minimal",
     use_dictionary: bool | dict[str, bool] = True,
     max_partitions: int = 1024,
-    min_rows_per_group: int = 128_000,
-    max_rows_per_group: int = 256_000,
-    max_open_files: int | None = None,
+    min_rows_per_group: int = 131_072,
+    max_rows_per_group: int = 1024 * 1024,
+    max_open_files: int = 1000,
     existing_data_behavior: Literal[
         "error", "delete_matching", "overwrite_or_ignore"
     ] = "overwrite_or_ignore",
@@ -82,13 +80,12 @@ def write_to_parquet_partitions(
         Dictionary encoding toggle, either global or column-level.
     max_partitions : int, default=1024
         Maximum distinct partition directories.
-    min_rows_per_group : int, default=128_000
+    min_rows_per_group : int, default=131_072
         Minimum rows per row group (bounded by ``max_rows_per_group``).
-    max_rows_per_group : int, default=256_000
+    max_rows_per_group : int, default=1024*1024
         Maximum rows per row group.
-    max_open_files : int | None, default=None
-        Cap on concurrently open files during write. If ``None``, it will be set
-        to 95% of the soft ulimit of the current system.
+    max_open_files : int, default=1000
+        Cap on concurrently open files during write.
     existing_data_behavior : {'error', 'delete_matching', 'overwrite_or_ignore'}, default='overwrite_or_ignore'
         Strategy when output already exists.
     use_threads : bool, default=True
@@ -158,8 +155,6 @@ def write_to_parquet_partitions(
     )
 
     soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
-    if max_open_files is None:
-        max_open_files = get_max_open_files()
 
     written_paths: list[str] = []
 
@@ -396,6 +391,7 @@ def _process_bucket(
             "score": pl.Float64,
         },
         extra_columns="ignore",
+        low_memory=True,
     ).with_columns(
         pl.col("id").alias("post_id"),
         pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
@@ -413,6 +409,7 @@ def _process_bucket(
             "score": pl.Float64,
         },
         extra_columns="ignore",
+        low_memory=True,
     ).with_columns(
         pl.col("link_id").str.replace(r"^t3_", "").alias("post_id"),
         pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
@@ -508,7 +505,7 @@ def _process_bucket(
         .select(
             pl.col("subreddit"),
             pl.col("title"),
-            # Use 'enriched_text' as initial_post to match Code A
+            # Use 'enriched_text' as initial_post
             pl.col("enriched_text").alias("initial_post"),
             pl.col("body").alias("report_text"),
             pl.lit("comment").alias("report_type"),
@@ -534,20 +531,15 @@ def _process_bucket(
     # Union, sort and write to disk
     parquet_options = {
         "compression": "zstd",
-        "compression_level": 5,
+        "compression_level": 3,
         "statistics": "full",
-        "row_group_size": 64_000,
-        "data_page_size": 10 << 20,  # 10 MiB
+        "row_group_size": 131_072,
     }
 
     try:
-        submissions_context.sort(["subreddit", "timestamp"]).sink_parquet(
-            submissions_filepath, **parquet_options
-        )
+        submissions_context.sink_parquet(submissions_filepath, **parquet_options)
 
-        comments_context.sort(["subreddit", "timestamp"]).sink_parquet(
-            comments_filepath, **parquet_options
-        )
+        comments_context.sink_parquet(comments_filepath, **parquet_options)
     except Exception as exc:
         logger.error("Failed to process bucket %s: %s", bucket_id, exc, exc_info=True)
 

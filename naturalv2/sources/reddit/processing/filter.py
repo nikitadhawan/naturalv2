@@ -1,5 +1,6 @@
 """Functions for filtering Reddit data."""
 
+import gc
 import logging
 from collections.abc import Iterator
 
@@ -7,6 +8,8 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
+
+from naturalv2.sources.reddit.processing._utils import bucket_from_subreddit
 
 
 logger = logging.getLogger(__name__)
@@ -16,27 +19,65 @@ SENTINELS = pa.array(["[deleted]", "[removed]"], type=pa.string())
 
 
 def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray:
-    """
-    Apply rule-based filtering to a pyarrow Table of Reddit posts.
+    """Apply rule-based filtering to a pyarrow Table of Reddit posts.
+
+    This function filters out low-quality Reddit posts by checking multiple criteria:
+    - Removes deleted/removed posts (text is "[deleted]" or "[removed]")
+    - Removes posts by bot accounts (e.g., "AutoModerator", names ending in "bot")
+    - Removes posts without meaningful text (after stripping URLs)
+    - Requires at least one word with 3+ letters in the first 2048 characters
+    - Requires at least 25% of characters to be letters
+
+    The function also normalizes the text by:
+    - Replacing HTML entities (&gt;, &lt;, &amp;)
+    - Collapsing whitespace runs into single spaces
+    - Trimming leading/trailing whitespace
 
     Parameters
     ----------
     table : pa.Table
-        A table containing Reddit posts. Expects the `text_field` and `author`
-        columns to exist.
+        A pyarrow Table containing Reddit posts. Must have columns named
+        `text_field` (specified by parameter) and `author`.
     text_field : str
-        The name of the text field column to be filtered.
+        The name of the column containing the text content to be filtered
+        (typically "body" for comments or "selftext" for submissions).
 
     Returns
     -------
     pa.ChunkedArray
-        Boolean mask indicating valid rows.
+        A boolean mask array where True indicates the row passes all filters
+        and should be kept, False indicates it should be filtered out.
+
+    Examples
+    --------
+    >>> import pyarrow as pa
+    >>> table = pa.table(
+    ...     {
+    ...         "body": ["Hello world!", "[deleted]", "Check https://example.com"],
+    ...         "author": ["user123", "deleted_user", "AutoModerator"],
+    ...     }
+    ... )
+    >>> mask = apply_rule_based_filter(table, "body")
+    >>> filtered_table = table.filter(mask)
 
     """
 
     # Helper to cast to string and fill nulls
     def to_string_filled(arr: pa.ChunkedArray) -> pa.ChunkedArray:
-        """Fill nulls with empty string."""
+        """
+        Convert null values in an array to empty strings.
+
+        Parameters
+        ----------
+        arr : pa.ChunkedArray
+            Input array that may contain null values.
+
+        Returns
+        -------
+        pa.ChunkedArray
+            Array with all null values replaced by empty strings.
+
+        """
         return pc.fill_null(arr, pa.scalar("", type=pa.string()))
 
     # Normalize text
@@ -85,43 +126,168 @@ def apply_rule_based_filter(table: pa.Table, text_field: str) -> pa.ChunkedArray
 
 
 def scan_reddit_dataset(
-    file_paths: list[str] | str,
-    columns: list[str] | None = None,
-    target_subreddits: list[str] | None = None,
-    batch_size: int = 128_000,
+    data_source: str | list[str],
+    schema: pa.Schema | None = None,
+    partitioning: ds.Partitioning | str = "hive",
+    columns: str | list[str] | None = None,
+    subreddit: str | list[str] | None = None,
+    batch_size: int = 65_536,
+    use_threads: bool = True,
 ) -> Iterator[pl.DataFrame]:
-    """Stream chunks of Reddit data from partitioned dataset."""
+    """Scan a Reddit parquet dataset and yield batches as Polars DataFrames.
 
-    # Define the filter expression
-    filter_expr = None
-    if target_subreddits:
-        # Create a pyarrow expression: subreddit is in [list]
-        filter_expr = ds.field("subreddit").isin(target_subreddits)
+    This function provides memory-efficient streaming access to a large Reddit
+    partitioned parquet dataset by reading data in batches rather than loading
+    everything into memory at once.
+    It supports filtering by subreddit and selecting specific columns.
 
-    # Initialize PyArrow Dataset
-    dataset = ds.dataset(file_paths, format="parquet")
+    The function is optimized for low memory usage by:
+    - Using batched reading with configurable batch sizes
+    - Disabling readahead to prevent loading data before it's needed
+    - Explicitly releasing memory after processing each batch
+    - Using buffered streams for efficient I/O
 
-    # Filter columns to only those that exist in the actual dataset schema
-    # This handles cases where requested columns don't exist in the parquet files
-    available_columns = set(dataset.schema.names)
+    Parameters
+    ----------
+    data_source : str or list of str
+        Path(s) to the Parquet dataset. Can be a single directory, file,
+        or a list of paths.
+    schema : pa.Schema, optional, default=None
+        PyArrow schema for the dataset. If ``None``, the schema will be inferred
+        from the data files.
+    partitioning : ds.Partitioning or str, default="hive"
+        Partitioning scheme used in the dataset. "hive" means the data uses
+        Hive-style partitioning (e.g., "subreddit=AskReddit/bucket=0/file.parquet").
+    columns : str or list of str, optional
+        Column name(s) to read from the dataset. If ``None``, all columns are read.
+        Selecting specific columns reduces memory usage and improves performance.
+    subreddit : str or list of str, optional
+        Filter data to only include posts from these subreddit(s). If ``None``,
+        all subreddits are included.
+    batch_size : int, default=65536
+        Number of rows to read in each batch. Larger batches are more I/O-efficient
+        but use more memory.
+    use_threads : bool, default=True
+        Whether to use multiple threads for reading. Can speed up I/O but may
+        increase memory usage.
 
-    filtered_columns: list[str] | None = None
-    if columns:
-        filtered_columns = [col for col in columns if col in available_columns]
-        if not filtered_columns:
-            return
+    Yields
+    ------
+    pl.DataFrame
+        Polars DataFrame containing one batch of data from the dataset.
+        Each DataFrame has up to `batch_size` rows.
 
-    # Create a Scanner
-    # This pushes the filter down to the I/O layer.
-    # It will skip row groups where 'subreddit' stats don't match the list.
-    scanner = dataset.scanner(
-        columns=filtered_columns, filter=filter_expr, batch_size=batch_size
+    Examples
+    --------
+    >>> # Read all data from a dataset
+    >>> for batch in scan_reddit_dataset("/path/to/reddit/data"):
+    ...     print(f"Processing {len(batch)} rows")
+    ...     # Process the batch
+
+    >>> # Read only specific columns from specific subreddits
+    >>> for batch in scan_reddit_dataset(
+    ...     "/path/to/reddit/data",
+    ...     columns=["body", "author", "created_utc"],
+    ...     subreddit=["AskReddit", "science"],
+    ...     batch_size=10000,
+    ... ):
+    ...     # Process filtered data
+    ...     pass
+
+    Notes
+    -----
+    The function includes error handling for individual files, so if one file
+    fails to read, it will log the error and continue with the next file.
+    Memory is aggressively released after each batch to prevent accumulation.
+
+    """
+    dataset = ds.dataset(
+        data_source, schema=schema, format="parquet", partitioning=partitioning
     )
 
-    # Stream Batches
-    # to_batches() returns an iterator that keeps its place.
-    # It only decompresses the specific row groups that pass the filter.
-    for batch in scanner.to_batches():
-        if batch.num_rows > 0:
-            # Zero-copy convert to Polars
-            yield pl.from_arrow(batch)
+    filter_expr = None
+    if subreddit:
+        if isinstance(subreddit, str):
+            subreddit = [subreddit]
+
+        filter_expr = get_subreddit_filter_expr(subreddit)
+
+    if isinstance(columns, str):
+        columns = [columns]
+
+    fragments = dataset.get_fragments(filter_expr)
+
+    for fragment in fragments:
+        try:
+            # Create a localized scanner for this file only
+            scanner = fragment.scanner(
+                columns=columns,
+                batch_size=batch_size,
+                filter=filter_expr,
+                batch_readahead=0,  # Don't load Batch 2 until Batch 1 is done
+                fragment_readahead=0,  # Don't open File B until File A is done
+                fragment_scan_options=ds.ParquetFragmentScanOptions(
+                    use_buffered_stream=True,
+                    buffer_size=16 << 20,  # 16 MiB
+                    pre_buffer=False,
+                ),
+                cache_metadata=True,
+                use_threads=use_threads,
+            )
+
+            for batch in scanner.to_reader():
+                if batch.num_rows > 0:
+                    yield pl.from_arrow(batch)
+
+                    del batch
+
+            del scanner
+
+        except Exception as e:
+            print(f"Error scanning file: {e}")
+            continue
+        finally:
+            pa.default_memory_pool().release_unused()
+            # Force Python to clear circular references immediately
+            gc.collect()
+
+
+def get_subreddit_filter_expr(subreddits: list[str]) -> pc.Expression:
+    """Create a PyArrow filter expression for selecting specific subreddits.
+
+    This function creates an optimized filter that checks both the bucket
+    (a hash-based partition key) and subreddit name. Filtering by bucket
+    first is more efficient because it allows skipping entire partition
+    directories without opening the files.
+
+    Parameters
+    ----------
+    subreddits : list of str
+        List of subreddit names to filter for (e.g., ['AskReddit', 'science']).
+        Names should match exactly as they appear in the dataset.
+
+    Returns
+    -------
+    pc.Expression
+        A PyArrow compute expression that evaluates to True for rows where
+        the subreddit matches one of the provided names. This expression
+        can be passed to dataset scanning functions.
+
+    Examples
+    --------
+    >>> subreddits = ["AskReddit", "science"]
+    >>> filter_expr = get_subreddit_filter_expr(subreddits)
+    >>> # Use with dataset scanning
+
+    Notes
+    -----
+    The function uses a two-level filter:
+    1. bucket.isin(buckets) - Fast partition-level filtering
+    2. subreddit.isin(subreddits) - Exact name matching
+
+    This approach is much faster than filtering by subreddit alone when
+    working with partitioned datasets.
+
+    """
+    buckets = bucket_from_subreddit(pa.array(subreddits)).to_pylist()
+    return ds.field("bucket").isin(buckets) & ds.field("subreddit").isin(subreddits)

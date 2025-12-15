@@ -54,7 +54,7 @@ def test_scan_reddit_chunks_filters_and_limits_columns(tmp_path):
         pfilter.scan_reddit_dataset(
             [file_path.as_posix()],
             columns=["subreddit", "title", "report_text", "score", "missing"],
-            target_subreddits=["TestSub"],
+            subreddit=["TestSub"],
             batch_size=1,
         )
     )

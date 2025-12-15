@@ -1,5 +1,6 @@
 """Utilities for downloading Reddit data from The Eye archive."""
 
+import gc
 import json
 import logging
 import os
@@ -151,10 +152,10 @@ def download_subs_list(data_path: str) -> str:
 
 
 @retry(
-    wait=wait_exponential_jitter(initial=1, max=60),
-    stop=stop_after_attempt(7),
+    wait=wait_exponential_jitter(initial=1, max=10),
+    stop=stop_after_attempt(10),
     retry=retry_if_exception(is_retryable_error),
-    before_sleep=before_sleep_log(logger, logging.INFO),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
 )
 def download_sub_data(
     subreddit: str, content_type: Literal["submissions", "comments"], data_path: str
@@ -203,13 +204,13 @@ def download_sub_data(
 
         def _download(target_url: str, context: Optional[ssl.SSLContext]) -> str:
             if context is None:
-                return wget.download(target_url, out=data_path)
+                return wget.download(target_url, out=data_path, bar=None)
 
             opener = request.build_opener(request.HTTPSHandler(context=context))
             previous_opener = request._opener  # type: ignore[attr-defined]
             try:
                 request.install_opener(opener)
-                return wget.download(target_url, out=data_path)
+                return wget.download(target_url, out=data_path, bar=None)
             finally:
                 if previous_opener is None:
                     request._opener = None  # type: ignore[attr-defined]
@@ -283,7 +284,8 @@ def iter_bucketed_batches(
     chunk_size: int = 256 << 20,
     *,
     progress_enabled: bool = True,
-    use_threads_for_parsing: bool = True,
+    tqdm_bar_position: int = 0,
+    use_threads: bool = True,
 ) -> Iterator[pa.RecordBatch]:
     """Stream Arrow record batches from a Pushshift Zstandard archive.
 
@@ -295,7 +297,9 @@ def iter_bucketed_batches(
         Target size in bytes for each decompressed NDJSON chunk read from disk.
     progress_enabled : bool, optional, default=True
         If ``True``, display a tqdm progress bar keyed to compressed bytes read.
-    use_threads_for_parsing : bool, default=True
+    tqdm_bar_position : int, optional, default=0
+        Position index for the tqdm progress bar when multiple bars are shown.
+    use_threads : bool, default=True
         If ``True``, use threads when reading raw JSON chunks. This will
         set ``use_threads=True`` in ``pyarrow.json.read_json``.
 
@@ -324,6 +328,7 @@ def iter_bucketed_batches(
             desc=f"Processing {Path(zst_archive_path).name}",
             leave=False,
             dynamic_ncols=True,
+            position=tqdm_bar_position,
         )
 
     try:
@@ -332,7 +337,7 @@ def iter_bucketed_batches(
         ):
             try:
                 table = _parse_ndjson_bytes_to_table(
-                    chunk, zst_archive_path, use_threads=use_threads_for_parsing
+                    chunk, zst_archive_path, use_threads=use_threads
                 )
             except pa.ArrowInvalid as exc:
                 logger.error(
@@ -352,6 +357,8 @@ def iter_bucketed_batches(
             )
             table = pc.take(table, indices)
             yield from table.to_batches()
+
+            del table
     except Exception as exc:
         logger.error(
             "Error processing %s: %s",
@@ -362,6 +369,8 @@ def iter_bucketed_batches(
     finally:
         if reader_pbar is not None:
             reader_pbar.close()
+
+        gc.collect()
 
 
 def iter_zst_ndjson_blocks(

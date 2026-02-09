@@ -953,12 +953,12 @@ def _get_normalization_expr(col_name: str) -> pl.Expr:
         .str.replace_many(pre_nfkc_map, ascii_case_insensitive=False)
         # NFKC Normalization (Canonicalize unicode forms)
         .str.normalize("NFKC")
+        .str.to_lowercase()
         # Apply Translation Table
         .str.replace_many(post_nfkc_map, ascii_case_insensitive=False)
         # NFD + Strip Accents (café -> cafe)
         .str.normalize("NFD")
         .str.replace_all(strip_accents_pattern, "")
-        .str.to_lowercase()
         # Handle Letter-Number Boundaries (10mg -> 10 mg)
         # Use ${1} syntax for capture groups in Polars
         .str.replace_all(r"(\d)([a-z])", "${1} ${2}")

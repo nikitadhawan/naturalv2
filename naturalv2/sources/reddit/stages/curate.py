@@ -566,6 +566,9 @@ def _process_chunk(
         col for col in ["title", "initial_post", "report_text"] if col in df.columns
     ]
     if not txt_cols:
+        logger.warning(
+            "No text columns available for matching in subreddit %s", ctx.name
+        )
         return None
 
     df_prep = df
@@ -580,6 +583,11 @@ def _process_chunk(
         df_prep = df_prep.filter(pl.col("_dt") <= ctx.global_max_date)
 
         if df_prep.is_empty():
+            logger.info(
+                "All posts/comments in this chunk are after the publication date of "
+                "relevant experiments for subreddit %s. Skipping automaton matching.",
+                ctx.name,
+            )
             return None
 
     df_prep = (
@@ -614,6 +622,10 @@ def _process_chunk(
     del df_prep
 
     if df_matches.is_empty():
+        logger.debug(
+            "No treatment mentions found in this chunk for subreddit %s after automaton matching.",
+            ctx.name,
+        )
         return None
 
     df_matches = df_matches.drop("_normalized_text").with_columns(
@@ -675,6 +687,11 @@ def _process_chunk(
         df_final = df_final.unique(subset=["nct_id", "permalink"])
 
     if df_final.is_empty():
+        logger.debug(
+            "No treatment mentions remain in this chunk for subreddit %s after "
+            "joining with experiments and applying date filters.",
+            ctx.name,
+        )
         return None
 
     # Build markdown report

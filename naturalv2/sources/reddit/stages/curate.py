@@ -156,7 +156,7 @@ class RedditCurateStage(SourceStage):
         # Process files in parallel
         num_workers = min(len(registry), self.num_workers)
         with ProcessPoolExecutor(
-            max_workers=num_workers,
+            max_workers=max(num_workers, 1),
             initializer=_worker_initializer,
             initargs=(registry,),
         ) as pool:

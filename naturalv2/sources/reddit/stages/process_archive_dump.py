@@ -516,8 +516,17 @@ def _discover_zst_archives(candidates: list[Path]) -> list[Path]:
         if candidate.is_file() and candidate.suffix.lower() == ".zst":
             file_paths.append(resolved)
         elif candidate.is_dir():
-            files = [f.resolve() for f in candidate.rglob("*.zst") if f.is_file()]
-            file_paths.extend(files)
+            for file_path in candidate.rglob("*.zst"):
+                if not file_path.is_file():
+                    continue
+
+                resolved_file = file_path.resolve()
+                # Dedupe files discovered via overlapping inputs (e.g., directory + explicit file path).
+                if resolved_file in seen:
+                    continue
+
+                seen.add(resolved_file)
+                file_paths.append(resolved_file)
 
     # sort files by size (largest first) to help with load balancing
     file_paths.sort(key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)

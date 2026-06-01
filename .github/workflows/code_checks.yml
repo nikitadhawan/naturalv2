@@ -77,5 +77,6 @@ jobs:
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
           virtual-environment: .venv/
+          # GHSA-w8v5-vhqr-4h9v: no fix available for diskcache
           ignore-vulns: |
             GHSA-w8v5-vhqr-4h9v

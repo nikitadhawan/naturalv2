@@ -368,6 +368,11 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
                     ],
                 )
                 emit_table(context_table, logger=logger)
+                if len(curated_df) > 100000:
+                    logger.warning(
+                        f"{nct_id} has more than 100k datapoints - double check if pipeline should be run."
+                    )
+                    continue
 
                 # Run the pipeline
                 extractions = await pipeline.run(curated_df, pipeline_context)

@@ -33,7 +33,7 @@ user_prompt_template: |-
   Description: {{ outcome_desc }}
   Guidelines:
   - "Yes" = The patient's experiences matches the outcome description above and they would belong to that category.
-  - "No" = The patients experiences matches the oppsoite of the outcome description above and they would belong to the opposite category.
+  - "No" = The patients experiences matches the opposite of the outcome description above and they would belong to the opposite category.
   - "Unknown" = There is no information about the outcome category the patient belongs to that can be reasonably inferred.
 
   **Report found on {{ source }}:**

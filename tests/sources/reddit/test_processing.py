@@ -5,6 +5,7 @@ import pytest
 from naturalv2.sources.reddit.processing import _utils as utils
 from naturalv2.sources.reddit.processing import contextualize as ctx
 from naturalv2.sources.reddit.processing import filter as pfilter
+from naturalv2.sources.reddit.processing._utils import bucket_from_subreddit
 
 
 def test_apply_rule_based_filter_flags_common_cases():
@@ -38,7 +39,9 @@ def test_apply_rule_based_filter_flags_common_cases():
 
 
 def test_scan_reddit_chunks_filters_and_limits_columns(tmp_path):
-    parquet_dir = tmp_path / "content_type=submissions" / "bucket=001"
+    test_subreddit = "TestSub"
+    bucket = bucket_from_subreddit(pa.array([test_subreddit])).to_pylist()[0]
+    parquet_dir = tmp_path / "content_type=submissions" / f"bucket={bucket}"
     parquet_dir.mkdir(parents=True)
     file_path = parquet_dir / "sample.parquet"
     pl.DataFrame(
@@ -54,7 +57,7 @@ def test_scan_reddit_chunks_filters_and_limits_columns(tmp_path):
         pfilter.scan_reddit_dataset(
             [file_path.as_posix()],
             columns=["subreddit", "title", "report_text", "score", "missing"],
-            subreddit=["TestSub"],
+            subreddit=[test_subreddit],
             batch_size=1,
         )
     )

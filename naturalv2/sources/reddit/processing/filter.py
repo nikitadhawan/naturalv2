@@ -225,6 +225,9 @@ def scan_reddit_dataset(
 
     if isinstance(columns, str):
         columns = [columns]
+    if columns:
+        available_columns = set(dataset.schema.names)
+        columns = [column for column in columns if column in available_columns]
 
     fragments = dataset.get_fragments(fragment_filter_expr)
 

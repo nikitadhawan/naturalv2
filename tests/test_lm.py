@@ -100,18 +100,12 @@ def test_get_message_content_object():
     assert "foo" in get_message_content(Response())
 
 
-@patch("vllm.LLM")
-@patch("vllm.SamplingParams")
-@patch("vllm.transformers_utils.tokenizer.AnyTokenizer")
-@patch("msgspec.structs.asdict", return_value={})
-def test_vllmmodel_invoke_and_parse(
-    mock_asdict, mock_tokenizer_class, mock_sampling_params, mock_llm_class
-):
-    # FIX: Add the __annotations__ attribute to the mocked SamplingParams class
+def test_vllmmodel_invoke_and_parse():
+    mock_sampling_params = MagicMock()
     mock_sampling_params.__annotations__ = {"temperature": float, "max_tokens": int}
 
     mock_llm_instance = MagicMock()
-    mock_llm_class.return_value = mock_llm_instance
+    mock_llm_class = MagicMock(return_value=mock_llm_instance)
     mock_tokenizer = MagicMock()
     mock_tokenizer.apply_chat_template.return_value = "templated_prompt"
     mock_llm_instance.get_tokenizer.return_value = mock_tokenizer
@@ -128,8 +122,28 @@ def test_vllmmodel_invoke_and_parse(
     )
     mock_llm_instance.generate.return_value = [mock_response]
 
-    model = VLLMModel(model_id="vllm-model")
-    resp = model.invoke([{"role": "user", "content": "test"}])
+    mock_vllm = MagicMock()
+    mock_vllm.LLM = mock_llm_class
+    mock_vllm.SamplingParams = mock_sampling_params
+    mock_vllm.transformers_utils.tokenizer.AnyTokenizer = MagicMock()
+
+    mock_msgspec = MagicMock()
+    mock_msgspec.structs.asdict.return_value = {}
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm": mock_vllm,
+            "vllm.outputs": mock_vllm.outputs,
+            "vllm.transformers_utils": mock_vllm.transformers_utils,
+            "vllm.transformers_utils.tokenizer": mock_vllm.transformers_utils.tokenizer,
+            "torch": MagicMock(),
+            "msgspec": mock_msgspec,
+        },
+    ):
+        model = VLLMModel(model_id="vllm-model")
+        resp = model.invoke([{"role": "user", "content": "test"}])
+
     assert resp.__class__.__name__ == "ModelResponse"
     assert resp.output_text == "vllm response"
 

@@ -1,5 +1,5 @@
 defaults:
-  - source@sources.reddit: reddit
+  - source@sources.reddit: reddit_20k
   - source@sources.pubmed: pubmed
   - _self_
 

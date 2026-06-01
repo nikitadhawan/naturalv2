@@ -27,7 +27,21 @@ PRE_NFKC_TRANSLATION_TABLE = {ord("™"): None, ord("®"): None, ord("\ufeff"): 
 POST_NFKC_TRANSLATION_TABLE = {
     **{ord(c): "-" for c in _HYPHEN_RUNS},
     **{ord(c): None for c in _ZERO_WIDTH},
+    # Map superscript digits down to normal digits so “m²” and “m2” line up.
+    ord("¹"): "1",
+    ord("²"): "2",
+    ord("³"): "3",
+    ord("⁴"): "4",
+    ord("⁵"): "5",
+    ord("⁶"): "6",
+    ord("⁷"): "7",
+    ord("⁸"): "8",
+    ord("⁹"): "9",
+    ord("⁰"): "0",
     ord("\xa0"): " ",  # non-breaking space; `&nbsp` in HTML
+    ord("\u2007"): " ",  # figure space, often used in tables
+    ord("\u202f"): " ",  # narrow no-break space, common in SI
+    ord("\u200a"): " ",  # hair space
     ord("^"): None,
     ord("•"): " ",
     ord("→"): " ",
@@ -36,24 +50,27 @@ POST_NFKC_TRANSLATION_TABLE = {
     # Different “micro” symbols both become a simple “u”
     ord("µ"): "u",
     ord("μ"): "u",
-    # Swap Greek letters for simple words so Unicode and ASCII versions match up
-    ord("α"): "alpha",
-    ord("β"): "beta",
-    ord("γ"): "gamma",
-    ord("δ"): "delta",
-    ord("Δ"): "delta",
-    ord("ε"): "epsilon",
-    ord("κ"): "kappa",
-    ord("Ω"): "omega",
-    ord("ω"): "omega",
 }
+
+GREEK_CHAR_MAP = {
+    "α": "alpha",
+    "β": "beta",
+    "γ": "gamma",
+    "δ": "delta",
+    "Δ": "delta",
+    "ε": "epsilon",
+    "κ": "kappa",
+    "Ω": "omega",
+    "ω": "omega",
+}
+
+_RE_SPACES = re.compile(r"\s+")
+_RE_NUM_TO_LETTER = re.compile(r"(?<=\d)(?=[a-z])")
+_RE_LETTER_TO_NUM = re.compile(r"(?<=[a-z])(?=\d)")
 
 # Break aliases on the connectors above so we can rebuild them with the flexible
 # pattern e.g. "calcium-magnesium+citrate" -> ["calcium", "magnesium", "citrate"]
 CONNECTOR_SPLIT = re.compile(r"[-_/+,;:\s]+")
-
-NUM_TO_DIGIT_RE = re.compile(r"(\d)([a-z])")
-DIGIT_TO_NUM_RE = re.compile(r"([a-z])(\d)")
 
 CONNECTOR_CHAR_SET = set("-_/+,;:")
 CONNECTOR_CHAR_SET.add(" ")
@@ -122,9 +139,11 @@ def normalize_text_for_matching(text: str) -> str:
     3. Convert to lowercase
     4. Replace various symbols (hyphens, Greek letters, etc.)
     5. Apply NFD normalization and remove accent marks
-    6. Insert spaces between numbers and letters ("10mg" → "10 mg")
-    7. Collapse connector characters to single spaces
-    8. Strip leading/trailing punctuation
+    6. Collapse repeated whitespace and trim loose edge punctuation
+    7. Insert spaces between numbers and letters ("10mg" → "10 mg")
+
+    Connector characters (hyphens, slashes, etc.) are preserved here and
+    collapsed later in ``canonicalize_reports_for_matching``.
 
     Parameters
     ----------
@@ -141,13 +160,13 @@ def normalize_text_for_matching(text: str) -> str:
     Examples
     --------
     >>> normalize_text_for_matching("Ibuprofen-200mg")
-    'ibuprofen 200 mg'
+    'ibuprofen-200 mg'
 
     >>> normalize_text_for_matching("Naproxen/Naprosyn")
-    'naproxen naprosyn'
+    'naproxen/naprosyn'
 
     >>> normalize_text_for_matching("α-blocker")
-    'alpha blocker'
+    'alpha-blocker'
 
     Notes
     -----
@@ -157,40 +176,29 @@ def normalize_text_for_matching(text: str) -> str:
     Greek letters are replaced with their English names (α→"alpha", β→"beta", etc.)
     to ensure matches between Unicode and ASCII representations.
 
-    Various hyphen-like characters (\\u2010-\\u2014, \\u2212, -) are all normalized
-    to spaces to handle inconsistent hyphenation.
+    Various hyphen-like characters (\\u2010-\\u2014, \\u2212, -) are normalized
+    to ASCII hyphens. Connector collapsing happens in
+    ``canonicalize_reports_for_matching``.
 
     """
     if not text:
         return ""
 
-    # Initial translation to remove unwanted characters before normalization
     text = text.translate(PRE_NFKC_TRANSLATION_TABLE)
-
-    # Apply NFKC normalization to standardize Unicode forms
-    text = unicodedata.normalize("NFKC", text)
-
-    # Transform text to lowercase for case-insensitive matching
-    text = text.lower()
-
-    # Apply translation table for symbol replacements
     text = text.translate(POST_NFKC_TRANSLATION_TABLE)
 
-    # Apply NFD normalization to separate accents for removal
-    text = unicodedata.normalize("NFD", text)
+    if text.isascii():
+        text = text.casefold()
+    else:
+        text = unicodedata.normalize("NFKC", text).casefold()
+        text = text.translate(POST_NFKC_TRANSLATION_TABLE)
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
 
-    # Remove accent marks
-    text = "".join(c for c in text if not unicodedata.combining(c))
-
-    # Insert Space Between Numbers and Letters (e.g., "10mg" -> "10 mg")
-    text = NUM_TO_DIGIT_RE.sub(r"\1 \2", text)
-    text = DIGIT_TO_NUM_RE.sub(r"\1 \2", text)
-
-    # Collapse Separators
-    text = CONNECTOR_SPLIT.sub(" ", text)
-
-    # Trim Leading/Trailing Connectors
-    return text.strip("".join(CONNECTOR_CHAR_SET))
+    text = "".join(GREEK_CHAR_MAP.get(char, char) for char in text)
+    text = _RE_SPACES.sub(" ", text).strip("".join(CONNECTOR_CHAR_SET))
+    text = _RE_NUM_TO_LETTER.sub(" ", text)
+    return _RE_LETTER_TO_NUM.sub(" ", text)
 
 
 def iter_canonical_variations(text: str) -> list[str]:

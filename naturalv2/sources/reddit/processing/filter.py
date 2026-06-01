@@ -198,8 +198,8 @@ def scan_reddit_dataset(
 
     Notes
     -----
-    The function includes error handling for individual files, so if one file
-    fails to read, it will log the error and continue with the next file.
+    The function fails fast on fragment read errors to avoid silently returning
+    incomplete results.
     Memory is aggressively released after each batch to prevent accumulation.
 
     """
@@ -207,17 +207,26 @@ def scan_reddit_dataset(
         data_source, schema=schema, format="parquet", partitioning=partitioning
     )
 
-    filter_expr = None
+    fragment_filter_expr = None
+    scanner_filter_expr = None
     if subreddit:
         if isinstance(subreddit, str):
             subreddit = [subreddit]
 
-        filter_expr = get_subreddit_filter_expr(subreddit)
+        scanner_filter_expr = ds.field("subreddit").isin(subreddit)
+        if "bucket" in dataset.schema.names:
+            buckets = bucket_from_subreddit(pa.array(subreddit)).to_pylist()
+            # Only apply bucket pruning at fragment selection time; applying the full
+            # (bucket + subreddit) filter again at scanner level can fail when
+            # partition fields are not materialized as scan columns.
+            fragment_filter_expr = ds.field("bucket").isin(buckets)
+        else:
+            fragment_filter_expr = scanner_filter_expr
 
     if isinstance(columns, str):
         columns = [columns]
 
-    fragments = dataset.get_fragments(filter_expr)
+    fragments = dataset.get_fragments(fragment_filter_expr)
 
     for fragment in fragments:
         try:
@@ -225,7 +234,7 @@ def scan_reddit_dataset(
             scanner = fragment.scanner(
                 columns=columns,
                 batch_size=batch_size,
-                filter=filter_expr,
+                filter=scanner_filter_expr,
                 batch_readahead=0,  # Don't load Batch 2 until Batch 1 is done
                 fragment_readahead=0,  # Don't open File B until File A is done
                 fragment_scan_options=ds.ParquetFragmentScanOptions(
@@ -245,9 +254,10 @@ def scan_reddit_dataset(
 
             del scanner
 
-        except Exception as e:
-            print(f"Error scanning file: {e}")
-            continue
+        except Exception:
+            logger.exception("Error scanning fragment %s", fragment.path)
+            # Fail fast so callers do not silently receive incomplete results.
+            raise
         finally:
             release_memory()
 

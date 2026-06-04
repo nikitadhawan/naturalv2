@@ -2,13 +2,14 @@
 
 import logging
 from collections import Counter
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
-from presidio_analyzer import AnalyzerEngine, BatchAnalyzerEngine
-from presidio_anonymizer import AnonymizerEngine, OperatorConfig
 from tqdm import tqdm
 
+
+if TYPE_CHECKING:
+    from presidio_analyzer import BatchAnalyzerEngine
 
 logger = logging.getLogger(__name__)
 logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
@@ -81,6 +82,18 @@ class Anonymizer:
 
     def __init__(self, score_threshold: float = 0.85) -> None:
         """Initialize the Anonymizer with a score threshold."""
+        try:
+            from presidio_analyzer import AnalyzerEngine  # noqa: PLC0415
+            from presidio_anonymizer import (  # noqa: PLC0415
+                AnonymizerEngine,
+                OperatorConfig,
+            )
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "Please install 'presidio-analyzer' and 'presidio-anonymizer' to use Anonymizer: "
+                "`pip install presidio-analyzer presidio-anonymizer`"
+            ) from None
+
         self._score_threshold = score_threshold
         self._analyzer = AnalyzerEngine(
             default_score_threshold=score_threshold, supported_languages=["en"]
@@ -166,6 +179,14 @@ class Anonymizer:
             or if `cols_to_keep` or `cols_to_anonymize` are not lists of strings.
 
         """
+        try:
+            from presidio_analyzer import BatchAnalyzerEngine  # noqa: PLC0415
+        except ModuleNotFoundError:
+            raise ModuleNotFoundError(
+                "Please install 'presidio-analyzer' to use Anonymizer: "
+                "`pip install presidio-analyzer`"
+            ) from None
+
         cols_to_keep, cols_to_anonymize = self._validate_anonymize_dataframe_args(
             cols_to_keep, cols_to_anonymize, batch_size, num_workers
         )
@@ -221,7 +242,7 @@ class Anonymizer:
     def _anonymize_column(
         self,
         col: pd.Series,
-        batch_analyzer: BatchAnalyzerEngine,
+        batch_analyzer: "BatchAnalyzerEngine",
         batch_size: int = 1,
         num_workers: int = 1,
     ) -> tuple[pd.Series, dict[str, int]]:

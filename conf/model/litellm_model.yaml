@@ -11,5 +11,5 @@ max_parallel_requests: null
 
 # kwargs: default sampling parameters per model call
 seed: ${seed}
-max_tokens: 512
+max_tokens: 8192
 num_retries: 5

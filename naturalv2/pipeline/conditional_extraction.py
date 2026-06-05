@@ -506,6 +506,7 @@ async def _offline_inference(  # noqa: PLR0912
         endpoint="text_completion",
         max_tokens=1,
         prompt_logprobs=0,
+        detokenize=False,
         use_tqdm=functools.partial(tqdm, leave=False),
     )
 
@@ -805,6 +806,7 @@ async def _prompt_processor(
                                 endpoint="text_completion",
                                 max_tokens=1,
                                 prompt_logprobs=0,
+                                detokenize=False,
                             ),
                             name="LLM-Call",
                         )

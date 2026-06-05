@@ -7,11 +7,14 @@ drug names and their aliases.
 import ast
 import gzip
 import json
+import logging
 import os
 
 import pandas as pd
 from lxml import etree as ET  # noqa: N812
 
+
+logger = logging.getLogger(__name__)
 
 _aliases_cache: dict[int, list[str]] | None = None
 _index_mapping: dict[str, int] | None = None
@@ -67,7 +70,10 @@ def _load_data(data_path: str) -> None:
         else:
             file_path = os.path.join(data_path, "full_database.xml.gz")
             if not os.path.exists(file_path):
-                raise FileNotFoundError(f"DrugBank data file not found: {file_path}")
+                logger.warning(f"DrugBank data file not found: {file_path}")
+                _aliases_cache = {}
+                _index_mapping = {}
+                return
 
             aliases_dicts, _index_mapping = _parse_drugbank_xml(file_path)
             aliases_df = pd.DataFrame(aliases_dicts)

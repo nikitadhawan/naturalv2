@@ -14,7 +14,6 @@ with patch.dict(
     {
         "vllm": mock_vllm,
         "vllm.outputs": mock_vllm.outputs,
-        "vllm.transformers_utils.tokenizer": mock_vllm.transformers_utils.tokenizer,
         "torch": MagicMock(),
         "msgspec": MagicMock(),
         "msgspec.structs": MagicMock(),
@@ -125,8 +124,6 @@ def test_vllmmodel_invoke_and_parse():
     mock_vllm = MagicMock()
     mock_vllm.LLM = mock_llm_class
     mock_vllm.SamplingParams = mock_sampling_params
-    mock_vllm.transformers_utils.tokenizer.AnyTokenizer = MagicMock()
-
     mock_msgspec = MagicMock()
     mock_msgspec.structs.asdict.return_value = {}
 
@@ -136,7 +133,6 @@ def test_vllmmodel_invoke_and_parse():
             "vllm": mock_vllm,
             "vllm.outputs": mock_vllm.outputs,
             "vllm.transformers_utils": mock_vllm.transformers_utils,
-            "vllm.transformers_utils.tokenizer": mock_vllm.transformers_utils.tokenizer,
             "torch": MagicMock(),
             "msgspec": mock_msgspec,
         },

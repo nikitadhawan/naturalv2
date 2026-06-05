@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from litellm.types.llms.openai import ResponsesAPIResponse
     from litellm.types.router import LiteLLMParamsTypedDict
     from vllm.outputs import RequestOutput
+    from vllm.tokenizers import TokenizerLike
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -228,7 +229,6 @@ class VLLMModel(Model):
         try:
             import msgspec
             from vllm import LLM
-            from vllm.transformers_utils.tokenizer import AnyTokenizer
         except ModuleNotFoundError as e:
             raise ModuleNotFoundError(
                 "Please install 'vllm' to use VLLMModel: `pip install vllm`"
@@ -236,7 +236,7 @@ class VLLMModel(Model):
 
         self.model_kwargs = model_kwargs or {}
         self.model = LLM(model=model_id, **self.model_kwargs)
-        self.tokenizer: AnyTokenizer = self.model.get_tokenizer()
+        self.tokenizer: TokenizerLike = self.model.get_tokenizer()
         self._default_sampling_params = msgspec.structs.asdict(
             self.model.get_default_sampling_params()
         )

@@ -352,7 +352,10 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
                     )
                     continue
 
-                curated_df = pd.read_csv(curated_filepath)
+                if os.path.isdir(curated_filepath):
+                    curated_df = pd.read_parquet(curated_filepath)
+                else:
+                    curated_df = pd.read_csv(curated_filepath)
                 # TODO: remove subsampling after testing
                 # curated_df = curated_df.sample(
                 #     frac=0.05, random_state=cfg.seed, ignore_index=True

@@ -6,7 +6,8 @@ import os
 import hydra
 import yaml
 from omegaconf import DictConfig
-from tqdm.contrib.concurrent import process_map
+from tqdm.contrib.concurrent import thread_map
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 import naturalv2.hydra_setup  # noqa: F401 # Ensure custom resolvers are registered
 from naturalv2.clinical_trial import ClinicalTrial, Mesh, download_clinical_trials
@@ -57,13 +58,20 @@ def find_valid_ncts(data_path: str, ate: bool = True, test: bool = False) -> lis
         download_clinical_trials(trial_path, test)
 
     if not os.path.exists(valid_nct_path):
-        file_list = [(filename, trial_path, ate) for filename in os.listdir(trial_path)]
+        file_list = [
+            (filename, trial_path, ate)
+            for filename in os.listdir(trial_path)
+            if filename.endswith(".json")
+        ]
+        if not file_list:
+            return []
 
-        results: list[tuple[str, dict[str, int], bool]] = process_map(
+        logger.info("Scanning %d trial files in %s...", len(file_list), trial_path)
+
+        results: list[tuple[str, dict[str, int], bool]] = thread_map(
             _process_trial_file,
             file_list,
             desc="Finding valid trials" + (" (test)" if test else ""),
-            chunksize=1,
             leave=False,
             dynamic_ncols=True,
         )
@@ -75,6 +83,8 @@ def find_valid_ncts(data_path: str, ate: bool = True, test: bool = False) -> lis
                     if check:
                         valid_file.write(f"{nct_id}\n")
         logger.info("Benchmark Stats: %s", stats)
+    else:
+        logger.info("Using cached valid NCT list: %s", valid_nct_path)
 
     with open(valid_nct_path, "r") as valid_file:
         return [line.strip() for line in valid_file.readlines()]
@@ -123,11 +133,10 @@ def find_condition_ncts(
     condition_trials: list[tuple[str, str | None]] = []
     conditions_set = {cond.replace("_", " ").lower() for cond in conditions}
 
-    results: list[tuple[str, str | None]] = process_map(
+    results: list[tuple[str, str | None]] = thread_map(
         _process_condition_trial,
         [(nct_id, trial_path, conditions_set, test) for nct_id in nct_ids],
         desc="Finding condition trials" + (" (test)" if test else ""),
-        chunksize=1,
         leave=False,
         dynamic_ncols=True,
     )
@@ -206,7 +215,10 @@ def _process_condition_trial(
 
 
 def run_study_and_get_stats(cfg: DictConfig) -> dict:
+    logger.info("Step 1/5: Finding valid completed trials...")
     nct_list = find_valid_ncts(cfg.data_path, ate=cfg.ate)
+
+    logger.info("Step 2/5: Finding valid active test trials...")
     test_nct_list = find_valid_ncts(cfg.data_path, ate=cfg.ate, test=True)
     logger.info(
         "Total valid trials: %s Completed and %s Test",
@@ -214,13 +226,21 @@ def run_study_and_get_stats(cfg: DictConfig) -> dict:
         len(test_nct_list),
     )
 
+    logger.info("Step 3/5: Filtering completed trials for %s...", cfg.conditions)
     retro_trials = find_condition_ncts(
         nct_list, cfg.data_path, cfg.conditions, ate=cfg.ate
     )
+
+    logger.info("Step 4/5: Filtering test trials for %s...", cfg.conditions)
     test_trials = find_condition_ncts(
         test_nct_list, cfg.data_path, cfg.conditions, ate=cfg.ate, test=True
     )
 
+    logger.info(
+        "Step 5/5: Building study (%d retro, %d test)...",
+        len(retro_trials),
+        len(test_trials),
+    )
     study = Study(retro_trials, test_trials, cfg)
     study_filepath = get_study_filepaths(cfg.data_path, cfg.conditions[0], ate=cfg.ate)[
         "study"
@@ -244,7 +264,8 @@ def run_study_and_get_stats(cfg: DictConfig) -> dict:
 # TODO: improve on relative path for config
 @hydra.main(config_path="../../conf/", config_name="common.yaml", version_base="1.2")
 def main(cfg: DictConfig) -> None:
-    stats = run_study_and_get_stats(cfg)
+    with logging_redirect_tqdm():
+        stats = run_study_and_get_stats(cfg)
     print(yaml.safe_dump(stats, sort_keys=False))
 
 

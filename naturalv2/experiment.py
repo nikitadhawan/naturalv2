@@ -685,7 +685,7 @@ class Experiment:
         format_inputs = {
             "conditions": self._conditions,
             "source": source_name,
-            "treatments": self.treatment_common_names[source_name],
+            "treatments": self.treatment_common_names.get(source_name, {}),
             "outcome": outcome,
             "covariates": self.covariate_names,
             "treatment_desc": self.treatment_desc,

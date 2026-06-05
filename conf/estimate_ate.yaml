@@ -18,6 +18,8 @@ probs_model:
   max_tokens: 1
   prompt_logprobs: 0
   temperature: 1.0
+  # Avoid vLLM detokenizing logprob token ids (OverflowError on some models/TP setups).
+  detokenize: false
 
 filter_by_date: True
 default_max_concurrent_workers: 8

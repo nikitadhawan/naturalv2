@@ -1063,7 +1063,7 @@ def download_clinical_trials(
         if not test
         else "studyType:int,results:without,status:act",
         "countTotal": "true",
-        "pageSize": "100",
+        "pageSize": "1000",  # max page size according to API docs
     }
 
     # initial request to get total count and first page

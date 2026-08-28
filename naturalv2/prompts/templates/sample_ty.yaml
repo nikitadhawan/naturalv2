@@ -5,7 +5,15 @@ system_prompt: |-
 user_prompt_template: |-
   I will give you a report about an individual's experience with a treatment and its effect on the following outcome:
   {{ outcome }}
+  {%- if outcome_desc %}
   Description: {{ outcome_desc }}
+  {%- endif %}
+  {%- if outcome_unit %}
+  Units: {{ outcome_unit }}
+  {%- endif %}
+  {%- if outcome_timeframe %}
+  Timeframe: {{ outcome_timeframe }}
+  {%- endif %}
 
   Then, I'll show you a covariate information about this individual.
   Finally, I'll give you some multiple choice question(s) and options to choose from. Pick the right answer(s).
@@ -25,14 +33,18 @@ user_prompt_template: |-
   Options: {{ treatment_options }}
 
   {%- if outcome_is_binary %}
-  Q: Does the individual described in the report count positively towards the {{ outcome }}{%- if outcome_timeframe %}, after taking the treatment for {{ outcome_timeframe }}{%- endif %}?
+  Q: Does the individual described in the report count positively towards the {{ outcome }}?
   Options: {{ outcome_options }}
   {%- else %}
-  Q: What value would the individual described in the report most likely report for the {{ outcome }}{%- if outcome_timeframe %}, after taking the treatment for {{ outcome_timeframe }}{%- endif %}? Give your best-guess numeric estimate, on the same scale as the outcome description above, based on what the report says.
+  Q: What value would the individual described in the report most likely report for the {{ outcome }}?
+  The clinical trial defines this outcome by the measure name, description and timeframe given above. First decide from those whether the trial reports an ABSOLUTE value at follow-up or a CHANGE FROM the individual's pre-treatment BASELINE, and answer on that same basis: for a change, give a signed number (negative = the outcome decreased, positive = it increased, zero = no change). Give a single finite number on the same scale as the description, within the instrument's valid range (for a change, within plus or minus the instrument's width).
   {%- endif %}
 
   **Response Format:**
   Your JSON must contain exactly these keys:
   - treatment: one of the treatment options above
-  - outcome: {% if outcome_is_binary %}one of the outcome options above{% else %}a single number (int or float) estimating the outcome value{% endif %}
+  - outcome: {% if outcome_is_binary %}one of the outcome options above{% else %}a single number (int or float) estimating the outcome value, or null if it cannot be estimated from the report{% endif %}
+  {%- if not outcome_is_binary %}
+  - outcome_basis: "absolute" or "change_from_baseline", the basis you answered on
+  {%- endif %}
   Return only a valid JSON object with no additional text, code blocks, or explanations.

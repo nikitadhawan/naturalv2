@@ -423,6 +423,10 @@ class Experiment:
         """Dictionary mapping outcome names to their descriptions."""
         return self._outcome_desc
 
+    def outcome_unit(self, outcome: str) -> str | None:
+        """Unit of measure the trial reports for ``outcome``, if any."""
+        return getattr(self, "_outcome_units", {}).get(outcome)
+
     @property
     def effect_sizes(self) -> list[float]:
         """List of effect sizes for each outcome and binary-treatment pair."""
@@ -739,6 +743,10 @@ class Experiment:
             "covariate_answers": covariate_answers,
             "treatment_options": self.options[TREATMENT_COL_NAME],
             "outcome_is_binary": self.is_binary_outcome(outcome),
+            "outcome_unit": self.outcome_unit(outcome),
+            "outcome_timeframe": self.outcome_timeframes[
+                self.outcome_names.index(outcome)
+            ],
             "outcome_options": ["No", "Yes"],
             "report": report,
         }
@@ -986,6 +994,13 @@ class Experiment:
                 getattr(outcome, "paramType", None).value
                 if getattr(outcome, "paramType", None) is not None
                 else None
+            )
+            for outcome in outcomes
+        }
+
+        self._outcome_units: dict[str, str | None] = {
+            (outcome.title if hasattr(outcome, "title") else outcome.measure): getattr(
+                outcome, "unitOfMeasure", None
             )
             for outcome in outcomes
         }

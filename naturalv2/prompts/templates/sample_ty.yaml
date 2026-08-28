@@ -43,7 +43,7 @@ user_prompt_template: |-
   **Response Format:**
   Your JSON must contain exactly these keys:
   - treatment: one of the treatment options above
-  - outcome: {% if outcome_is_binary %}one of the outcome options above{% else %}a single number (int or float) estimating the outcome value, or null if it cannot be estimated from the report{% endif %}
+  - outcome: {% if outcome_is_binary %}one of the outcome options above{% else %}a single number (int or float) estimating the outcome value{% endif %}
   {%- if not outcome_is_binary %}
   - outcome_basis: "absolute" or "change_from_baseline", the basis you answered on
   {%- endif %}

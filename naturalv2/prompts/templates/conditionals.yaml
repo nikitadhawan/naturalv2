@@ -5,7 +5,9 @@ system_prompt: |-
 user_prompt_template: |-
   I will give you a report about an individual's experience with a treatment and its effect on the following outcome:
   {{ outcome }}
+  {%- if outcome_desc %}
   Description: {{ outcome_desc }}
+  {%- endif %}
 
   Then, I'll show you a few questions with their correct answers.
   Finally, I'll give you some multiple choice question(s) and options to choose from. Pick the right answer.

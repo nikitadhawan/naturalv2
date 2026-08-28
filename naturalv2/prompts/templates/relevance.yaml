@@ -11,7 +11,7 @@ user_prompt_template: |-
 
   2. Which treatment did the patient take? Was it one of the following?
   {%- for treatment in treatments.keys() %}
-    {%- if treatment in treatment_desc %}
+    {%- if treatment_desc.get(treatment) %}
       - Treatment: {{ treatment }}
         Common names: {{ treatments[treatment] }}
         Description: {{ treatment_desc[treatment] }}
@@ -24,7 +24,9 @@ user_prompt_template: |-
 
   3. Does the report contain information about whether the patient matches the outcome description below?
   `{{ outcome }}`
+  {%- if outcome_desc %}
   Description: {{ outcome_desc }}
+  {%- endif %}
 
   **Report found on {{ source }}:**
   ```

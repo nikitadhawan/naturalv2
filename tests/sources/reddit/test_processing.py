@@ -137,3 +137,104 @@ def test_author_key_expression_pseudonymizes_authors():
 def test_author_key_is_available_to_curation():
     assert ctx.CONTEXTUALIZED_RECORD_SCHEMA.field("author_key").type == pa.string()
     assert "author_key" in RedditCurateStage(num_workers=1)._curation_columns
+
+
+# -- OP-reply attribution goes through author_key -----------------------------
+
+def _write_bucket_inputs(tmp_path):
+    """Two threads: one whose OP account was deleted, one whose OP is active."""
+    submissions = pl.DataFrame(
+        {
+            "id": ["p1", "p2"],
+            "created_utc": [1_700_000_000, 1_700_000_100],
+            "subreddit": ["testsub", "testsub"],
+            "title": ["deleted op", "active op"],
+            "selftext": ["I tried the drug.", "Started the drug last week."],
+            "author": ["[deleted]", "Poster"],
+            "score": [1.0, 1.0],
+        },
+        schema={
+            "id": pl.String,
+            "created_utc": pl.Int64,
+            "subreddit": pl.String,
+            "title": pl.String,
+            "selftext": pl.String,
+            "author": pl.String,
+            "score": pl.Float64,
+        },
+    )
+    comments = pl.DataFrame(
+        {
+            "id": ["c1", "c2", "c3", "c4"],
+            "link_id": ["t3_p1", "t3_p1", "t3_p2", "t3_p2"],
+            "created_utc": [
+                1_700_000_010,
+                1_700_000_020,
+                1_700_000_110,
+                1_700_000_120,
+            ],
+            "subreddit": ["testsub"] * 4,
+            "body": [
+                "Stranger whose account is gone.",
+                "Another reader.",
+                "OP follow-up: it helped.",
+                "Reader on the active post.",
+            ],
+            # c1 is a *different* deleted account; c3 is the OP under a case
+            # variant of their username (Reddit usernames are case-insensitive).
+            "author": ["[deleted]", "Reader", "poster", "Reader"],
+            "score": [1.0] * 4,
+        },
+        schema={
+            "id": pl.String,
+            "link_id": pl.String,
+            "created_utc": pl.Int64,
+            "subreddit": pl.String,
+            "body": pl.String,
+            "author": pl.String,
+            "score": pl.Float64,
+        },
+    )
+    sub_dir = tmp_path / "in" / "content_type=submissions" / "bucket=b"
+    com_dir = tmp_path / "in" / "content_type=comments" / "bucket=b"
+    sub_dir.mkdir(parents=True)
+    com_dir.mkdir(parents=True)
+    submissions.write_parquet(sub_dir / "s.parquet")
+    comments.write_parquet(com_dir / "c.parquet")
+    return {
+        "submissions": [str(sub_dir / "s.parquet")],
+        "comments": [str(com_dir / "c.parquet")],
+    }
+
+
+def test_process_bucket_attributes_op_replies_by_author_key(tmp_path):
+    sub_out, com_out = ctx._process_bucket(
+        "b", _write_bucket_inputs(tmp_path), tmp_path / "out", "unit"
+    )
+    submissions = {row["title"]: row for row in pl.read_parquet(sub_out).to_dicts()}
+    comments = pl.read_parquet(com_out)
+
+    # A deleted OP has no key, so a *different* deleted account's comment is not
+    # spliced into the post as an "original poster" reply...
+    deleted_op = submissions["deleted op"]
+    assert deleted_op["author_key"] is None
+    assert deleted_op["author_replies"] == []
+    assert "original poster also replied" not in deleted_op["report_text"]
+
+    # ...while the active OP's own comment is, even under a case variant.
+    active_op = submissions["active op"]
+    assert active_op["author_key"] is not None
+    assert active_op["author_replies"] == ["OP follow-up: it helped."]
+    assert "OP follow-up: it helped." in active_op["report_text"]
+
+    # Comment reports: the OP's own comment is folded into the post and not
+    # emitted separately; everyone else's -- including the deleted stranger --
+    # survives as its own report.
+    assert set(comments["report_text"].to_list()) == {
+        "Stranger whose account is gone.",
+        "Another reader.",
+        "Reader on the active post.",
+    }
+    assert comments.filter(pl.col("report_text").str.starts_with("Stranger"))[
+        "author_key"
+    ].to_list() == [None]

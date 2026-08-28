@@ -4,6 +4,7 @@ import asyncio
 import importlib.resources
 import logging
 import os
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -11,12 +12,13 @@ import numpy as np
 import pandas as pd
 import yaml
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 from tqdm.asyncio import tqdm
 
 from naturalv2.models.utils import TokenTracker
 from naturalv2.pipeline.constants import (
     INCLUSION_COL_NAME,
+    OUTCOME_BASIS_COL_NAME,
     OUTCOME_COL_NAME,
     TREATMENT_COL_NAME,
 )
@@ -259,12 +261,19 @@ class TreatmentOutcomeFilterStage(SampleExtractionStage):
             If there is an error during the extraction process.
         """
         treatment_options = context.experiment.treatment_names + ["Unknown"]
+        # A binary outcome places the patient in a category (or its opposite); a
+        # continuous one is either estimable from the report or it is not.
+        outcome_options = (
+            ["Yes", "No", "Unknown"]
+            if context.experiment.is_binary_outcome(context.outcome)
+            else ["Yes", "Unknown"]
+        )
         response_format = create_response_format(
             "TYFilterResponse",
             [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
             types={
                 TREATMENT_COL_NAME: Literal[*treatment_options],
-                OUTCOME_COL_NAME: Literal["Yes", "No", "Unknown"],
+                OUTCOME_COL_NAME: Literal[*outcome_options],
             },
         )
         ty_samples = await extract_covariates(
@@ -434,6 +443,86 @@ class ImputationsStage(SampleExtractionStage):
         return self.data
 
 
+OUTCOME_BASES = ("absolute", "change_from_baseline")
+
+
+def sample_ty_response_format(
+    treatment_options: list[str], outcome_is_binary: bool
+) -> type[BaseModel]:
+    """Response schema for :class:`SampleTYStage`.
+
+    A binary outcome is a Yes/No choice. A continuous outcome is a finite number
+    (``inf``/``nan`` are rejected at parse time; the treatment-outcome filter has
+    already screened out reports without enough information to estimate one)
+    plus the basis the model answered on, so a value given on the wrong basis
+    can be recognised afterwards.
+    """
+    keys = [TREATMENT_COL_NAME, OUTCOME_COL_NAME]
+    types: dict[str, Any] = {TREATMENT_COL_NAME: Literal[*treatment_options]}
+    if outcome_is_binary:
+        types[OUTCOME_COL_NAME] = Literal["No", "Yes"]
+    else:
+        types[OUTCOME_COL_NAME] = FiniteFloat
+        keys.append(OUTCOME_BASIS_COL_NAME)
+        types[OUTCOME_BASIS_COL_NAME] = Literal[*OUTCOME_BASES]
+    return create_response_format("SampleTYResponse", keys, types=types)
+
+
+def filter_sampled_outcomes(
+    extractions: pd.DataFrame,
+    outcome_bounds: tuple[float, float] | None = None,
+    outcome_basis: str | None = None,
+) -> pd.DataFrame:
+    """Drop sampled continuous outcomes that cannot be values of the trial's measure.
+
+    A row is dropped when its sampled value is missing or non-finite; when
+    ``outcome_basis`` is configured and the row's reported basis differs from it;
+    or, when ``outcome_bounds`` are configured, when the value lies outside that
+    inclusive range. Without a configured basis nothing is dropped on that
+    account, but mixed bases across an outcome's samples are reported, since the
+    values are then not comparable. Counts are logged; nothing aborts.
+    """
+    if extractions.empty:
+        return extractions
+
+    values = pd.to_numeric(extractions[OUTCOME_COL_NAME], errors="coerce")
+    keep = np.isfinite(values)
+    dropped = {"missing or non-finite": int((~keep).sum())}
+
+    if OUTCOME_BASIS_COL_NAME in extractions.columns:
+        bases = extractions[OUTCOME_BASIS_COL_NAME]
+        if outcome_basis is not None:
+            wrong_basis = keep & bases.ne(outcome_basis)
+            dropped[f"not on the configured basis ({outcome_basis})"] = int(
+                wrong_basis.sum()
+            )
+            keep &= ~wrong_basis
+        else:
+            counts = bases[keep].value_counts()
+            if len(counts) > 1:
+                logger.warning(
+                    "Sampled outcomes mix bases (%s); values are not comparable. "
+                    "Configure `outcome_basis` for this trial/outcome to keep one.",
+                    ", ".join(f"{n} {b}" for b, n in counts.items()),
+                )
+
+    if outcome_bounds is not None:
+        low, high = outcome_bounds
+        out_of_range = keep & ((values < low) | (values > high))
+        dropped[f"outside [{low:g}, {high:g}]"] = int(out_of_range.sum())
+        keep &= ~out_of_range
+
+    n_dropped = int((~keep).sum())
+    if n_dropped:
+        logger.warning(
+            "Dropped %d/%d sampled outcomes: %s.",
+            n_dropped,
+            len(extractions),
+            ", ".join(f"{n} {why}" for why, n in dropped.items() if n),
+        )
+    return extractions.loc[keep].copy()
+
+
 class SampleTYStage(SampleExtractionStage):
     """Stage for sampling treatment and outcome given covariates.
 
@@ -445,6 +534,17 @@ class SampleTYStage(SampleExtractionStage):
         Optional name for the stage. If not provided, the class name will be used.
     max_concurrent_workers : int | None, optional, default=None
         Maximum number of concurrent workers for processing. If None, defaults to 10.
+    outcome_bounds : Mapping[str, Mapping[str, Sequence[float]]] | None, optional
+        Optional inclusive bounds for sampled continuous outcomes, keyed by trial
+        NCT ID and then exact outcome name, each an ``[min, max]`` pair on the
+        same basis the trial reports (e.g. ``[-55, 55]`` for a change score on a
+        0-55 instrument). Values outside are dropped before estimation. Outcomes
+        without bounds are not range-checked.
+    outcome_basis : Mapping[str, Mapping[str, str]] | None, optional
+        Optional expected basis of sampled continuous outcomes, keyed like
+        ``outcome_bounds``, each ``"absolute"`` or ``"change_from_baseline"``.
+        Samples the model reports on a different basis are dropped. Outcomes
+        without an entry are only warned about when their samples mix bases.
 
     Attributes
     ----------
@@ -458,6 +558,10 @@ class SampleTYStage(SampleExtractionStage):
         Configuration for the language model used in this stage.
     stage_name : str
         Name of the stage, derived from the class name.
+    outcome_bounds : dict[str, dict[str, tuple[float, float]]]
+        Validated bounds, ``{nct_id: {outcome: (min, max)}}``.
+    outcome_basis : dict[str, dict[str, str]]
+        Validated expected bases, ``{nct_id: {outcome: basis}}``.
     """
 
     def __init__(
@@ -465,26 +569,39 @@ class SampleTYStage(SampleExtractionStage):
         model_cfg: DictConfig,
         name: str | None = None,
         max_concurrent_workers: int | None = None,
+        outcome_bounds: Mapping[str, Mapping[str, Sequence[float]]] | None = None,
+        outcome_basis: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         super().__init__(model_cfg, name, max_concurrent_workers)
         self.extract_type = ExtractType.SAMPLE_TY.value
+        self.outcome_basis: dict[str, dict[str, str]] = {}
+        for nct_id, per_outcome in (outcome_basis or {}).items():
+            for outcome, basis in per_outcome.items():
+                if basis not in OUTCOME_BASES:
+                    raise ValueError(
+                        f"outcome_basis[{nct_id!r}][{outcome!r}] must be one of "
+                        f"{list(OUTCOME_BASES)}, got {basis!r}."
+                    )
+                self.outcome_basis.setdefault(nct_id, {})[outcome] = str(basis)
+        self.outcome_bounds: dict[str, dict[str, tuple[float, float]]] = {}
+        for nct_id, per_outcome in (outcome_bounds or {}).items():
+            for outcome, (low, high) in per_outcome.items():
+                if not low < high:
+                    raise ValueError(
+                        f"outcome_bounds[{nct_id!r}][{outcome!r}] must be [min, max] "
+                        f"with min < max, got [{low}, {high}]."
+                    )
+                self.outcome_bounds.setdefault(nct_id, {})[outcome] = (
+                    float(low),
+                    float(high),
+                )
 
     async def process(
         self, data: pd.DataFrame, context: PipelineContext
     ) -> pd.DataFrame:
-        treatment_options = context.experiment.options[TREATMENT_COL_NAME]
-        outcome_type = (
-            Literal["No", "Yes"]
-            if context.experiment.is_binary_outcome(context.outcome)
-            else float
-        )
-        response_format = create_response_format(
-            "SampleTYResponse",
-            [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
-            types={
-                TREATMENT_COL_NAME: Literal[*treatment_options],
-                OUTCOME_COL_NAME: outcome_type,
-            },
+        outcome_is_binary = context.experiment.is_binary_outcome(context.outcome)
+        response_format = sample_ty_response_format(
+            context.experiment.options[TREATMENT_COL_NAME], outcome_is_binary
         )
         self.data = await extract_covariates(
             input_df=data,
@@ -496,6 +613,13 @@ class SampleTYStage(SampleExtractionStage):
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
+        if not outcome_is_binary:
+            nct_id, outcome = context.experiment.nct_id, context.outcome
+            self.data = filter_sampled_outcomes(
+                self.data,
+                outcome_bounds=self.outcome_bounds.get(nct_id, {}).get(outcome),
+                outcome_basis=self.outcome_basis.get(nct_id, {}).get(outcome),
+            )
 
         self.data = context.experiment.discretize_ty(self.data, context.outcome)
         logger.info(f"Final: {len(self.data)} reports after sampling TY.")

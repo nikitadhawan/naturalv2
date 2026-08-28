@@ -116,14 +116,15 @@ class IPSW(DifferenceInMeans):
         pd.Series
             A series containing the estimated individual treatment effects, computed
             as the product of observed outcomes and inverse propensity scores,
-            normalized by the total number of observations.
+            normalized within each observed treatment arm.
         """
         data.validate()
 
         # ITE doesn't quite make sense for a MC version of IPW - we return
         # y/P(T=t|x) for each unit.
         ipw_scores = self._model.compute_weights(data.X, data.T)
-        ipw_scores *= len(data.X) / sum(ipw_scores)  # Hajek estmator
+        arm_weight_totals = ipw_scores.groupby(data.T).transform("sum")
+        ipw_scores *= len(data.X) / arm_weight_totals  # Hajek estimator per arm
         return data.Y * ipw_scores
 
 

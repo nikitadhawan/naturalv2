@@ -49,6 +49,15 @@ def test_ipw_missing_treatment_is_zero_not_nan():
     assert (ites[2, :] == 0).all()
 
 
+def test_ipw_normalizes_each_treatment_arm():
+    data = make_data(20, [0] * 10 + [1] * 10)
+    data[f"{OUTCOME_COL_NAME}_discretized"] = [2.0] * 10 + [4.0] * 10
+    outcomes = NaturalMC(FakeExperiment(), "ipw").get_individual_treatment_effects(
+        data, "dummy"
+    )
+    assert outcomes.mean(axis=1)[:2] == pytest.approx([2.0, 4.0])
+
+
 def test_oi_missing_treatment_extrapolates_without_crash():
     data = make_data(20, [0, 1] * 10)
     mc = NaturalMC(FakeExperiment(), estimator_type="oi")

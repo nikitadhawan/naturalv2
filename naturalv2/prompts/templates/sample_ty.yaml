@@ -6,6 +6,7 @@ user_prompt_template: |-
   I will give you a report about an individual's experience with a treatment and its effect on the following outcome:
   {{ outcome }}
   Description: {{ outcome_desc }}
+  Value basis: {{ outcome_value_basis }}
 
   Then, I'll show you a covariate information about this individual.
   Finally, I'll give you some multiple choice question(s) and options to choose from. Pick the right answer(s).
@@ -28,11 +29,16 @@ user_prompt_template: |-
   Q: Does the individual described in the report count positively towards the {{ outcome }}{%- if outcome_timeframe %}, after taking the treatment for {{ outcome_timeframe }}{%- endif %}?
   Options: {{ outcome_options }}
   {%- else %}
+  {%- if outcome_value_basis == "change_from_baseline" %}
+  Q: What change from the individual's pre-treatment baseline would they most likely report for the {{ outcome }}{%- if outcome_timeframe %}, measured {{ outcome_timeframe }}{%- endif %}? Give a signed numeric estimate on the same scale as the trial outcome. A negative number means the outcome decreased, a positive number means it increased, and zero means no change. Do not return an absolute follow-up score.
+  {%- else %}
   Q: What value would the individual described in the report most likely report for the {{ outcome }}{%- if outcome_timeframe %}, after taking the treatment for {{ outcome_timeframe }}{%- endif %}? Give your best-guess numeric estimate, on the same scale as the outcome description above, based on what the report says.
+  {%- endif %}
   {%- endif %}
 
   **Response Format:**
   Your JSON must contain exactly these keys:
   - treatment: one of the treatment options above
   - outcome: {% if outcome_is_binary %}one of the outcome options above{% else %}a single number (int or float) estimating the outcome value{% endif %}
+  - outcome_value_basis: exactly "{{ outcome_value_basis }}"
   Return only a valid JSON object with no additional text, code blocks, or explanations.

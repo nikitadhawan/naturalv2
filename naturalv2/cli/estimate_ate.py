@@ -24,6 +24,7 @@ from naturalv2.pipeline import (
     PipelineContext,
     PipelineStage,
 )
+from naturalv2.pipeline.constants import OUTCOME_VALUE_BASIS_COL_NAME
 from naturalv2.study import Study, get_study_filepaths
 from naturalv2.utils import get_experiment_filepath
 
@@ -114,6 +115,18 @@ def _stratified_bootstrap_sample(
     return pd.concat(resampled_groups)
 
 
+def _validate_outcome_value_basis(
+    experiment: Experiment, outcome: str, extractions: pd.DataFrame
+) -> str | None:
+    value_basis = getattr(experiment, "outcome_value_bases", {}).get(outcome)
+    if value_basis is not None and (
+        OUTCOME_VALUE_BASIS_COL_NAME not in extractions
+        or not extractions[OUTCOME_VALUE_BASIS_COL_NAME].eq(value_basis).all()
+    ):
+        raise ValueError("Sampled outcome value basis does not match the trial label.")
+    return value_basis
+
+
 def _calculate_treatment_responses(
     experiment: Experiment,
     outcome: str,
@@ -148,6 +161,9 @@ def _calculate_treatment_responses(
         # Filter out rows with ``None`` in any covariate columns
         extractions = extractions.dropna(subset=experiment.covariate_names)
 
+    outcome_value_basis = _validate_outcome_value_basis(
+        experiment, outcome, extractions
+    )
     result_dicts = []
 
     if isinstance(
@@ -227,6 +243,7 @@ def _calculate_treatment_responses(
         results = {
             "estimator": estimator.__class__.__name__,
             "outcome": outcome,
+            OUTCOME_VALUE_BASIS_COL_NAME: outcome_value_basis,
             "treatment": treatment,
             "pred_response": pred_response,
             "CI_lower": pred_response - conf_delta,
@@ -276,6 +293,7 @@ def _calculate_treatment_effects(
     weighted_responses,
 ):
     result_dicts = []
+    outcome_value_basis = getattr(experiment, "outcome_value_bases", {}).get(outcome)
     for i, treat1 in enumerate(experiment.treatment_names):
         for j, treat2 in enumerate(experiment.treatment_names):
             if i < j:
@@ -284,6 +302,7 @@ def _calculate_treatment_effects(
                     results = {
                         "estimator": estimator.__class__.__name__,
                         "outcome": outcome,
+                        OUTCOME_VALUE_BASIS_COL_NAME: outcome_value_basis,
                         "treatments": f"{treat2}-{treat1}",
                         "pred_ate": pred_ate,
                     }
@@ -455,6 +474,9 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
                     result = {}
                     result.update(pipeline._data_flow)
                     result["source_name"] = source_name
+                    result[OUTCOME_VALUE_BASIS_COL_NAME] = (
+                        experiment.outcome_value_bases[outcome]
+                    )
                     result["initial_curated"] = len(curated_df)
                     result["conditions"] = cfg.conditions
                     result["filter_by_date"] = cfg.filter_by_date

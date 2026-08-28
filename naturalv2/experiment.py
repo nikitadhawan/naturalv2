@@ -60,6 +60,25 @@ _COUNT_PARAM_TYPES = frozenset(
     }
 )
 
+_CHANGE_FROM_BASELINE_PATTERN = re.compile(
+    r"\bchange\b.{0,160}\bfrom\s+(?:the\s+)?baseline\b",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _infer_outcome_value_basis(
+    title: str, description: str | None, timeframe: str | None, is_binary: bool
+) -> str:
+    """Classify a trial outcome as absolute or change from baseline."""
+    if is_binary:
+        return "absolute"
+    label = "\n".join(part for part in (title, description, timeframe) if part)
+    return (
+        "change_from_baseline"
+        if _CHANGE_FROM_BASELINE_PATTERN.search(label)
+        else "absolute"
+    )
+
 
 def _normalize_outcome_value(
     raw_value: float, denom: float, unit: str, param_type: MeasureParam | None
@@ -145,6 +164,9 @@ class Experiment:
     outcome_desc : dict[str, str | None]
         Dictionary mapping outcome names to their descriptions, or None if not
         available.
+    outcome_value_bases : dict[str, str]
+        Dictionary identifying whether each outcome is an absolute value or a
+        change from baseline.
     treatment_common_names : dict[str, list[str]]
         Dictionary mapping treatment names to their common names, which are
         alternative names or identifiers for the treatments used in the experiment.
@@ -422,6 +444,26 @@ class Experiment:
     def outcome_desc(self) -> dict[str, str | None]:
         """Dictionary mapping outcome names to their descriptions."""
         return self._outcome_desc
+
+    @property
+    def outcome_value_bases(self) -> dict[str, str]:
+        """Map outcome names to their absolute or change-from-baseline basis."""
+        if not hasattr(self, "_outcome_value_bases"):
+            self._outcome_value_bases = self._infer_outcome_value_bases()
+        return self._outcome_value_bases
+
+    def _infer_outcome_value_bases(self) -> dict[str, str]:
+        return {
+            outcome: _infer_outcome_value_basis(
+                outcome,
+                self.outcome_desc.get(outcome),
+                timeframe,
+                self.is_binary_outcome(outcome),
+            )
+            for outcome, timeframe in zip(
+                self.outcome_names, self.outcome_timeframes, strict=True
+            )
+        }
 
     @property
     def effect_sizes(self) -> list[float]:
@@ -725,12 +767,14 @@ class Experiment:
 
         """
         prompts_dir = str(importlib.resources.files("naturalv2.prompts.templates"))
+        outcome_idx = self.outcome_names.index(outcome)
 
         format_inputs = {
             "conditions": self._conditions,
             "source": source_name,
             "treatments": self.treatment_common_names.get(source_name, {}),
             "outcome": outcome,
+            "outcome_timeframe": self.outcome_timeframes[outcome_idx],
             "covariates": self.covariate_names,
             "treatment_desc": self.treatment_desc,
             "outcome_desc": self.outcome_desc[outcome],
@@ -739,6 +783,7 @@ class Experiment:
             "covariate_answers": covariate_answers,
             "treatment_options": self.options[TREATMENT_COL_NAME],
             "outcome_is_binary": self.is_binary_outcome(outcome),
+            "outcome_value_basis": self.outcome_value_bases[outcome],
             "outcome_options": ["No", "Yes"],
             "report": report,
         }
@@ -1006,6 +1051,7 @@ class Experiment:
             )
             for outcome in outcomes
         }
+        self._outcome_value_bases = self._infer_outcome_value_bases()
 
     def _get_active_outcomes_treatments(
         self, trial: ClinicalTrial

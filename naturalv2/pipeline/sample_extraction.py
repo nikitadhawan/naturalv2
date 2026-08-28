@@ -18,6 +18,7 @@ from naturalv2.models.utils import TokenTracker
 from naturalv2.pipeline.constants import (
     INCLUSION_COL_NAME,
     OUTCOME_COL_NAME,
+    OUTCOME_VALUE_BASIS_COL_NAME,
     TREATMENT_COL_NAME,
 )
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
@@ -473,6 +474,7 @@ class SampleTYStage(SampleExtractionStage):
         self, data: pd.DataFrame, context: PipelineContext
     ) -> pd.DataFrame:
         treatment_options = context.experiment.options[TREATMENT_COL_NAME]
+        outcome_value_basis = context.experiment.outcome_value_bases[context.outcome]
         outcome_type = (
             Literal["No", "Yes"]
             if context.experiment.is_binary_outcome(context.outcome)
@@ -480,10 +482,15 @@ class SampleTYStage(SampleExtractionStage):
         )
         response_format = create_response_format(
             "SampleTYResponse",
-            [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
+            [
+                TREATMENT_COL_NAME,
+                OUTCOME_COL_NAME,
+                OUTCOME_VALUE_BASIS_COL_NAME,
+            ],
             types={
                 TREATMENT_COL_NAME: Literal[*treatment_options],
                 OUTCOME_COL_NAME: outcome_type,
+                OUTCOME_VALUE_BASIS_COL_NAME: Literal[outcome_value_basis],
             },
         )
         self.data = await extract_covariates(

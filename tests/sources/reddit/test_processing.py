@@ -6,6 +6,7 @@ from naturalv2.sources.reddit.processing import _utils as utils
 from naturalv2.sources.reddit.processing import contextualize as ctx
 from naturalv2.sources.reddit.processing import filter as pfilter
 from naturalv2.sources.reddit.processing._utils import bucket_from_subreddit
+from naturalv2.sources.reddit.stages.curate import RedditCurateStage
 
 
 def test_apply_rule_based_filter_flags_common_cases():
@@ -83,6 +84,7 @@ def test_write_to_parquet_partitions_creates_hive_layout(tmp_path):
             pa.array([1], type=pa.int64()),
             pa.array(["2024-01-01T00:00:00Z"]),
             pa.array([""]),
+            pa.array(["author-key"]),
             pa.array([["reply"]], type=pa.list_(pa.string())),
             pa.array(["submissions"]),
             pa.array([bucket]),
@@ -119,3 +121,19 @@ def test_write_to_parquet_partitions_validates_args(tmp_path):
             schema=schema,
             parquet_compression_level=0,
         )
+
+
+def test_author_key_expression_pseudonymizes_authors():
+    keys = pl.DataFrame(
+        {"author": ["Commenter", " commenter ", "Other", "[deleted]", None]}
+    ).select(ctx._author_key_expr())["author_key"]
+
+    assert keys[0] == keys[1]
+    assert keys[0] != keys[2]
+    assert keys[0] != "Commenter"
+    assert keys[3:].to_list() == [None, None]
+
+
+def test_author_key_is_available_to_curation():
+    assert ctx.CONTEXTUALIZED_RECORD_SCHEMA.field("author_key").type == pa.string()
+    assert "author_key" in RedditCurateStage(num_workers=1)._curation_columns

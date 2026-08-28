@@ -23,6 +23,10 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
+_AUTHOR_KEY_NAMESPACE = "naturalv2:reddit:author:v1:"
+_MISSING_AUTHORS = frozenset({"", "[deleted]", "[removed]"})
+
+
 CONTEXTUALIZED_RECORD_SCHEMA = pa.schema(
     [
         ("subreddit", pa.string()),
@@ -33,6 +37,7 @@ CONTEXTUALIZED_RECORD_SCHEMA = pa.schema(
         ("score", pa.int64()),
         ("date_created", pa.string()),
         ("permalink", pa.string()),
+        ("author_key", pa.string()),
         ("author_replies", pa.list_(pa.string())),
         ("content_type", pa.string()),
         ("bucket", pa.string()),
@@ -43,6 +48,28 @@ PARTITIONING = ds.partitioning(
     pa.schema([("content_type", pa.string()), ("bucket", pa.string())]),
     flavor="hive",
 )
+
+
+def _pseudonymize_author(author: str | None) -> str | None:
+    """Return a stable, source-scoped key for a Reddit author."""
+    if author is None:
+        return None
+
+    normalized_author = author.strip().casefold()
+    if normalized_author in _MISSING_AUTHORS:
+        return None
+
+    value = f"{_AUTHOR_KEY_NAMESPACE}{normalized_author}".encode()
+    return hashlib.sha256(value).hexdigest()
+
+
+def _author_key_expr() -> pl.Expr:
+    """Build the pseudonymous author-key column."""
+    return (
+        pl.col("author")
+        .map_elements(_pseudonymize_author, return_dtype=pl.String)
+        .alias("author_key")
+    )
 
 
 def write_to_parquet_partitions(
@@ -484,6 +511,7 @@ def _process_bucket(
                 + pl.col("title").str.to_lowercase().str.replace_all(r"[^a-z0-9]+", "_")
                 + pl.lit("/")
             ).alias("permalink"),
+            _author_key_expr(),
             pl.col("replies").fill_null([]).alias("author_replies"),
             pl.lit("submissions").alias("content_type"),
             pl.col("bucket"),
@@ -521,6 +549,7 @@ def _process_bucket(
                 + pl.lit("/_/")
                 + pl.col("id")
             ).alias("permalink"),
+            _author_key_expr(),
             pl.lit([]).cast(pl.List(pl.String)).alias("author_replies"),
             pl.lit("comments").alias("content_type"),
             pl.col("bucket"),

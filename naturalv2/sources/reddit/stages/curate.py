@@ -127,6 +127,7 @@ class RedditCurateStage(SourceStage):
             "score",
             "date_created",
             "permalink",
+            "author_key",
             "author_replies",
         ]
 

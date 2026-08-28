@@ -42,7 +42,7 @@ class NaturalMC:
 
     def get_individual_treatment_effects(
         self, observational_data: pd.DataFrame, outcome: str
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Calculate Individual Treatment Effects (ITE) for a given outcome.
 
         Parameters
@@ -54,9 +54,16 @@ class NaturalMC:
 
         Returns
         -------
-        np.ndarray
-            An array of ITEs (treat2 - treat1) per unit corresponding to the
-            specified outcome.
+        tuple[np.ndarray, np.ndarray]
+            ``(responses, weights)``, both of shape ``[num_treatments, num_units]``.
+            For ``"ipw"``, row ``t`` of ``responses`` holds the observed outcome
+            ``y_i`` of units treated with ``t`` (zero elsewhere) and ``weights``
+            holds their inverse propensity weights ``1 / P(T = t | x_i)`` (zero
+            elsewhere). For ``"oi"``, ``responses`` holds the imputed outcome of
+            every unit under each treatment and ``weights`` is all ones. The
+            average potential outcome under ``t`` is the mean of ``responses[t]``
+            weighted by ``p * weights[t]`` for any per-unit weights ``p`` (uniform
+            or inclusion probabilities).
 
         Raises
         ------
@@ -103,18 +110,22 @@ class NaturalMC:
         try:
             model.fit(data)
             all_ites = np.zeros((self._num_treat, len(observational_data)))
+            all_weights = np.zeros_like(all_ites)
 
             if self.estimator_type == "ipw":
-                individual_outcomes = model.get_individual_treatment_effects(data)
+                outcomes = data.Y.to_numpy()
+                ipw_weights = model.get_weights(data).to_numpy()
                 for t in range(self._num_treat):
-                    t_mask = [1 if treat == t else 0 for treat in data.T]
-                    all_ites[t, :] = (individual_outcomes * t_mask).to_numpy()
+                    t_mask = data.T.eq(t).to_numpy()
+                    all_ites[t, :] = outcomes * t_mask
+                    all_weights[t, :] = ipw_weights * t_mask
             elif self.estimator_type == "oi":
                 individual_outcomes = model.get_individual_treatment_effects(
                     data, treatment_values=list(range(self._num_treat))
                 )
                 for t in range(self._num_treat):
                     all_ites[t, :] = individual_outcomes[t].to_numpy()
+                all_weights[:] = 1.0
             else:
                 raise NotImplementedError(
                     f"Estimator type '{self.estimator_type}' not implemented."
@@ -128,4 +139,4 @@ class NaturalMC:
                 f"observed_treatments={observed_treatments}."
             )
             raise
-        return all_ites
+        return all_ites, all_weights

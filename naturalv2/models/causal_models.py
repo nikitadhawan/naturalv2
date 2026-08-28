@@ -82,7 +82,7 @@ class IPSW(DifferenceInMeans):
 
     This class implements the Inverse Propensity Score Weighting method for estimating
     individual treatment effects in causal inference. It uses logistic regression to
-    model the propensity scores and applies the Hajek estimator for weighting.
+    model the propensity scores. Weights are returned unnormalised.
 
     Attributes
     ----------
@@ -102,30 +102,22 @@ class IPSW(DifferenceInMeans):
         )  # supports multi-class classification
         self._model = IPW(learner=learner)
 
-    def get_individual_treatment_effects(self, data: "CausalData") -> pd.Series:
-        """Calculate individual treatment effects using the IPSW method.
+    def get_weights(self, data: "CausalData") -> pd.Series:
+        """Calculate per-unit inverse propensity weights.
 
         Parameters
         ----------
         data : CausalData
-            The causal data containing covariates, treatment assignments, and
-            outcomes.
+            The causal data containing covariates and treatment assignments.
 
         Returns
         -------
         pd.Series
-            A series containing the estimated individual treatment effects, computed
-            as the product of observed outcomes and inverse propensity scores,
-            normalized within each observed treatment arm.
+            Unnormalised inverse propensity weight ``1 / P(T = t_i | x_i)`` per
+            unit, indexed like ``data.T``, to be used later for Hajek normalization. 
         """
         data.validate()
-
-        # ITE doesn't quite make sense for a MC version of IPW - we return
-        # y/P(T=t|x) for each unit.
-        ipw_scores = self._model.compute_weights(data.X, data.T)
-        arm_weight_totals = ipw_scores.groupby(data.T).transform("sum")
-        ipw_scores *= len(data.X) / arm_weight_totals  # Hajek estimator per arm
-        return data.Y * ipw_scores
+        return self._model.compute_weights(data.X, data.T)
 
 
 class OutcomeImputation(DifferenceInMeans):

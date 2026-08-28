@@ -114,7 +114,7 @@ class IPSW(DifferenceInMeans):
         -------
         pd.Series
             Unnormalised inverse propensity weight ``1 / P(T = t_i | x_i)`` per
-            unit, indexed like ``data.T``, to be used later for Hajek normalization. 
+            unit, indexed like ``data.T``, to be used later for Hajek normalization.
         """
         data.validate()
         return self._model.compute_weights(data.X, data.T)

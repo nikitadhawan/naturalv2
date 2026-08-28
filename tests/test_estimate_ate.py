@@ -139,6 +139,7 @@ def test_use_imputed_nones_drops_rows_with_missing_covariates(
 
 # -- Inclusion-weighted Hajek normalisation for NaturalMC-IPW ------------------
 
+
 def make_two_arm_extractions(inclusion_probs=None):
     """Balanced arms with constant outcomes 2 (arm 0) and 4 (arm 1).
 

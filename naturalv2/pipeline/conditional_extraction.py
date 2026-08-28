@@ -309,6 +309,24 @@ async def extract_conditionals(  # noqa: PLR0912
         logger.info("No conditional extraction needed. Returning input dataframe.")
         return input_df
 
+    # Features to enumerate based on extraction type
+    conditional_feature_mapping = {
+        "ty_given_x": [TREATMENT_COL_NAME, outcome],
+        "y_given_tx": [outcome],
+        "inclusion": [INCLUSION_COL_NAME],
+    }
+    features_to_enumerate = conditional_feature_mapping[extract_type.value]
+    features_without_options = [
+        feature for feature in features_to_enumerate if not experiment.options[feature]
+    ]
+    if features_without_options:
+        formatted_features = ", ".join(features_without_options)
+        raise ValueError(
+            "Conditional extraction requires categorical options for every "
+            f"enumerated feature; no options are configured for: {formatted_features}. "
+            "Use SampleTYStage with NaturalMC for non-binary outcomes."
+        )
+
     # Generate save path
     file_path = get_save_path(
         save_path,
@@ -327,13 +345,6 @@ async def extract_conditionals(  # noqa: PLR0912
         if len(input_df) == 0:
             return existing_data, "No prompts left to process."
 
-    # Features to enumerate based on extraction type
-    conditional_feature_mapping = {
-        "ty_given_x": [TREATMENT_COL_NAME, outcome],
-        "y_given_tx": [outcome],
-        "inclusion": [INCLUSION_COL_NAME],
-    }
-    features_to_enumerate = conditional_feature_mapping[extract_type.value]
     interleaved_options, answer_dicts = _prepare_for_conditional_extraction(
         experiment, features_to_enumerate
     )

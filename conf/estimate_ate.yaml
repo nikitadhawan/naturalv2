@@ -46,6 +46,10 @@ pipeline:
       _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
       model_cfg: ${sample_model}
       max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
+    treatment_ownership:
+      _target_: naturalv2.pipeline.ownership.TreatmentOwnershipGateStage
+      model_cfg: ${cheap_model}
+      max_concurrent_workers: ${coalesce:cheap_model.max_parallel_requests, cheap_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
     # inclusion_prob:
     #   _target_: naturalv2.pipeline.conditional_extraction.InclusionProbStage
     #   model_cfg: ${probs_model}

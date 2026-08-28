@@ -1,0 +1,9 @@
+system_prompt: |-
+  Decide whether the author of TARGET COMMENT personally used SELECTED TREATMENT. Use only the target comment as ownership evidence. Return only the requested JSON object.
+user_prompt_template: |-
+  {{ report }}
+
+  Return "Yes" for clear current or past personal use. Return "No" for questions, advice, future plans, hypotheticals, quotations, or another person's use. Return "Unclear" otherwise.
+
+  Return exactly:
+  {"author_used_treatment": "Yes | No | Unclear"}

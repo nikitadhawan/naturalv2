@@ -11,14 +11,17 @@ import numpy as np
 import pandas as pd
 import yaml
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 from tqdm.asyncio import tqdm
 
 from naturalv2.models.utils import TokenTracker
+from naturalv2.outcome_metadata import OutcomeBounds
 from naturalv2.pipeline.constants import (
     INCLUSION_COL_NAME,
     OUTCOME_COL_NAME,
     TREATMENT_COL_NAME,
+    SampleValidationConfig,
+    rejection_log_level,
 )
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
@@ -434,6 +437,109 @@ class ImputationsStage(SampleExtractionStage):
         return self.data
 
 
+def _create_sample_ty_response_format(
+    experiment: "Experiment", outcome: str
+) -> type[BaseModel]:
+    field_types = {
+        TREATMENT_COL_NAME: Literal[*experiment.options[TREATMENT_COL_NAME]],
+        OUTCOME_COL_NAME: (
+            Literal["No", "Yes"]
+            if experiment.is_binary_outcome(outcome)
+            else FiniteFloat
+        ),
+    }
+    return create_response_format(
+        "SampleTYResponse", list(field_types), types=field_types
+    )
+
+
+def _filter_invalid_sampled_outcomes(
+    extractions: pd.DataFrame,
+    *,
+    nct_id: str,
+    outcome: str,
+    bounds: OutcomeBounds | None,
+    sample_validation: SampleValidationConfig,
+) -> pd.DataFrame:
+    """Remove invalid continuous outcomes and enforce one rejection policy."""
+    if OUTCOME_COL_NAME not in extractions.columns:
+        raise ValueError(
+            f"Sampled extraction artifact is missing column: {OUTCOME_COL_NAME}"
+        )
+
+    numeric_outcomes = pd.to_numeric(extractions[OUTCOME_COL_NAME], errors="coerce")
+    minimum = bounds.minimum if bounds is not None else -np.inf
+    maximum = bounds.maximum if bounds is not None else np.inf
+    # to_numeric always yields a numeric dtype, so this mask is plain bool with
+    # no NaN to fill, and np.isfinite on a Series already returns one.
+    finite_mask = np.isfinite(numeric_outcomes)
+    below_minimum = finite_mask & numeric_outcomes.lt(minimum)
+    above_maximum = finite_mask & numeric_outcomes.gt(maximum)
+    valid_mask = finite_mask & ~below_minimum & ~above_maximum
+
+    n_sampled = len(extractions)
+    n_rejected = int((~valid_mask).sum())
+    if n_rejected:
+
+        unparsed = numeric_outcomes.isna()
+        rejection_reasons = {
+            "unparsed": int(unparsed.sum()),
+            "infinite": int((~finite_mask & ~unparsed).sum()),
+            "below_minimum": int(below_minimum.sum()),
+            "above_maximum": int(above_maximum.sum()),
+        }
+        rejection_rate = n_rejected / n_sampled
+        all_rejected = n_rejected == n_sampled
+        high_rejection_rate = rejection_rate >= sample_validation.high_rejection_rate
+
+        blocks_estimation = all_rejected or (
+            high_rejection_rate and not sample_validation.allow_high_rejection_rate
+        )
+        log = rejection_log_level(
+            logger,
+            n_rejected,
+            rejection_rate,
+            high_rejection_rate=sample_validation.high_rejection_rate,
+        )
+        log(
+            "Rejected %d/%d sampled outcomes for %s / %r (%.2f%%)",
+            n_rejected,
+            n_sampled,
+            nct_id,
+            outcome,
+            rejection_rate * 100,
+            extra={
+                "phase": "sample_ty_artifact_validation",
+                "schema_id": "sample_ty_outcome_validation.v3",
+                "status": "blocked" if blocks_estimation else "rejected",
+                "nct_id": nct_id,
+                "outcome": outcome,
+                "minimum": bounds.minimum if bounds is not None else None,
+                "maximum": bounds.maximum if bounds is not None else None,
+                "n_sampled": n_sampled,
+                "n_rejected": n_rejected,
+                "rejection_rate": rejection_rate,
+                "rejection_reasons": rejection_reasons,
+            },
+        )
+
+        if all_rejected:
+            raise ValueError(
+                f"No valid sampled outcomes remain for {nct_id!r} / {outcome!r}."
+            )
+        if blocks_estimation:
+            raise ValueError(
+                f"Estimation stopped for {nct_id!r} / {outcome!r}: invalid outcome "
+                f"rate {rejection_rate:.2%} met the high-rejection threshold "
+                f"of {sample_validation.high_rejection_rate:.2%}. Set "
+                "`sample_validation.allow_high_rejection_rate=true` to continue."
+            )
+
+    validated = extractions.loc[valid_mask].copy()
+    validated[OUTCOME_COL_NAME] = numeric_outcomes.loc[valid_mask]
+    return validated
+
+
 class SampleTYStage(SampleExtractionStage):
     """Stage for sampling treatment and outcome given covariates.
 
@@ -472,19 +578,11 @@ class SampleTYStage(SampleExtractionStage):
     async def process(
         self, data: pd.DataFrame, context: PipelineContext
     ) -> pd.DataFrame:
-        treatment_options = context.experiment.options[TREATMENT_COL_NAME]
-        outcome_type = (
-            Literal["No", "Yes"]
-            if context.experiment.is_binary_outcome(context.outcome)
-            else float
-        )
-        response_format = create_response_format(
-            "SampleTYResponse",
-            [TREATMENT_COL_NAME, OUTCOME_COL_NAME],
-            types={
-                TREATMENT_COL_NAME: Literal[*treatment_options],
-                OUTCOME_COL_NAME: outcome_type,
-            },
+        if context.sample_validation is None:
+            raise ValueError("SampleTYStage requires a sample-validation policy.")
+
+        response_format = _create_sample_ty_response_format(
+            context.experiment, context.outcome
         )
         self.data = await extract_covariates(
             input_df=data,
@@ -496,6 +594,15 @@ class SampleTYStage(SampleExtractionStage):
             response_format=response_format,
             max_concurrent_requests=self.max_concurrent_workers,
         )
+
+        if not context.experiment.is_binary_outcome(context.outcome):
+            self.data = _filter_invalid_sampled_outcomes(
+                self.data,
+                nct_id=context.experiment.nct_id,
+                outcome=context.outcome,
+                bounds=context.experiment.outcome_bounds.get(context.outcome),
+                sample_validation=context.sample_validation,
+            )
 
         self.data = context.experiment.discretize_ty(self.data, context.outcome)
         logger.info(f"Final: {len(self.data)} reports after sampling TY.")

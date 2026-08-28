@@ -1,14 +1,42 @@
+from unittest.mock import Mock, patch
+
 import numpy as np
 import pandas as pd
 import pytest
+from omegaconf import OmegaConf
 
 from naturalv2.cli.estimate_ate import (
     _calculate_treatment_responses,
+    _load_sample_validation,
+    _process_all_trials,
     _stratified_bootstrap_sample,
+    _warn_on_stale_bounds,
     _weight_by_inclusion,
 )
 from naturalv2.estimators import NaturalIPW, NaturalMC, NaturalOI
+from naturalv2.outcome_metadata import OutcomeBounds
 from naturalv2.pipeline import OUTCOME_COL_NAME, TREATMENT_COL_NAME
+
+
+SAMPLE_TY_TARGET = "naturalv2.pipeline.sample_extraction.SampleTYStage"
+
+
+def test_sample_validation_is_not_required_without_sample_ty():
+    cfg = OmegaConf.create(
+        {"pipeline": {"stages": {"other": {"_target_": "module.OtherStage"}}}}
+    )
+
+    assert _load_sample_validation(cfg) is None
+
+
+@pytest.mark.asyncio
+async def test_sample_ty_requires_sample_validation_before_processing():
+    cfg = OmegaConf.create(
+        {"pipeline": {"stages": {"sample_ty": {"_target_": SAMPLE_TY_TARGET}}}}
+    )
+
+    with pytest.raises(ValueError, match="`conf/common.yaml`"):
+        await _process_all_trials(cfg)
 
 
 class FakeExperiment:
@@ -135,3 +163,26 @@ def test_use_imputed_nones_drops_rows_with_missing_covariates(
         use_imputed_nones=use_imputed_nones,
     )
     assert estimator.seen_lengths[0] == expected_len
+
+
+def test_stale_persisted_bounds_are_flagged():
+    """Editing conf after create_study must not look like it took effect."""
+    experiment = Mock()
+    experiment.outcome_bounds = {
+        "Functional Capacity": OutcomeBounds(minimum=0, maximum=55)
+    }
+    configured = {"Functional Capacity": {"minimum": -55, "maximum": 55}}
+    with patch("naturalv2.cli.estimate_ate.logger.warning") as warn:
+        _warn_on_stale_bounds(experiment, "NCT06366724", configured)
+    assert warn.called
+    assert "rebuild the experiment" in warn.call_args.args[0]
+
+
+def test_matching_bounds_are_silent():
+    """No warning when the persisted interval already matches config."""
+    experiment = Mock()
+    experiment.outcome_bounds = {"Score": OutcomeBounds(minimum=-55, maximum=55)}
+    configured = {"Score": {"minimum": -55, "maximum": 55}}
+    with patch("naturalv2.cli.estimate_ate.logger.warning") as warn:
+        _warn_on_stale_bounds(experiment, "NCT0", configured)
+    assert not warn.called

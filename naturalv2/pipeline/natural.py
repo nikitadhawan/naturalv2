@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 
 from naturalv2.logging_utils import build_kv_table, emit_table
 from naturalv2.models.utils import TokenTracker
+from naturalv2.pipeline.constants import SampleValidationConfig
 
 
 if TYPE_CHECKING:
@@ -49,6 +50,9 @@ class PipelineContext:
 
     #: Identifier string for a particular run, included in results directory name.
     exp_name: str
+
+    #: Policy controlling when rejected samples must stop estimation.
+    sample_validation: SampleValidationConfig | None = None
 
     #: Token tracker to monitor token usage across stages.
     _token_tracker: TokenTracker = TokenTracker()

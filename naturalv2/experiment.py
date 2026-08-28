@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from ast import literal_eval
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -27,6 +28,7 @@ from naturalv2.clinical_trial import (
     OutcomeMeasureType,
     Reference,
 )
+from naturalv2.outcome_metadata import OUTCOME_BOUNDS_ADAPTER, OutcomeBounds
 from naturalv2.pipeline.constants import (
     INCLUSION_COL_NAME,
     OUTCOME_COL_NAME,
@@ -92,6 +94,8 @@ class Experiment:
         the trial is expected to be in progress, and the relevant JSON file will be
         loaded from the `nct_reports_test` directory. If "completed", it will be
         loaded from the `nct_reports` directory.
+    outcome_bounds : Mapping, optional
+        Inclusive bounds keyed by exact outcome name.
 
     Attributes
     ----------
@@ -178,6 +182,8 @@ class Experiment:
         experiment_name: str,
         status: Literal["completed", "active"] = "completed",
         require_binary_endpoint: bool = True,
+        *,
+        outcome_bounds: Mapping[str, object] | None = None,
     ) -> None:
         self.data_path = data_path
         self.experiment_name = experiment_name
@@ -283,6 +289,7 @@ class Experiment:
         #  "Topiramate": [Topamax]
         # }}
         self._set_outcome_treatment_effects(trial)
+        self._set_outcome_bounds(outcome_bounds)
         self.treatment_common_names: dict[str, dict[str, list[str]]] = {}
         self.outcome_common_names: dict[str, dict[str, list[str]]] = {}
 
@@ -424,6 +431,11 @@ class Experiment:
         return self._outcome_desc
 
     @property
+    def outcome_bounds(self) -> dict[str, OutcomeBounds]:
+        """Validated inclusive bounds for continuous outcomes, when known."""
+        return self._outcome_bounds
+
+    @property
     def effect_sizes(self) -> list[float]:
         """List of effect sizes for each outcome and binary-treatment pair."""
         return self._effect_sizes
@@ -482,6 +494,7 @@ class Experiment:
 
         exp = cls.__new__(cls)
         exp.__dict__.update(data)
+        exp._set_outcome_bounds(data.get("_outcome_bounds"))
         return exp
 
     def to_yaml(self, filename: str) -> None:
@@ -499,8 +512,13 @@ class Experiment:
         # Make sure parent folders exist first
         Path(os.path.dirname(filename)).mkdir(parents=True, exist_ok=True)
 
+        data = self.__dict__.copy()
+        data["_outcome_bounds"] = {
+            outcome: bounds.model_dump(mode="json")
+            for outcome, bounds in self.outcome_bounds.items()
+        }
         with open(filename, "w") as file:
-            yaml.safe_dump(self.__dict__, file)
+            yaml.safe_dump(data, file)
 
     def get_all_treatment_names_for_source(self, source: str) -> list[str]:
         """Get all treatment names for a given data source.
@@ -1006,6 +1024,31 @@ class Experiment:
             )
             for outcome in outcomes
         }
+
+    def _set_outcome_bounds(
+        self,
+        configured_bounds: Mapping[str, object] | None = None,
+    ) -> None:
+        """Validate configured bounds against this experiment's outcomes."""
+        validated_bounds = OUTCOME_BOUNDS_ADAPTER.validate_python(
+            dict(configured_bounds or {})
+        )
+        unknown = validated_bounds.keys() - set(self.outcome_names)
+        if unknown:
+            raise ValueError(
+                f"Outcome bounds reference unknown outcomes {sorted(unknown)}. "
+                f"Expected one of {self.outcome_names}."
+            )
+
+        binary_outcomes = [
+            outcome for outcome in validated_bounds if self.is_binary_outcome(outcome)
+        ]
+        if binary_outcomes:
+            raise ValueError(
+                "Outcome bounds cannot be configured for binary outcomes: "
+                f"{binary_outcomes}."
+            )
+        self._outcome_bounds = validated_bounds
 
     def _get_active_outcomes_treatments(
         self, trial: ClinicalTrial

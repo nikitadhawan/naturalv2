@@ -1,3 +1,6 @@
+import pytest
+
+from naturalv2.experiment import Experiment
 from tests.factories import (
     build_experiment,
     make_active_trial,
@@ -5,6 +8,23 @@ from tests.factories import (
     make_completed_trial,
     make_outcome_measure,
 )
+
+
+def _build_continuous_experiment(
+    tmp_path,
+    *,
+    nct_id="NCT012",
+    outcome_name="Functional Capacity",
+    outcome_bounds=None,
+):
+    arms = [make_arm("Drug A", "EXPERIMENTAL")]
+    outcome = make_outcome_measure(outcome_name, "MEAN", "points", [("Drug A", 40, 50)])
+    return build_experiment(
+        tmp_path,
+        make_completed_trial(nct_id, arms, [outcome]),
+        require_binary_endpoint=False,
+        outcome_bounds=outcome_bounds,
+    )
 
 
 # -- Arm-type filtering (completed trials) -----------------------------------
@@ -137,6 +157,53 @@ def test_active_trial_outcome_falls_back_to_title_heuristic(tmp_path):
     )
     exp = build_experiment(tmp_path, trial, status="active")
     assert exp.is_binary_outcome(exp.outcome_names[0])
+
+
+def test_configured_outcome_bounds_round_trip_through_yaml(tmp_path):
+    exp = _build_continuous_experiment(
+        tmp_path,
+        nct_id="NCT013",
+        outcome_bounds={"Functional Capacity": {"minimum": 0, "maximum": 55}},
+    )
+    exp._drugbank_names = {"Drug A": []}
+    experiment_path = tmp_path / "experiment.yaml"
+
+    exp.to_yaml(str(experiment_path))
+    loaded = Experiment.from_yaml(str(experiment_path))
+
+    bounds = loaded.outcome_bounds["Functional Capacity"]
+    assert (bounds.minimum, bounds.maximum) == (0, 55)
+
+
+def test_configured_bounds_reject_unknown_outcome(tmp_path):
+    with pytest.raises(ValueError, match="unknown outcome"):
+        _build_continuous_experiment(
+            tmp_path,
+            nct_id="NCT014",
+            outcome_bounds={"Typo": {"minimum": 0, "maximum": 55}},
+        )
+
+
+def test_configured_bounds_reject_binary_outcome(tmp_path):
+    arms = [make_arm("Drug A", "EXPERIMENTAL")]
+    outcome = make_outcome_measure(
+        "Number of Participants with Response",
+        "COUNT_OF_PARTICIPANTS",
+        "Participants",
+        [("Drug A", 10, 50)],
+    )
+
+    with pytest.raises(ValueError, match="binary outcomes"):
+        build_experiment(
+            tmp_path,
+            make_completed_trial("NCT016", arms, [outcome]),
+            outcome_bounds={
+                "Number of Participants with Response": {
+                    "minimum": 0,
+                    "maximum": 1,
+                }
+            },
+        )
 
 
 # -- APO / ATE ground-truth wiring --------------------------------------------

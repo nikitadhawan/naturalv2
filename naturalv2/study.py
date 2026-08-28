@@ -59,6 +59,7 @@ class Study:
             self.experiment_name,
             status=status,
             require_binary_endpoint=require_binary_endpoint,
+            outcome_bounds=cfg.get("outcome_bounds", {}).get(nct_id, {}),
         )
 
         train_exp = [build_exp(nct_id, "completed") for (nct_id, _) in train_trials]

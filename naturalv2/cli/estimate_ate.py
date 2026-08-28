@@ -4,13 +4,14 @@ import asyncio
 import logging
 import os
 from ast import literal_eval
+from collections.abc import Mapping
 
 import hydra
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from scipy.stats import norm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -23,7 +24,9 @@ from naturalv2.pipeline import (
     NATURALPipeline,
     PipelineContext,
     PipelineStage,
+    SampleValidationConfig,
 )
+from naturalv2.pipeline.sample_extraction import SampleTYStage
 from naturalv2.study import Study, get_study_filepaths
 from naturalv2.utils import get_experiment_filepath
 
@@ -314,6 +317,26 @@ def _calculate_treatment_effects(
     return result_dicts
 
 
+def _warn_on_stale_bounds(
+    experiment: Experiment,
+    nct_id: str,
+    configured_bounds: Mapping[str, Mapping[str, float]],
+) -> None:
+    for outcome, wanted in configured_bounds.items():
+        persisted = experiment.outcome_bounds.get(outcome)
+        in_use = persisted.model_dump(mode="json") if persisted else None
+        if in_use != wanted:
+            logger.warning(
+                "Configured bounds for %s / %r differ from the experiment YAML "
+                "(config %s, in use %s). Bounds are persisted by create_study, so "
+                "rebuild the experiment to apply the change.",
+                nct_id,
+                outcome,
+                wanted,
+                in_use,
+            )
+
+
 def _save_results(
     results: list[dict], save_path: str, nct_id: str, exp_name: str, eval_type: str
 ) -> None:
@@ -340,7 +363,30 @@ def _get_nct_ids(split: str, study: Study) -> list[str]:
     return [list(trial.keys())[0] for trial in study.test_trials]
 
 
-async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912, PLR0915
+def _load_sample_validation(cfg: DictConfig) -> SampleValidationConfig | None:
+    """Load the rejection policy when the configured pipeline samples outcomes."""
+    sample_ty_target = f"{SampleTYStage.__module__}.{SampleTYStage.__name__}"
+    uses_sample_ty = any(
+        stage_config.get("_target_") == sample_ty_target
+        for stage_config in cfg.pipeline.stages.values()
+    )
+    if not uses_sample_ty:
+        return None
+    if "sample_validation" not in cfg:
+        raise ValueError(
+            "SampleTYStage requires a `sample_validation` section. Inherit "
+            "`conf/common.yaml` or define the policy explicitly."
+        )
+    return SampleValidationConfig.model_validate(
+        OmegaConf.to_container(cfg.sample_validation, resolve=True)
+    )
+
+
+async def _process_trial(  # noqa: PLR0912, PLR0915
+    cfg: DictConfig,
+    nct_id: str,
+    sample_validation: SampleValidationConfig | None,
+) -> None:
     """Process a single trial to estimate treatment effects."""
 
     # Load the experiment configuration
@@ -355,6 +401,15 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
             exc_info=True,
         )
         return
+    _warn_on_stale_bounds(
+        experiment,
+        nct_id,
+        (
+            OmegaConf.to_container(cfg.get("outcome_bounds", {}) or {}, resolve=True)
+            or {}
+        ).get(nct_id, {}),
+    )
+
     # If the experiment has no _avg_potential_outcomes or it is an empty list, calculate them from the trial.
     # Note: we can remove this once all our experiment yamls are updated to include APOs.
     if (
@@ -390,6 +445,7 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
                 outcome=outcome,
                 save_path=cfg.save_path,
                 exp_name=cfg.experiment_name,
+                sample_validation=sample_validation,
             )
 
             pipeline_stages: list[PipelineStage] = []
@@ -528,6 +584,7 @@ async def _process_trial(cfg: DictConfig, nct_id: str) -> None:  # noqa: PLR0912
 
 async def _process_all_trials(cfg: DictConfig) -> None:
     """Process all trials in the specified split to estimate treatment effects."""
+    sample_validation = _load_sample_validation(cfg)
 
     if cfg.nct_id:
         nct_ids = [cfg.nct_id]
@@ -550,7 +607,7 @@ async def _process_all_trials(cfg: DictConfig) -> None:
         logger.info("Processing %s trials for '%s' split", len(nct_ids), cfg.split)
 
     for nct_id in nct_ids:
-        await _process_trial(cfg, nct_id)
+        await _process_trial(cfg, nct_id, sample_validation)
 
 
 # TODO: improve on relative path for config

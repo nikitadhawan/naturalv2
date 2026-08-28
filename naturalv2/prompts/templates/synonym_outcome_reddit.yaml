@@ -12,7 +12,7 @@ user_prompt_template: |-
 
   Clinical Trial Title: {{ trial_title }}
   Clinical Trial Outcome and Description:
-    {{ keyword }} : {{ outcome_desc }}
+    {{ keyword }}{% if outcome_desc %} : {{ outcome_desc }}{% endif %}
 
   Here are some guidelines to follow:
   - Include common synonyms, common misspellings, patient-friendly terms, or clinical abbreviations.

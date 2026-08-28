@@ -5,7 +5,7 @@ system_prompt: |-
 user_prompt_template: |-
   You will be given a patient report, some known covariate information about them, and some criteria that they are known to satisfy. Complete a comprehensive patient profile by analyzing the provided report, extracting information about a larger set of covariates, and applying logical inference to fill any missing information such that it continues to satisfiy the provided criteria. The following covariate information must be structured into a JSON object.
   {%- for covariate in covariates %}
-    {%- if covariate in covariate_desc %}
+    {%- if covariate_desc.get(covariate) %}
       - Covariate: '{{ covariate }}'
         Description: {{ covariate_desc[covariate] }}
     {%- else %}

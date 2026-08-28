@@ -11,5 +11,10 @@ conditions:
 train_ratio: 0.6
 save_path: ${oc.env:SAVE_PATH,./outputs}
 
+# Control whether excessive sampled-outcome rejection stops estimation.
+sample_validation:
+  high_rejection_rate: 0.10
+  allow_high_rejection_rate: false
+
 # Metadata
 date_time: ${now:%Y-%m-%d}_${now:%H-%M-%S}

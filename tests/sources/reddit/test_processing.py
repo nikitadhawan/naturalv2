@@ -141,6 +141,7 @@ def test_author_key_is_available_to_curation():
 
 # -- OP-reply attribution goes through author_key -----------------------------
 
+
 def _write_bucket_inputs(tmp_path):
     """Two threads: one whose OP account was deleted, one whose OP is active."""
     submissions = pl.DataFrame(

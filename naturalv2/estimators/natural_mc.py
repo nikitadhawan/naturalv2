@@ -112,14 +112,16 @@ class NaturalMC:
             all_ites = np.zeros((self._num_treat, len(observational_data)))
             all_weights = np.zeros_like(all_ites)
 
-            if self.estimator_type == "ipw":
-                outcomes = data.Y.to_numpy()
-                ipw_weights = model.get_weights(data).to_numpy()
-                for t in range(self._num_treat):
-                    t_mask = data.T.eq(t).to_numpy()
-                    all_ites[t, :] = outcomes * t_mask
-                    all_weights[t, :] = ipw_weights * t_mask
-            elif self.estimator_type == "oi":
+            if self.estimator_type == "ipw":  
+                assert isinstance(model, IPSW)  
+                outcomes = data.Y.to_numpy()  
+                ipw_weights = model.get_weights(data).to_numpy()  
+                for t in range(self._num_treat):  
+                    t_mask = data.T.eq(t).to_numpy()  
+                    all_ites[t, :] = outcomes * t_mask  
+                    all_weights[t, :] = ipw_weights * t_mask  
+            elif self.estimator_type == "oi":  
+                assert isinstance(model, OutcomeImputation)  
                 individual_outcomes = model.get_individual_treatment_effects(
                     data, treatment_values=list(range(self._num_treat))
                 )

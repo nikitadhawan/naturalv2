@@ -423,6 +423,7 @@ def _process_bucket(
         pl.col("id").alias("post_id"),
         pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
         pl.lit(bucket_id).alias("bucket"),
+        _author_key_expr(),
     )
     comments = pl.scan_parquet(
         comments_files,
@@ -441,16 +442,20 @@ def _process_bucket(
         pl.col("link_id").str.replace(r"^t3_", "").alias("post_id"),
         pl.col("created_utc").cast(pl.Int64).alias("timestamp"),
         pl.lit(bucket_id).alias("bucket"),
+        _author_key_expr(),
     )
 
-    # Find author replies
+    # Find author replies: comments on a post by the post's own author. Joining
+    # on the pseudonymous key (null for deleted/removed/missing authors) means a
+    # deleted OP can never match a deleted commenter -- nulls never join.
     author_replies = (
         comments.join(
-            submissions.select(["post_id", "author"]), on="post_id", how="inner"
+            submissions.select(["post_id", "author_key"]),
+            on=["post_id", "author_key"],
+            how="inner",
         )
         .filter(
-            (pl.col("author") == pl.col("author_right"))
-            & pl.col("body").is_not_null()
+            pl.col("body").is_not_null()
             & ~pl.col("body").is_in(["[deleted]", "[removed]"])
         )
         .select(["post_id", "body", "timestamp"])
@@ -465,7 +470,7 @@ def _process_bucket(
     ).select(
         [
             pl.col("id").alias("post_id"),
-            pl.col("author"),
+            pl.col("author_key"),
             pl.col("subreddit"),
             pl.col("title"),
             pl.col("score"),
@@ -511,7 +516,7 @@ def _process_bucket(
                 + pl.col("title").str.to_lowercase().str.replace_all(r"[^a-z0-9]+", "_")
                 + pl.lit("/")
             ).alias("permalink"),
-            _author_key_expr(),
+            pl.col("author_key"),
             pl.col("replies").fill_null([]).alias("author_replies"),
             pl.lit("submissions").alias("content_type"),
             pl.col("bucket"),
@@ -524,11 +529,11 @@ def _process_bucket(
     comments_context = (
         comments.join(submissions_enriched, on="post_id", how="left", suffix="_sub")
         .filter(
-            pl.col("author_sub").is_null()
-            | (
-                pl.col("author").str.to_lowercase()
-                != pl.col("author_sub").str.to_lowercase()
-            )
+            # Drop the OP's own comments (already folded into the submission);
+            # unkeyed authors are never treated as the OP.
+            pl.col("author_key").is_null()
+            | pl.col("author_key_sub").is_null()
+            | (pl.col("author_key") != pl.col("author_key_sub"))
         )
         .select(
             pl.col("subreddit"),
@@ -549,7 +554,7 @@ def _process_bucket(
                 + pl.lit("/_/")
                 + pl.col("id")
             ).alias("permalink"),
-            _author_key_expr(),
+            pl.col("author_key"),
             pl.lit([]).cast(pl.List(pl.String)).alias("author_replies"),
             pl.lit("comments").alias("content_type"),
             pl.col("bucket"),

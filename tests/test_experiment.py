@@ -139,6 +139,46 @@ def test_active_trial_outcome_falls_back_to_title_heuristic(tmp_path):
     assert exp.is_binary_outcome(exp.outcome_names[0])
 
 
+def test_change_from_baseline_basis_changes_reddit_prompt(tmp_path):
+    arms = [make_arm("Lithium", "EXPERIMENTAL")]
+    outcome_measure = make_outcome_measure(
+        "Fatigue Severity Scale",
+        "MEAN",
+        "score on a scale",
+        [("Lithium", -11.3, 24)],
+    )
+    outcome_measure.update(
+        {
+            "description": (
+                "7-item questionnaire assessing fatigue severity. Score range 1-49 "
+                "with higher values signifying worse outcome"
+            ),
+            "timeFrame": "Change from baseline to day 21",
+        }
+    )
+    exp = build_experiment(
+        tmp_path,
+        make_completed_trial("NCT05618587", arms, [outcome_measure]),
+        require_binary_endpoint=False,
+    )
+    outcome = exp.outcome_names[0]
+
+    assert exp.outcome_value_bases[outcome] == "change_from_baseline"
+    assert exp.avg_potential_outcomes == [-11.3]
+
+    messages = exp.build_prompt_for_report(
+        "sample_ty",
+        outcome,
+        "reddit",
+        "Lithium helped my fatigue a lot.",
+        covariate_answers={},
+    )
+    user_prompt = messages[-1]["content"]
+    assert "Value basis: change_from_baseline" in user_prompt
+    assert "A negative number means the outcome decreased" in user_prompt
+    assert "Do not return an absolute follow-up score" in user_prompt
+
+
 # -- APO / ATE ground-truth wiring --------------------------------------------
 
 

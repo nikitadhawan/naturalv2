@@ -65,6 +65,15 @@ logger = logging.getLogger(__name__)
 _NUM_THREADS_PER_WORKER = 2
 _WORKER_REGISTRY: dict[str, "_SubredditContext"] = {}
 
+_AUTHOR_REPORT_HEADER = (
+    "# Combined Reddit records from one pseudonymous author\n\n"
+    "All sections labeled **Author's own text** were written by this author. "
+    "Sections labeled **Context written by another Reddit user** were written "
+    "by someone else and must be used only as context."
+)
+_REPORT_SEPARATOR = "\n\n---\n\n"
+_SOURCE_FORMAT = "**Source**\nr/{}, {}, {}\n\n"
+
 
 @dataclass
 class _RegistryConfig:
@@ -224,8 +233,10 @@ class RedditCurateStage(SourceStage):
                     final_path
                 )
 
-            # Merge partial CSVs
-            self._consolidate_parquet_chunks(temp_dir, experiment.nct_id, final_path)
+            # Merge partial records into one row per keyed Reddit author.
+            total_counts[experiment.nct_id] = self._consolidate_parquet_chunks(
+                temp_dir, experiment.nct_id, final_path
+            )
 
             # Save updated experiment
             experiment.to_yaml(
@@ -297,22 +308,31 @@ class RedditCurateStage(SourceStage):
         )
 
     @staticmethod
-    def _consolidate_parquet_chunks(temp_root: str, nct_id: str, target_path: str):
-        """Merge all partial parquet files for an experiment."""
-        partials = glob.glob(os.path.join(temp_root, "*", f"{nct_id}_*.parquet"))
+    def _consolidate_parquet_chunks(
+        temp_root: str, nct_id: str, target_path: str
+    ) -> int:
+        """Merge partial files and return the author-level record count."""
+        partials = sorted(
+            glob.glob(os.path.join(temp_root, "*", f"{nct_id}_*.parquet"))
+        )
 
         if not partials:
-            return
+            return 0
 
-        os.makedirs(target_path, exist_ok=True)
+        records = pl.scan_parquet(partials).collect(engine="streaming")
+        author_reports = _aggregate_reports_by_author(records)
 
-        for src_path in partials:
-            filename = os.path.basename(src_path)
-            dest_path = os.path.join(target_path, filename)
-            try:
-                shutil.move(src_path, dest_path)
-            except Exception as exc:
-                logger.error("Failed to move %s to %s: %s", src_path, dest_path, exc)
+        staged_path = f"{target_path}.tmp-{uuid.uuid4().hex}"
+        os.makedirs(staged_path, exist_ok=False)
+        author_reports.write_parquet(
+            os.path.join(staged_path, f"{nct_id}.parquet"), compression="lz4"
+        )
+
+        if os.path.exists(target_path):
+            shutil.rmtree(target_path)
+        shutil.move(staged_path, target_path)
+
+        return len(author_reports)
 
     @staticmethod
     def _get_experiment_save_path(
@@ -797,8 +817,8 @@ def _build_report_expr(available_cols: list[str]) -> pl.Expr:
     -------
     pl.Expr
         Polars expression that generates markdown-formatted report text.
-        For submissions, includes: subreddit, title, date, post content.
-        For comments, includes: subreddit, initial post, date, comment content.
+        For submissions, labels the title and post as the author's own text.
+        For comments, distinguishes the author's comment from thread context.
 
     Raises
     ------
@@ -824,27 +844,25 @@ def _build_report_expr(available_cols: list[str]) -> pl.Expr:
 
     # Submission format
     fmt_submission = pl.format(
-        "**Subreddit**\nThis post was found on the subreddit r/{}.\n\n"
-        "**Title**\nThis post was titled: {}\n\n"
-        "**Date created**\nThis post was created on {}.\n\n"
-        "**Post**\n{}",
+        _SOURCE_FORMAT + "**Author's own text**\nTitle: {}\n\nPost content:\n{}",
         safe_col("subreddit"),
-        safe_col("title"),
         date_expr,
+        safe_col("permalink"),
+        safe_col("title"),
         safe_col("report_text"),
     )
 
     # Comment format
     fmt_comment = pl.format(
-        "**Subreddit**\nThis comment was found on the subreddit r/{}.\n\n"
-        "**Initial Post**\nThis comment was in response to the following post:\n"
-        "Title: {}\nPost content: {}\n\n"
-        "**Date created**\nThis comment was created on {}.\n\n"
-        "**Comment**\n{}",
+        _SOURCE_FORMAT
+        + "**Context written by another Reddit user**\nOriginal post title: {}\n\n"
+        "Original post content:\n{}\n\n"
+        "**Author's own text**\nComment:\n{}",
         safe_col("subreddit"),
+        date_expr,
+        safe_col("permalink"),
         safe_col("title"),
         safe_col("initial_post"),
-        date_expr,
         safe_col("report_text"),
     )
 
@@ -854,6 +872,61 @@ def _build_report_expr(available_cols: list[str]) -> pl.Expr:
         .when(pl.col("report_type") == "comment")
         .then(fmt_comment)
         .otherwise(pl.lit(""))
+    )
+
+
+def _aggregate_reports_by_author(data: pl.DataFrame) -> pl.DataFrame:
+    """Combine curated Reddit records into one report per known author."""
+    missing = {"author_key", "date_created", "permalink", "report", "subreddit"} - set(
+        data.columns
+    )
+    if missing:
+        missing = ", ".join(sorted(missing))
+        raise ValueError(f"Missing columns required for author aggregation: {missing}")
+    if data.is_empty():
+        return data
+
+    original_columns = data.columns
+    temporary_columns = ["_row", "_dt", "_record", "_author", "_section"]
+    rows = _parse_date_column(data.with_row_index("_row"), "date_created")
+    rows = (
+        rows.with_columns(
+            pl.when(pl.col("permalink").fill_null("").str.len_chars() > 0)
+            .then(pl.col("permalink"))
+            .otherwise(pl.format("row:{}", pl.col("_row")))
+            .alias("_record")
+        )
+        .sort(["_dt", "permalink", "_row"], nulls_last=True)
+        .unique("_record", maintain_order=True)
+        .with_columns(
+            pl.when(pl.col("author_key").is_not_null())
+            .then(pl.col("author_key"))
+            .otherwise(pl.format("unkeyed:{}", pl.col("_row")))
+            .alias("_author")
+        )
+        .sort(["_author", "_dt", "permalink", "_row"], nulls_last=True)
+        .with_columns(
+            pl.format(
+                "## Authored record {}\n\n{}",
+                pl.col("_author").cum_count().over("_author"),
+                pl.col("report"),
+            ).alias("_section")
+        )
+    )
+    aggregated = rows.group_by("_author", maintain_order=True).agg(
+        pl.exclude(["report", *temporary_columns]).first(),
+        pl.col("_section").str.join(_REPORT_SEPARATOR).alias("report"),
+        pl.len().cast(pl.UInt32).alias("source_record_count"),
+    )
+    return (
+        aggregated.with_columns(
+            pl.when(pl.col("author_key").is_not_null())
+            .then(pl.lit(_AUTHOR_REPORT_HEADER) + "\n\n" + pl.col("report"))
+            .otherwise(pl.col("report"))
+            .alias("report")
+        )
+        .drop("_author")
+        .select(original_columns + ["source_record_count"])
     )
 
 

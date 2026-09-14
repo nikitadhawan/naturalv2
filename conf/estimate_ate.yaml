@@ -45,6 +45,21 @@ pipeline:
     sample_ty:  # Use this for NATURAL-MC in place of conditional_extraction
       _target_: naturalv2.pipeline.sample_extraction.SampleTYStage
       model_cfg: ${sample_model}
+      # Optional inclusive bounds for sampled continuous outcomes, per trial and
+      # outcome, on the basis the trial reports (a change score spans +/- the
+      # instrument's width). Sampled values outside are dropped. On command line:
+      #   '+pipeline.stages.sample_ty.outcome_bounds.NCT06366724={Functional Capacity: [-55, 55]}'
+      # or here:
+      #   outcome_bounds:
+      #     NCT06366724:
+      #       Functional Capacity: [-55, 55]
+      outcome_bounds: null
+      # Optional expected basis of sampled continuous outcomes ("absolute" or
+      # "change_from_baseline"), keyed the same way; samples the model reports on
+      # another basis are dropped. Without it, mixed bases throw a warning.
+      # E.g.
+      #   '+pipeline.stages.sample_ty.outcome_basis.NCT06366724={Functional Capacity: change_from_baseline}'
+      outcome_basis: null
       max_concurrent_workers: ${coalesce:sample_model.max_parallel_requests, sample_model.client_kwargs.default_max_parallel_requests, default_max_concurrent_workers}
     treatment_ownership:
       _target_: naturalv2.pipeline.ownership.TreatmentOwnershipGateStage

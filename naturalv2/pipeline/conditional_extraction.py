@@ -15,7 +15,10 @@ from scipy.special import softmax
 from tqdm import tqdm
 
 from naturalv2.models.lm import VLLMModel
-from naturalv2.pipeline.constants import INCLUSION_COL_NAME, TREATMENT_COL_NAME
+from naturalv2.pipeline.constants import (
+    INCLUSION_COL_NAME,
+    TREATMENT_COL_NAME,
+)
 from naturalv2.pipeline.natural import PipelineContext, PipelineStage
 from naturalv2.pipeline.utils import _create_progress_bar, _csv_writer
 from naturalv2.utils import get_alphabet_labels, get_answer_dicts, get_save_path
@@ -333,7 +336,7 @@ async def extract_conditionals(  # noqa: PLR0912
         experiment.nct_id,
         exp_name,
         model_name,
-        extract_type.value,
+        extract_type.value,  # Legacy cache key, before outcome-basis metadata.
         outcome,
     )
     if os.path.exists(file_path):

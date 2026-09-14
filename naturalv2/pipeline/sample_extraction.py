@@ -812,7 +812,7 @@ async def extract_covariates(  # noqa: PLR0912
         pipeline_context.experiment.nct_id,
         pipeline_context.exp_name,
         model_name,
-        extract_type.value,
+        extract_type.value,  # Legacy cache key, before outcome-basis metadata.
         pipeline_context.outcome,
     )
 

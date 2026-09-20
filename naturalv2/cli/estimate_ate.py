@@ -58,7 +58,10 @@ logger = logging.getLogger(__name__)
 
 
 def _weight_by_inclusion(
-    responses: np.ndarray, inclusion_probs: pd.DataFrame, use_weights=True
+    responses: np.ndarray,
+    inclusion_probs: pd.DataFrame,
+    use_weights=True,
+    response_weights: np.ndarray | None = None,
 ) -> np.ndarray:
     """Weight individual treatment responses by inclusion probabilities.
 
@@ -71,6 +74,9 @@ def _weight_by_inclusion(
         DataFrame containing inclusion probabilities for each datapoint.
         It should have a column named 'inclusion_probs' with stringified lists
         of probabilities for each datapoint.
+    response_weights : np.ndarray | None, optional
+        Per-unit estimator weights with the same shape as ``responses`` (e.g. the
+        zero-padded inverse propensity weights returned by ``NaturalMC``).
 
     Returns
     -------
@@ -93,7 +99,10 @@ def _weight_by_inclusion(
         probs = inclusion_probs.apply(
             lambda row: literal_eval(row["inclusion_probs"])[1], axis=1
         ).to_numpy()
-    return np.average(responses, axis=1, weights=probs)
+    weights = probs if response_weights is None else probs * response_weights
+    # A treatment with no units has zero total weight and gives a NaN.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (responses * weights).sum(axis=-1) / weights.sum(axis=-1)
 
 
 def _stratified_bootstrap_sample(
@@ -176,13 +185,13 @@ def _calculate_treatment_responses(
                 outcome,
             )
 
-    if isinstance(estimator, NaturalMC):
-        all_responses = estimator.get_individual_treatment_effects(extractions, outcome)
-    else:
-        all_responses = estimator.get_individual_treatment_effects(extractions)
-
+    all_responses, response_weights = (
+        estimator.get_individual_treatment_effects(extractions, outcome)
+        if isinstance(estimator, NaturalMC)
+        else (estimator.get_individual_treatment_effects(extractions), None)
+    )
     weighted_responses = _weight_by_inclusion(
-        all_responses, extractions, use_inclusion_weights
+        all_responses, extractions, use_inclusion_weights, response_weights
     )  # len: num_treatments
 
     bootstrap_weighted_responses = np.zeros(
@@ -201,15 +210,13 @@ def _calculate_treatment_responses(
                 axis="index",
             )
 
-        if isinstance(estimator, NaturalMC):
-            all_responses = estimator.get_individual_treatment_effects(
-                bootstrap_data, outcome
-            )
-        else:
-            all_responses = estimator.get_individual_treatment_effects(bootstrap_data)
-
+        all_responses, response_weights = (
+            estimator.get_individual_treatment_effects(bootstrap_data, outcome)
+            if isinstance(estimator, NaturalMC)
+            else (estimator.get_individual_treatment_effects(bootstrap_data), None)
+        )
         bootstrap_weighted_responses[b, :] = _weight_by_inclusion(
-            all_responses, bootstrap_data, use_inclusion_weights
+            all_responses, bootstrap_data, use_inclusion_weights, response_weights
         )  # len: num_treatments
 
     for i, treatment in enumerate(experiment.treatment_names):

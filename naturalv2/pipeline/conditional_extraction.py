@@ -336,7 +336,7 @@ async def extract_conditionals(  # noqa: PLR0912
         experiment.nct_id,
         exp_name,
         model_name,
-        extract_type.value,  # Legacy cache key, before outcome-basis metadata.
+        extract_type.value,
         outcome,
     )
     if os.path.exists(file_path):

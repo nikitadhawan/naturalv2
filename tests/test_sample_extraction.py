@@ -279,3 +279,17 @@ def test_outcome_basis_must_be_a_known_value():
     )
     assert stage.outcome_basis == {"NCT1": {"Score": "absolute"}}
     assert stage.outcome_basis.get("NCT2", {}).get("Score") is None
+
+
+@pytest.mark.parametrize("dtype", ["object", "string"])
+def test_configured_basis_rejects_missing_row_labels(dtype):
+    data = make_sampled([30.0, -3.0, 2.0, 4.0])
+    data.index = [11, 22, 33, 44]
+    data[OUTCOME_BASIS_COL_NAME] = pd.Series(
+        [None, "change_from_baseline", "absolute", pd.NA],
+        index=data.index,
+        dtype=dtype,
+    )
+    result = filter_sampled_outcomes(data, outcome_basis="change_from_baseline")
+    assert result.index.tolist() == [22]
+    assert result[OUTCOME_COL_NAME].tolist() == [-3.0]

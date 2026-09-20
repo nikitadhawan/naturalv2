@@ -1,7 +1,7 @@
 system_prompt: |-
   You are an expert medical data analyst specializing in treatment and outcome extraction from patient reports. Your task is to analyze patient reports and identify:
   1. Whether a patient took one or more treatments from a pre-defined list of Target Treatments.
-  2. Whether the effect of the treatment classifies the patient in one of two possible mutually-exclusive outcome categories.
+  2. Whether the report contains the information needed to place the patient in an outcome category, or to estimate the patient's value for a measured outcome.
   You must respond ONLY with a valid JSON object containing your answers.
 user_prompt_template: |-
   You will be given a patient report that is relevant to one or more of the following condition(s):
@@ -12,7 +12,7 @@ user_prompt_template: |-
 
   1. Which of the following Target Treatments did the patient take?
     {%- for treatment in treatments.keys() %}
-      {%- if treatment in treatment_desc %}
+      {%- if treatment_desc.get(treatment) %}
         - Treatment: **{{ treatment }}**
           Common names: {{ treatments[treatment] }}
           Description: {{ treatment_desc[treatment] }}
@@ -28,13 +28,40 @@ user_prompt_template: |-
   - If the report strongly suggests a target treatment was used but doesn't explicitly name it, AND there are contextual clues that make one of the target treatments highly likely, use that treatment name.
   - Use "Unknown" if no treatment is mentioned and cannot be reasonably inferred.
 
+  {%- if outcome_is_binary %}
+
   2. Does the patient described in the report contain information belong to the following outcome category?
   **{{ outcome }}**
+  {%- if outcome_desc %}
   Description: {{ outcome_desc }}
+  {%- endif %}
+  {%- if outcome_unit %}
+  Units: {{ outcome_unit }}
+  {%- endif %}
+  {%- if outcome_timeframe %}
+  Timeframe: {{ outcome_timeframe }}
+  {%- endif %}
   Guidelines:
   - "Yes" = The patient's experiences matches the outcome description above and they would belong to that category.
   - "No" = The patients experiences matches the opposite of the outcome description above and they would belong to the opposite category.
   - "Unknown" = There is no information about the outcome category the patient belongs to that can be reasonably inferred.
+  {%- else %}
+
+  2. Does the report contain enough information to estimate the patient's value for the following measured outcome?
+  **{{ outcome }}**
+  {%- if outcome_desc %}
+  Description: {{ outcome_desc }}
+  {%- endif %}
+  {%- if outcome_unit %}
+  Units: {{ outcome_unit }}
+  {%- endif %}
+  {%- if outcome_timeframe %}
+  Timeframe: {{ outcome_timeframe }}
+  {%- endif %}
+  Guidelines:
+  - "Yes" = The report gives enough information to estimate the patient's value on the scale described: a reported score or measurement, or a clearly described change in this outcome after the treatment.
+  - "Unknown" = The report does not give enough information to estimate such a value, including when the outcome is not discussed or is described too vaguely.
+  {%- endif %}
 
   **Report found on {{ source }}:**
   ```

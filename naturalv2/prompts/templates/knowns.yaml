@@ -10,7 +10,7 @@ user_prompt_template: |-
 
   1. For each of the following covariates, extract the patient's covariate values from the report below and structure them into a JSON object.
   {%- for covariate in covariates %}
-    {%- if covariate in covariate_desc %}
+    {%- if covariate_desc.get(covariate) %}
       - Covariate: '{{ covariate }}'
         Description: {{ covariate_desc[covariate] }}
     {%- else %}

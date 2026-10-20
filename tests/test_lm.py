@@ -145,6 +145,36 @@ def test_vllmmodel_invoke_and_parse():
 
 
 @patch("naturalv2.models.lm.VLLMModel.__init__", return_value=None)
+def test_vllm_parse_response_keeps_output_and_prompt_logprobs_separate(mock_init):
+    model = VLLMModel.__new__(VLLMModel)
+    model.model_id = "vllm-model"
+
+    mock_output = MagicMock(
+        text="ok",
+        token_ids=[7, 8],
+        finish_reason="stop",
+        logprobs=[{7: MagicMock(logprob=-0.1)}, {8: MagicMock(logprob=-0.2)}],
+    )
+    mock_response = MagicMock(
+        request_id="req-1",
+        prompt_token_ids=[1, 2, 3],
+        outputs=[mock_output],
+        prompt_logprobs=[
+            None,
+            {2: MagicMock(logprob=-1.0)},
+            {3: MagicMock(logprob=-2.0)},
+        ],
+    )
+
+    resp = model._parse_response([mock_response])
+
+    assert resp.logprobs.tokens == [7, 8]
+    assert resp.logprobs.logprobs == [-0.1, -0.2]
+    assert resp.prompt_logprobs.tokens == [2, 3]
+    assert resp.prompt_logprobs.logprobs == [-1.0, -2.0]
+
+
+@patch("naturalv2.models.lm.VLLMModel.__init__", return_value=None)
 def test_vllm_raises_notimplemented_for_ainvoke(mock_init):
     model = VLLMModel.__new__(VLLMModel)
     with pytest.raises(NotImplementedError):

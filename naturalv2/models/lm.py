@@ -406,17 +406,17 @@ class VLLMModel(Model):
             # Get prompt logprobs
             prompt_logprobs = output.prompt_logprobs
             if prompt_logprobs is not None:
-                logprobs = []
-                token_ids = []
+                prompt_lps = []
+                prompt_token_ids = []
                 for item in prompt_logprobs:
                     if item is None:
                         continue
 
                     token_id, logprob = _parse_vllm_logprob_dict(item)
-                    token_ids.append(token_id)
-                    logprobs.append(logprob)
+                    prompt_token_ids.append(token_id)
+                    prompt_lps.append(logprob)
 
-                prompt_logprobs = LogProbs(logprobs=logprobs, tokens=token_ids)
+                prompt_logprobs = LogProbs(logprobs=prompt_lps, tokens=prompt_token_ids)
 
             # Get token usage
             prompt_tokens = (
